@@ -398,25 +398,73 @@ function tackSideFromWind(cog,wd){
   return r>180?"S":"P";
 }
 
-/** Tack / gybe: COG change >55° over ~8 pts before vs ~12 after, min speed 1 kn.
- *  Relative to wd (wind FROM): COG in “upwind” semicircle (within 90° of wind axis) both before & after → tack;
- *  both in downwind semicircle → gybe; mixed → large turn (>130°) → gybe else tack.
- *  crossing: tack side before → after (P→S = port tack to starboard tack). */
+/** Circular mean COG (0–360). */
+function meanCogDeg(degs){
+  if(!degs||!degs.length)return null;
+  let sx=0,sy=0;
+  for(const c of degs){
+    const r=Number(c)*D;
+    sx+=Math.sin(r);sy+=Math.cos(r);
+  }
+  const L=Math.hypot(sx,sy);
+  if(L<1e-9)return Number(degs[0])%360;
+  return((Math.atan2(sx,sy)/D)+360)%360;
+}
+function lowerBoundTime(pts,target){
+  let lo=0,hi=pts.length;
+  while(lo<hi){const mid=(lo+hi)>>1;if(pts[mid].time<target)lo=mid+1;else hi=mid;}
+  return lo;
+}
+/** Mean COG over [tLo,tHi] (seconds) using points with SOG ≥ minKt kn. */
+function meanCogInTimeRange(pts,tLo,tHi,minKt){
+  let k=lowerBoundTime(pts,tLo);
+  const cogs=[];
+  for(;k<pts.length&&pts[k].time<=tHi;k++){
+    if(minKt<=0||ms2k(pts[k].ss||0)>=minKt)cogs.push(pts[k].cog);
+  }
+  if(!cogs.length)return null;
+  return meanCogDeg(cogs);
+}
+function fwdRel(cog,refDeg){
+  return((Number(cog)-Number(refDeg)+360)%360);
+}
+
+/** Tack / gybe once wind FROM (wd) is known.
+ *  Port→starboard tack: mean COG over ~4s at start of a 10–20s window lies in (wd+30°)–(wd+60°),
+ *  mean COG over ~4s at end lies in (wd−60°)–(wd−30°) i.e. 300°–330° relative to wd. S→P tack is the mirror.
+ *  Gybe: same ±30–60° pattern relative to downwind (wd+180°), both ends sailing downwind (wind-relative 90°–270°).
+ *  First matching window length W (10…20s, shortest first) wins; 14s cooldown between events. */
 function detectMans(pts,wd){
-  const res=[];let i=15;
-  while(i<pts.length-15){
-    if(ms2k(pts[i].ss||0)<1.0){i++;continue}
-    const bef=pts[i-8].cog,aft=pts[Math.min(i+12,pts.length-1)].cog;
-    const ch=Math.abs(adiff(bef,aft));
-    if(ch>55){
-      const rb=((bef-wd+360)%360),ra=((aft-wd+360)%360);
-      const bU=rb<90||rb>270,aU=ra<90||ra>270;
-      let tp;if(bU&&aU)tp="tack";else if(!bU&&!aU)tp="gybe";else tp=ch>130?"gybe":"tack";
-      const sB=tackSideFromWind(bef,wd),sA=tackSideFromWind(aft,wd);
-      const crossing=`${sB}→${sA}`;
-      res.push({type:tp,idx:i,time:pts[i].time,cogB:bef,cogA:aft,ch,crossing,sideBef:sB,sideAft:sA});
-      i+=18;
-    }else i++;
+  const wdN=Number(wd)%360;
+  const dRef=(wdN+180)%360;
+  const res=[];
+  const minKt=1.0;
+  let coolT=-Infinity;
+  for(let i=0;i<pts.length;i++){
+    if(pts[i].time<coolT)continue;
+    if(ms2k(pts[i].ss||0)<minKt)continue;
+    const te=pts[i].time;
+    let hit=null;
+    for(let W=10;W<=20&&!hit;W++){
+      const ts=te-W;
+      const cog0=meanCogInTimeRange(pts,ts,ts+4,minKt);
+      const cog1=meanCogInTimeRange(pts,te-4,te,minKt);
+      if(cog0==null||cog1==null)continue;
+      const f0=fwdRel(cog0,wdN),f1=fwdRel(cog1,wdN);
+      let type,crossing;
+      if(f0>=30&&f0<=60&&f1>=300&&f1<=330){type="tack";crossing="P→S";}
+      else if(f0>=300&&f0<=330&&f1>=30&&f1<=60){type="tack";crossing="S→P";}
+      else{
+        const g0=fwdRel(cog0,dRef),g1=fwdRel(cog1,dRef);
+        const down=f0>90&&f0<270&&f1>90&&f1<270;
+        if(down&&g0>=30&&g0<=60&&g1>=300&&g1<=330){type="gybe";crossing="P→S";}
+        else if(down&&g0>=300&&g0<=330&&g1>=30&&g1<=60){type="gybe";crossing="S→P";}
+        else continue;
+      }
+      const sB=tackSideFromWind(cog0,wdN),sA=tackSideFromWind(cog1,wdN);
+      hit={type,idx:i,time:te,cogB:cog0,cogA:cog1,ch:Math.abs(adiff(cog0,cog1)),crossing,sideBef:sB,sideAft:sA,winSec:W};
+    }
+    if(hit){res.push(hit);coolT=te+14;}
   }
   return res;
 }
@@ -597,17 +645,26 @@ function manBarFill(q,crossing,isGybe){
   if(hi)return C.stbd;if(mid)return"#7dffc0";return"#b0ffd8";
 }
 
+/** Mean COG change (°) for manoeuvre list; null if empty. */
+function avgManAngle(arr){
+  if(!arr||!arr.length)return null;
+  return Math.round(arr.reduce((s,m)=>s+Number(m.ch||0),0)/arr.length);
+}
+
 function ManCard({m,index}){
   const qc=m.q>=70?C.acc:m.q>=45?C.gld:C.wrn;
   const cx=m.crossing;
   const cxSt=cx==="P→S"?{bg:`${C.port}22`,fg:C.port,br:C.port}:cx==="S→P"?{bg:`${C.stbd}22`,fg:C.stbd,br:C.stbd}:{bg:`${C.txM}18`,fg:C.txM,br:C.txD};
+  const angNm=m.type==="tack"?"Tack angle":"Gybe angle";
+  const ang=Math.round(Number(m.ch)||0);
   return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
     <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}18`,color:qc,fontWeight:800,fontSize:15,fontFamily:"'JetBrains Mono',monospace"}}>{m.q}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:12,fontWeight:600,color:C.txt,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-        <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}<span style={{color:C.txM,fontWeight:400,marginLeft:6}}>{Math.round(m.ch)}°</span></span>
+        <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}</span>
         {cx&&<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",padding:"2px 8px",borderRadius:6,background:cxSt.bg,color:cxSt.fg,border:`1px solid ${cxSt.br}55`}}>{cx}</span>}
       </div>
+      <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
       <div style={{fontSize:10,color:C.txM,marginTop:2}}>{m.preS.toFixed(1)}→{m.minS.toFixed(1)}kts · {m.rt}s recov · VMG {m.preV.toFixed(1)}→{m.postV.toFixed(1)}</div>
     </div>
     <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
@@ -1363,10 +1420,34 @@ function App(){
 
         {/* MANOEUVRES */}
         {tab==="manoeuvres"&&<>
-          <div style={{display:"flex",gap:6,marginBottom:14}}>
+          <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
             <Stat label="Avg Tack" color={C.tack} value={a.tacks.length?Math.round(a.tacks.reduce((s,t)=>s+t.q,0)/a.tacks.length):"—"} unit="/100"/>
             <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="/100"/>
           </div>
+          {(()=>{
+            const tPS=a.tacks.filter(t=>t.crossing==="P→S"),tSP=a.tacks.filter(t=>t.crossing==="S→P");
+            const gPS=a.gybes.filter(g=>g.crossing==="P→S"),gSP=a.gybes.filter(g=>g.crossing==="S→P");
+            const cell=(label,val,col)=>(
+              <div key={label} style={{background:`${col}10`,border:`1px solid ${col}44`,borderRadius:8,padding:"8px 10px",minWidth:0}}>
+                <div style={{fontSize:9,color:C.txM,textTransform:"uppercase",letterSpacing:0.6,marginBottom:3}}>{label}</div>
+                <div style={{fontSize:18,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:col}}>{val==null?"—":`${val}°`}</div>
+              </div>
+            );
+            return(
+              <div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Average turn angle (COG change)</div>
+                <div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.45}}>Mean heading change across the detection window. P→S = port tack → starboard tack; S→P = starboard → port.</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(108px, 1fr))",gap:8}}>
+                  {cell("All tacks",avgManAngle(a.tacks),C.tack)}
+                  {cell("Tacks P→S",avgManAngle(tPS),C.port)}
+                  {cell("Tacks S→P",avgManAngle(tSP),C.stbd)}
+                  {cell("All gybes",avgManAngle(a.gybes),C.gybe)}
+                  {cell("Gybes P→S",avgManAngle(gPS),"#b06eff")}
+                  {cell("Gybes S→P",avgManAngle(gSP),"#5ad4ea")}
+                </div>
+              </div>
+            );
+          })()}
 
           {a.tacks.length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Tack quality</div>
@@ -1375,11 +1456,11 @@ function App(){
               <span style={{color:C.stbd,fontWeight:700}}>■</span> S→P (starboard → port)
             </div>
             <ResponsiveContainer width="100%" height={110}>
-              <BarChart data={a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,crossing:t.crossing||"—"}))}>
+              <BarChart data={a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,crossing:t.crossing||"—",ch:Math.round(Number(t.ch)||0)}))}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
                 <YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing}`:lab;}}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing} · tack angle ${p.ch}°`:lab;}}/>
                 <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.tacks.map((t,i)=><Cell key={`tk${i}`} fill={manBarFill(t.q,t.crossing,false)}/>)}</Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -1391,11 +1472,11 @@ function App(){
               <span style={{color:C.gybe,fontWeight:700}}>■</span> S→P
             </div>
             <ResponsiveContainer width="100%" height={110}>
-              <BarChart data={a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,crossing:g.crossing||"—"}))}>
+              <BarChart data={a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,crossing:g.crossing||"—",ch:Math.round(Number(g.ch)||0)}))}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
                 <YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing}`:lab;}}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing} · gybe angle ${p.ch}°`:lab;}}/>
                 <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.gybes.map((g,i)=><Cell key={`gy${i}`} fill={manBarFill(g.q,g.crossing,true)}/>)}</Bar>
               </BarChart>
             </ResponsiveContainer>
