@@ -42,7 +42,8 @@ const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,
    Settings → API if /rest/v1/ requests fail with the publishable key.
    ═══════════════════════════════════════════════════════════════════ */
 const CONFIG = {
-  MAPBOX_TOKEN: "pk.eyJ1Ijoia2llcm9uaG9sdCIsImEiOiJjbW8zaWUwYjkwN2dpMnFxcHhxa2ZtaGN6In0.yZosdzxt0izLqRo4GdUTng",
+  /* Mapbox: https://account.mapbox.com/access-tokens/ — use Default Public Token or create one with Styles:Read (and Downloads:Read for fonts). If you see 401, the token is invalid or URL restrictions block this origin (e.g. add https://YOURUSER.github.io). */
+  MAPBOX_TOKEN: "YOUR_MAPBOX_TOKEN",
   STRAVA_CLIENT_ID: "226748",
   WORKER_URL: "https://sailstats-auth.kieronholt.workers.dev",
   SUPABASE_URL: "https://kqabecigvwvlnuyvpokc.supabase.co",
@@ -115,6 +116,17 @@ const ms2k=s=>s*1.94384,m2nm=m=>m/1852;
 function fT(s){if(s<0)s=0;const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.floor(s%60);return h>0?`${h}:${String(m).padStart(2,"0")}:${String(c).padStart(2,"0")}`:`${m}:${String(c).padStart(2,"0")}`}
 function sm(arr,w=5){return arr.map((_,i)=>{const s=Math.max(0,i-Math.floor(w/2)),e=Math.min(arr.length,i+Math.ceil(w/2));const sl=arr.slice(s,e);return sl.reduce((a,b)=>a+b,0)/sl.length})}
 
+/** Course row: string name or [name, "P"|"S"] from Course Selector */
+function parseMarkSpec(row){
+  if(Array.isArray(row)&&row.length)return{name:String(row[0]),tack:row[1]==="P"||row[1]==="S"?row[1]:null};
+  if(typeof row==="string"&&row)return{name:row,tack:null};
+  return{name:"",tack:null};
+}
+function formatCourseRow(row){
+  const r=parseMarkSpec(row);
+  return r.tack?`${r.name} (${r.tack})`:r.name;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    WSC MARK DATABASE — GPS March 2026 (same as WSC Course Selector app)
    ═══════════════════════════════════════════════════════════════════ */
@@ -145,33 +157,33 @@ const WSC_MARKS={
 };
 
 /* ═══════════════════════════════════════════════════════════════════
-   WSC COURSE DATABASE — 2026/27 letters (WSC Course Selector)
-   marks = one lap rounding sequence; marksPreamble = once before lap 1 (MC/LC)
+   WSC COURSE DATABASE — 2026/27 (WSC Course Selector)
+   marks / marksPreamble: [markName, "P"|"S"] = port / starboard rounding
    ═══════════════════════════════════════════════════════════════════ */
 const WSC_COURSES={
-  "A":{name:"A — SC",marks:["BUOY 11","PILE 6","PILE 10"],type:"SC"},
-  "B":{name:"B — SC",marks:["PILE 2","PILE 3","PILE 10"],type:"SC"},
-  "C":{name:"C — SC",marks:["BUOY 11","PILE 1","PILE 2"],type:"SC"},
-  "D":{name:"D — SC (HW)",marks:["PILE 2","WARSASH SC","PILE 10"],type:"SC"},
-  "E":{name:"E — SC (HW)",marks:["PILE 10","WARSASH SC","PILE 2"],type:"SC"},
-  "F":{name:"F — SC",marks:["PILE 2","LAID MK A","HAMBLE PT","PILE 5"],type:"SC"},
-  "G":{name:"G — SC",marks:["PILE 5","HAMBLE PT","LAID MK A","PILE 2"],type:"SC"},
-  "H":{name:"H — SC (HW)",marks:["PILE 10","WARSASH SC","HAMBLE PT"],type:"SC"},
-  "I":{name:"I — SC (HW)",marks:["HAMBLE PT","WARSASH SC","PILE 10"],type:"SC"},
-  "J":{name:"J — SC",marks:["PILE 3","BALD HEAD","HAMBLE PT"],type:"SC"},
-  "K":{name:"K — SC",marks:["HAMBLE PT","BALD HEAD","PILE 3"],type:"SC"},
-  "M":{name:"M — SC (avoid LW)",marks:["LAID MK B","HAMBLE PT","LAID MK B","HAMBLE PT","PILE 2"],marksPreamble:["PILE 3"],type:"SC"},
-  "N":{name:"N — SC",marks:["PILE 5","HAMBLE PT","WARSASH SC","PILE 2"],type:"SC"},
-  "P":{name:"P — SC",marks:["PILE 2","WARSASH SC","HAMBLE PT","PILE 5"],type:"SC"},
-  "Q":{name:"Q — SC (HW)",marks:["LAID MK C","WARSASH SC","PILE 2"],marksPreamble:["PILE 2"],type:"SC"},
-  "R":{name:"R — MC (HW)",marks:["PILE 2","WARSASH SC","PILE 10"],type:"MC"},
-  "S":{name:"S — MC",marks:["WILLIAM","LAID MK D"],marksPreamble:["HAMBLE PT"],type:"MC"},
-  "T":{name:"T — MC",marks:["BALD HEAD","CORONATION","WILLIAM"],marksPreamble:["HAMBLE PT"],type:"MC"},
-  "U":{name:"U — MC",marks:["WILLIAM","CORONATION","HAMBLE PT"],marksPreamble:["HAMBLE PT"],type:"MC"},
-  "V":{name:"V — LC",marks:["CHIEFTAIN TR","FUMESY"],marksPreamble:["HAMBLE PT"],type:"LC"},
-  "W":{name:"W — LC",marks:["WILLIAM","CHIEFTAIN TR","FUMESY"],marksPreamble:["HAMBLE PT"],type:"LC"},
-  "X":{name:"X — LC",marks:["FUMESY","CHIEFTAIN TR","WILLIAM"],marksPreamble:["HAMBLE PT"],type:"LC"},
-  "Y":{name:"Y — LC",marks:["WILLIAM","CORONATION","CHIEFTAIN TR","FUMESY","BALD HEAD"],marksPreamble:["HAMBLE PT"],type:"LC"},
+  "A":{name:"A — SC",marks:[["BUOY 11","S"],["PILE 6","S"],["PILE 10","S"]],type:"SC"},
+  "B":{name:"B — SC",marks:[["PILE 2","P"],["PILE 3","P"],["PILE 10","P"]],type:"SC"},
+  "C":{name:"C — SC",marks:[["BUOY 11","S"],["PILE 1","S"],["PILE 2","S"]],type:"SC"},
+  "D":{name:"D — SC (HW)",marks:[["PILE 2","S"],["WARSASH SC","S"],["PILE 10","S"]],type:"SC"},
+  "E":{name:"E — SC (HW)",marks:[["PILE 10","P"],["WARSASH SC","P"],["PILE 2","P"]],type:"SC"},
+  "F":{name:"F — SC",marks:[["PILE 2","S"],["LAID MK A","P"],["HAMBLE PT","P"],["PILE 5","P"]],type:"SC"},
+  "G":{name:"G — SC",marks:[["PILE 5","S"],["HAMBLE PT","S"],["LAID MK A","S"],["PILE 2","P"]],type:"SC"},
+  "H":{name:"H — SC (HW)",marks:[["PILE 10","P"],["WARSASH SC","P"],["HAMBLE PT","P"]],type:"SC"},
+  "I":{name:"I — SC (HW)",marks:[["HAMBLE PT","S"],["WARSASH SC","S"],["PILE 10","S"]],type:"SC"},
+  "J":{name:"J — SC",marks:[["PILE 3","S"],["BALD HEAD","S"],["HAMBLE PT","S"]],type:"SC"},
+  "K":{name:"K — SC",marks:[["HAMBLE PT","P"],["BALD HEAD","P"],["PILE 3","P"]],type:"SC"},
+  "M":{name:"M — SC (avoid LW)",marks:[["LAID MK B","S"],["HAMBLE PT","S"],["LAID MK B","S"],["HAMBLE PT","S"],["PILE 2","S"]],marksPreamble:[["PILE 3","P"]],type:"SC"},
+  "N":{name:"N — SC",marks:[["PILE 5","S"],["HAMBLE PT","S"],["WARSASH SC","S"],["PILE 2","P"]],type:"SC"},
+  "P":{name:"P — SC",marks:[["PILE 2","S"],["WARSASH SC","P"],["HAMBLE PT","P"],["PILE 5","P"]],type:"SC"},
+  "Q":{name:"Q — SC (HW)",marks:[["LAID MK C","P"],["WARSASH SC","P"],["PILE 2","P"]],marksPreamble:[["PILE 2","S"]],type:"SC"},
+  "R":{name:"R — MC (HW)",marks:[["PILE 2","S"],["WARSASH SC","S"],["PILE 10","S"]],type:"MC"},
+  "S":{name:"S — MC",marks:[["WILLIAM","S"],["LAID MK D","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
+  "T":{name:"T — MC",marks:[["BALD HEAD","P"],["CORONATION","P"],["WILLIAM","P"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
+  "U":{name:"U — MC",marks:[["WILLIAM","S"],["CORONATION","S"],["HAMBLE PT","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
+  "V":{name:"V — LC",marks:[["CHIEFTAIN TR","S"],["FUMESY","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
+  "W":{name:"W — LC",marks:[["WILLIAM","S"],["CHIEFTAIN TR","S"],["FUMESY","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
+  "X":{name:"X — LC",marks:[["FUMESY","P"],["CHIEFTAIN TR","P"],["WILLIAM","P"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
+  "Y":{name:"Y — LC",marks:[["WILLIAM","S"],["CORONATION","P"],["CHIEFTAIN TR","S"],["FUMESY","S"],["BALD HEAD","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
   "CUSTOM":{name:"Custom (no marks)",marks:[],type:"custom"},
 };
 
@@ -595,12 +607,17 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
 
     Object.entries(marks).forEach(([name,mk])=>{
       const el=document.createElement("div");
-      el.style.cssText=`width:28px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;cursor:${mk.fixed?"default":"grab"};border:2px solid ${mk.fixed?C.blu:C.gld};background:${mk.fixed?"#111d33dd":"#111d33dd"};color:${mk.fixed?C.blu:C.gld};`;
-      el.textContent=name.substring(0,3);
+      let border,fg,bg;
+      if(mk.roundTack==="P"){border=C.port;fg="#fff";bg=`${C.port}38`;}
+      else if(mk.roundTack==="S"){border=C.stbd;fg="#061018";bg=`${C.stbd}45`;}
+      else{border=mk.fixed?C.blu:C.gld;fg=mk.fixed?C.blu:C.gld;bg="#111d33dd";}
+      el.style.cssText=`width:28px;height:28px;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;font-size:8px;font-weight:700;font-family:'JetBrains Mono',monospace;cursor:${mk.fixed?"default":"grab"};border:2px solid ${border};background:${bg};color:${fg};`;
+      const ab=document.createElement("span");ab.style.fontSize="9px";ab.textContent=name.substring(0,3);el.appendChild(ab);
+      if(mk.roundTack){const tb=document.createElement("span");tb.style.fontSize="7px";tb.style.opacity="0.95";tb.textContent=mk.roundTack;el.appendChild(tb);}
 
       const marker=new mapboxgl.Marker({element:el,draggable:!mk.fixed})
         .setLngLat([mk.lon,mk.lat])
-        .setPopup(new mapboxgl.Popup({offset:12}).setHTML(`<strong>${name}</strong>${mk.fixed?"":" (drag to adjust)"}${mk.desc?`<br/><span style="color:#8899b0">${mk.desc}</span>`:""}`))
+        .setPopup(new mapboxgl.Popup({offset:12}).setHTML(`<strong>${name}</strong>${mk.roundTack?` <span style="color:#8899b0">(${mk.roundTack==="P"?"Port":"Stbd"})</span>`:""}${mk.fixed?"":" (drag to adjust)"}${mk.desc?`<br/><span style="color:#8899b0">${mk.desc}</span>`:""}`))
         .addTo(map);
 
       if(!mk.fixed){
@@ -752,7 +769,10 @@ function App(){
   const effectiveMarks=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return{};
     const course=WSC_COURSES[courseLetter];
-    const uniqueNames=[...new Set([...(course.marks||[]),...(course.marksPreamble||[])])];
+    const rowsInOrder=[...(course.marksPreamble||[]),...(course.marks||[])].map(parseMarkSpec).filter(r=>r.name);
+    const tackFirst={};
+    rowsInOrder.forEach(r=>{ if(!Object.prototype.hasOwnProperty.call(tackFirst,r.name)) tackFirst[r.name]=r.tack; });
+    const uniqueNames=[...new Set(rowsInOrder.map(r=>r.name))];
     const marks={};
     uniqueNames.forEach(name=>{
       const base=WSC_MARKS[name];
@@ -764,17 +784,19 @@ function App(){
         fixed:base.fixed,
         desc:base.desc||"",
         name,
+        roundTack:tackFirst[name]||null,
       };
     });
     return marks;
   },[courseLetter,markOverrides]);
 
-  // Per-lap mark sequence (coordinates); preamble handled separately
+  // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return[];
-    return WSC_COURSES[courseLetter].marks.map(name=>{
+    return (WSC_COURSES[courseLetter].marks||[]).map(row=>{
+      const {name,tack}=parseMarkSpec(row);
       const m=effectiveMarks[name];
-      return m?{name,lat:m.lat,lon:m.lon}:null;
+      return m?{name,lat:m.lat,lon:m.lon,tack}:null;
     }).filter(Boolean);
   },[courseLetter,effectiveMarks]);
 
@@ -782,9 +804,10 @@ function App(){
     if(!courseLetter||!WSC_COURSES[courseLetter])return null;
     const pre=WSC_COURSES[courseLetter].marksPreamble;
     if(!pre||!pre.length)return null;
-    const arr=pre.map(name=>{
+    const arr=pre.map(row=>{
+      const {name,tack}=parseMarkSpec(row);
       const m=effectiveMarks[name];
-      return m?{name,lat:m.lat,lon:m.lon}:null;
+      return m?{name,lat:m.lat,lon:m.lon,tack}:null;
     }).filter(Boolean);
     return arr.length?arr:null;
   },[courseLetter,effectiveMarks]);
@@ -793,6 +816,8 @@ function App(){
     if(!courseLetter||!WSC_COURSES[courseLetter])return[];
     return expandCourseMarks(coursePreambleSeq,courseMarkSeq,laps);
   },[courseLetter,coursePreambleSeq,courseMarkSeq,laps]);
+
+  const markOrderLap1=useMemo(()=>expandCourseMarks(coursePreambleSeq,courseMarkSeq,1),[coursePreambleSeq,courseMarkSeq]);
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
@@ -940,25 +965,42 @@ function App(){
           />
         </div>
 
-        {/* Mark legend */}
+        {/* Mark legend — port (P) red, starboard (S) green */}
         {courseLetter&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Course Marks</div>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Rounding order (lap 1)</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5,alignItems:"center",marginBottom:10}}>
+            {markOrderLap1.length===0&&<span style={{fontSize:11,color:C.txM}}>—</span>}
+            {markOrderLap1.map((pt,i)=>{
+              const st=pt.tack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:pt.tack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${C.blu}14`,br:C.blu,fg:C.txM};
+              return(<span key={`${pt.name}-${i}-${pt.lap}`} style={{display:"inline-flex",alignItems:"center",gap:4}}>
+                {i>0&&<span style={{color:C.txD,fontSize:11}}>→</span>}
+                <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}55`,color:st.fg,fontSize:11,fontWeight:600}}>
+                  {pt.name}<span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,opacity:0.95}}>{pt.tack||"—"}</span>
+                </span>
+              </span>);
+            })}
+            {laps>1&&<span style={{fontSize:10,color:C.txM,marginLeft:4}}>· then lap ×{laps}</span>}
+          </div>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Marks on map</div>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {Object.entries(effectiveMarks).map(([name,mk])=>(
-              <div key={name} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:`${mk.fixed?C.blu:C.gld}15`,border:`1px solid ${mk.fixed?C.blu:C.gld}33`}}>
-                <div style={{width:6,height:6,borderRadius:3,background:mk.fixed?C.blu:C.gld}}/>
-                <span style={{fontSize:11,color:mk.fixed?C.blu:C.gld,fontWeight:600}}>{name}</span>
+            {Object.entries(effectiveMarks).map(([name,mk])=>{
+              const st=mk.roundTack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:mk.roundTack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${mk.fixed?C.blu:C.gld}15`,br:mk.fixed?C.blu:C.gld,fg:mk.fixed?C.blu:C.gld};
+              return(
+              <div key={name} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}44`}}>
+                <div style={{width:6,height:6,borderRadius:3,background:st.br}}/>
+                <span style={{fontSize:11,color:st.fg,fontWeight:600}}>{name}</span>
+                {mk.roundTack&&<span style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:st.fg}}>{mk.roundTack}</span>}
                 {!mk.fixed&&<span style={{fontSize:9,color:C.txD}}>drag</span>}
-              </div>
-            ))}
+              </div>);
+            })}
           </div>
           {WSC_COURSES[courseLetter]&&(()=>{
             const c=WSC_COURSES[courseLetter];
-            const p=(c.marksPreamble||[]).join(" → ");
-            const m=(c.marks||[]).join(" → ");
-            const seq=p?`${p} → ${m}`:m;
+            const pre=(c.marksPreamble||[]).map(formatCourseRow).join(" → ");
+            const body=(c.marks||[]).map(formatCourseRow).join(" → ");
+            const seq=pre?`${pre} → ${body}`:body;
             return(<div style={{fontSize:11,color:C.txM,marginTop:8}}>
-              Sequence: {seq||"—"}{laps>1?` · lap ×${laps}`:""}
+              Full sequence: {seq||"—"}{laps>1?` · lap ×${laps}`:""}
             </div>);
           })()}
         </div>}
