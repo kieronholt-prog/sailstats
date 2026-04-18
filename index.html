@@ -149,6 +149,9 @@ function parseHMS(str){
   return n[0];
 }
 
+/** Step for Track crop − / + buttons (seconds). */
+const CROP_TIME_STEP_SEC=5;
+
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
 function parseMarkSpec(row){
   if(Array.isArray(row)&&row.length)return{name:String(row[0]),tack:row[1]==="P"||row[1]==="S"?row[1]:null};
@@ -737,6 +740,23 @@ function App(){
     return{durSec:s[s.length-1].time-s[0].time,n:s.length};
   },[croppedPoints]);
 
+  /** Max duration (seconds) from current start to end of recording. */
+  const cropDurMaxSec=useMemo(()=>{
+    if(!trackMeta)return 0;
+    return Math.max(0,trackMeta.spanSec-cropStartSecParsed);
+  },[trackMeta,cropStartSecParsed]);
+
+  /** Effective duration for − / +: empty field = full remaining (to end). */
+  const cropDurStepSec=useMemo(()=>{
+    const maxD=cropDurMaxSec;
+    if(maxD<=0)return 0;
+    const t=cropDurationText.trim();
+    if(t==="")return maxD;
+    const p=parseHMS(t);
+    if(p==null||p<=0)return maxD;
+    return Math.max(1,Math.min(maxD,p));
+  },[cropDurationText,cropDurMaxSec]);
+
   useEffect(()=>{
     setCropStartText("00:00:00");
     if(!rawPoints||rawPoints.length<2){
@@ -1025,34 +1045,68 @@ function App(){
             {croppedMeta&&<span> · Cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
           </div>
           <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{flex:1,minWidth:140}}>
+            <div style={{flex:1,minWidth:200}}>
               <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Start after first point (HH:MM:SS)</label>
-              <input type="text" inputMode="numeric" placeholder="00:00:00" value={cropStartText}
-                onChange={e=>setCropStartText(e.target.value)}
-                onBlur={()=>{
-                  const p=parseHMS(cropStartText);
-                  if(p==null)setCropStartText("00:00:00");
-                  else setCropStartText(formatHMS(Math.min(p,trackMeta.spanSec)));
-                }}
-                style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+              <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
+                <button type="button" aria-label="Decrease start offset"
+                  disabled={cropStartSecParsed<=0}
+                  onClick={()=>{
+                    const n=Math.max(0,cropStartSecParsed-CROP_TIME_STEP_SEC);
+                    setCropStartText(formatHMS(n));
+                  }}
+                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropStartSecParsed<=0?C.txD:C.txt,flexShrink:0,cursor:cropStartSecParsed<=0?"not-allowed":"pointer",opacity:cropStartSecParsed<=0?0.45:1}}>−</button>
+                <input type="text" inputMode="numeric" placeholder="00:00:00" value={cropStartText}
+                  onChange={e=>setCropStartText(e.target.value)}
+                  onBlur={()=>{
+                    const p=parseHMS(cropStartText);
+                    if(p==null)setCropStartText("00:00:00");
+                    else setCropStartText(formatHMS(Math.min(p,trackMeta.spanSec)));
+                  }}
+                  style={{flex:1,minWidth:0,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+                <button type="button" aria-label="Increase start offset"
+                  disabled={cropStartSecParsed>=trackMeta.spanSec}
+                  onClick={()=>{
+                    const n=Math.min(trackMeta.spanSec,cropStartSecParsed+CROP_TIME_STEP_SEC);
+                    setCropStartText(formatHMS(n));
+                  }}
+                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropStartSecParsed>=trackMeta.spanSec?C.txD:C.txt,flexShrink:0,cursor:cropStartSecParsed>=trackMeta.spanSec?"not-allowed":"pointer",opacity:cropStartSecParsed>=trackMeta.spanSec?0.45:1}}>+</button>
+              </div>
             </div>
-            <div style={{flex:1,minWidth:140}}>
+            <div style={{flex:1,minWidth:200}}>
               <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Duration (HH:MM:SS)</label>
-              <input type="text" inputMode="numeric" placeholder="empty = to end"
-                value={cropDurationText}
-                onChange={e=>setCropDurationText(e.target.value)}
-                onBlur={()=>{
-                  const t=cropDurationText.trim();
-                  if(t==="")return;
-                  const p=parseHMS(t);
-                  if(p==null||p<=0)setCropDurationText("");
-                  else setCropDurationText(formatHMS(p));
-                }}
-                style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+              <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
+                <button type="button" aria-label="Decrease duration"
+                  disabled={cropDurMaxSec<=0||cropDurStepSec<=1}
+                  onClick={()=>{
+                    if(cropDurMaxSec<=0)return;
+                    const n=Math.max(1,cropDurStepSec-CROP_TIME_STEP_SEC);
+                    setCropDurationText(formatHMS(n));
+                  }}
+                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropDurMaxSec<=0||cropDurStepSec<=1?C.txD:C.txt,flexShrink:0,cursor:cropDurMaxSec<=0||cropDurStepSec<=1?"not-allowed":"pointer",opacity:cropDurMaxSec<=0||cropDurStepSec<=1?0.45:1}}>−</button>
+                <input type="text" inputMode="numeric" placeholder="empty = to end"
+                  value={cropDurationText}
+                  onChange={e=>setCropDurationText(e.target.value)}
+                  onBlur={()=>{
+                    const t=cropDurationText.trim();
+                    if(t==="")return;
+                    const p=parseHMS(t);
+                    if(p==null||p<=0)setCropDurationText("");
+                    else setCropDurationText(formatHMS(p));
+                  }}
+                  style={{flex:1,minWidth:0,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+                <button type="button" aria-label="Increase duration"
+                  disabled={cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec}
+                  onClick={()=>{
+                    if(cropDurMaxSec<=0)return;
+                    const n=Math.min(cropDurMaxSec,cropDurStepSec+CROP_TIME_STEP_SEC);
+                    setCropDurationText(formatHMS(n));
+                  }}
+                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?C.txD:C.txt,flexShrink:0,cursor:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?"not-allowed":"pointer",opacity:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?0.45:1}}>+</button>
+              </div>
             </div>
             <button type="button" onClick={()=>{setCropStartText("00:00:00");setCropDurationText(formatHMS(trackMeta.spanSec));}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
           </div>
-          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). Leave duration empty to run to the end of the file.</div>
+          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). <strong style={{color:C.txM}}>− / +</strong> step by {CROP_TIME_STEP_SEC}s. Leave duration empty to run to the end of the file.</div>
         </div>}
 
         {/* Course & Laps selector */}
