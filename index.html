@@ -116,6 +116,20 @@ const ms2k=s=>s*1.94384,m2nm=m=>m/1852;
 function fT(s){if(s<0)s=0;const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.floor(s%60);return h>0?`${h}:${String(m).padStart(2,"0")}:${String(c).padStart(2,"0")}`:`${m}:${String(c).padStart(2,"0")}`}
 function sm(arr,w=5){return arr.map((_,i)=>{const s=Math.max(0,i-Math.floor(w/2)),e=Math.min(arr.length,i+Math.ceil(w/2));const sl=arr.slice(s,e);return sl.reduce((a,b)=>a+b,0)/sl.length})}
 
+/** Trim track: startOffsetSec after first point; durationSec null/0 = to last point. */
+function cropTrackPoints(pts,startOffsetSec,durationSec){
+  if(!pts||pts.length<2)return pts;
+  const s=[...pts].sort((a,b)=>a.time-b.time);
+  const t0=s[0].time,t1=s[s.length-1].time;
+  const span=Math.max(0,t1-t0);
+  const off=Math.max(0,Math.min(Number(startOffsetSec)||0,span));
+  const start=t0+off;
+  const dur=durationSec==null||durationSec===""||Number(durationSec)<=0?null:Number(durationSec);
+  const end=dur==null?t1:Math.min(start+dur,t1);
+  if(end<=start)return s.slice(0,Math.min(25,s.length));
+  return s.filter(p=>p.time>=start&&p.time<=end);
+}
+
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
 function parseMarkSpec(row){
   if(Array.isArray(row)&&row.length)return{name:String(row[0]),tack:row[1]==="P"||row[1]==="S"?row[1]:null};
@@ -667,7 +681,32 @@ function App(){
   const [markOverrides,setMarkOverrides]=useState({});
   const [actId,setActId]=useState(null);
   const [actDate,setActDate]=useState(null);
+  const [cropStartOffset,setCropStartOffset]=useState(0);
+  const [cropDuration,setCropDuration]=useState(null);
   const fileRef=useRef(null);
+
+  const trackMeta=useMemo(()=>{
+    if(!rawPoints||rawPoints.length<2)return null;
+    const s=[...rawPoints].sort((a,b)=>a.time-b.time);
+    const t0=s[0].time,t1=s[s.length-1].time;
+    return{t0,t1,spanSec:t1-t0,n:s.length};
+  },[rawPoints]);
+
+  const croppedPoints=useMemo(()=>{
+    if(!rawPoints||rawPoints.length<2)return rawPoints;
+    return cropTrackPoints(rawPoints,cropStartOffset,cropDuration);
+  },[rawPoints,cropStartOffset,cropDuration]);
+
+  const croppedMeta=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<2)return null;
+    const s=[...croppedPoints].sort((a,b)=>a.time-b.time);
+    return{durSec:s[s.length-1].time-s[0].time,n:s.length};
+  },[croppedPoints]);
+
+  useEffect(()=>{
+    setCropStartOffset(0);
+    setCropDuration(null);
+  },[rawPoints]);
 
   // OAuth callback
   useEffect(() => {
@@ -821,10 +860,10 @@ function App(){
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
-    if(!rawPoints)return;
+    if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
     setAnalysis(result);
     if(result&&windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
@@ -835,17 +874,17 @@ function App(){
       } catch (e) { console.warn("Save failed:", e); }
     }
     setProcessing(false);
-  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,sAth,actId,actName,actDate,courseLetter,markOverrides]);
+  },[rawPoints,croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,sAth,actId,actName,actDate,courseLetter,markOverrides]);
 
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
-    if(!analysis||!rawPoints)return analysis;
+    if(!analysis||!croppedPoints)return analysis;
     if(windOvr!==null&&windOvr!==analysis.windDir){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq);
+      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
     }
     return analysis;
-  },[analysis,windOvr,rawPoints,courseMarkSeq,coursePreambleSeq,laps]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps]);
 
   const effWind=windOvr!==null?windOvr:(curAnalysis?.windDir||0);
 
@@ -938,6 +977,32 @@ function App(){
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
         <div style={{fontSize:18,fontWeight:700,marginBottom:16}}>Course Setup</div>
 
+        {/* Track crop — times relative to first GPS point in this activity */}
+        {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop</div>
+          <div style={{fontSize:12,color:C.txM,marginBottom:10,lineHeight:1.5}}>
+            Full recording: <strong style={{color:C.txt}}>{fT(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
+            {croppedMeta&&<span> · Cropped: <strong style={{color:C.acc}}>{fT(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
+          </div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div style={{flex:1,minWidth:120}}>
+              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Start after first point (s)</label>
+              <input type="number" min={0} max={Math.ceil(trackMeta.spanSec)} step={1} value={cropStartOffset}
+                onChange={e=>{const v=Math.max(0,Math.min(Number(e.target.value)||0,trackMeta.spanSec));setCropStartOffset(v);}}
+                style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </div>
+            <div style={{flex:1,minWidth:120}}>
+              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Duration (s)</label>
+              <input type="number" min={0} step={1} placeholder="to end"
+                value={cropDuration==null?"":cropDuration}
+                onChange={e=>{const t=e.target.value.trim();if(t==="")setCropDuration(null);else{const v=Math.max(0,Number(t)||0);setCropDuration(v);}}}
+                style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </div>
+            <button type="button" onClick={()=>{setCropStartOffset(0);setCropDuration(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
+          </div>
+          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Leave duration empty to keep everything from the start offset to the end of the file. Analysis and the map use the cropped track.</div>
+        </div>}
+
         {/* Course & Laps selector */}
         <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
           <div style={{flex:2,minWidth:180}}>
@@ -959,7 +1024,7 @@ function App(){
         <div style={{height:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <CourseMap
             marks={Object.keys(effectiveMarks).length>0?effectiveMarks:null}
-            trackPoints={rawPoints}
+            trackPoints={croppedPoints}
             courseMarks={courseMapLine}
             onMarkDrag={onMarkDrag}
           />
