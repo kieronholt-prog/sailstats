@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<title>SailStats — Sailing Performance Analysis</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%}
+body{background:#0a1628;color:#e8edf5;font-family:'Outfit',system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+input[type=range]{accent-color:#00d4aa}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:3px}
+button{font-family:inherit;cursor:pointer}a{color:inherit}
+.mapboxgl-popup-content{background:#111d33!important;color:#e8edf5!important;border:1px solid #1e3a5f!important;border-radius:8px!important;padding:8px 12px!important;font-family:'Outfit',sans-serif!important;font-size:12px!important}
+.mapboxgl-popup-tip{border-top-color:#111d33!important}
+.mapboxgl-ctrl-attrib{font-size:9px!important;opacity:0.5}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+
+<script type="text/babel">
+const {useState,useEffect,useCallback,useMemo,useRef}=React;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+
+/* ═══════════════════════════════════════════════════════════════════
+   CONFIG
+   ═══════════════════════════════════════════════════════════════════ */
+const CONFIG = {
+  MAPBOX_TOKEN: "pk.eyJ1Ijoia2llcm9uaG9sdCIsImEiOiJjbW8zaWUwYjkwN2dpMnFxcHhxa2ZtaGN6In0.yZosdzxt0izLqRo4GdUTng",
+  STRAVA_CLIENT_ID: "226748",
+  WORKER_URL: "https://sailstats-auth.kieronholt.workers.dev",
+  SUPABASE_URL: "https://kqabecigvwvlnuyvpokc.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_Vwrc03E--KoLL5vujZJXvg_nW6ZRyhN",
+};
+const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
+
+const supabase = {
+  headers() {
+    return {
+      "apikey": CONFIG.SUPABASE_ANON_KEY,
+      "Authorization": `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": "return=representation",
+    };
+  },
+  async select(table, query = "") {
+    const r = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${query}`, { headers: this.headers() });
+    return r.json();
+  },
+  async upsert(table, data) {
+    const r = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { ...this.headers(), "Prefer": "return=representation,resolution=merge-duplicates" },
+      body: JSON.stringify(data),
+    });
+    return r.json();
+  },
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   COLOURS
+   ═══════════════════════════════════════════════════════════════════ */
+const C={
+  bg:"#0a1628",card:"#111d33",cardH:"#162440",
+  bdr:"#1e3a5f",bdrL:"#2a4a6f",
+  txt:"#e8edf5",txM:"#8899b0",txD:"#556b85",
+  acc:"#00d4aa",accD:"#00a080",
+  wrn:"#ff6b4a",wrnD:"#cc4433",
+  blu:"#4a9eff",bluD:"#2a6ecc",
+  gld:"#ffb84a",
+  port:"#ff4a6a",stbd:"#4aff8a",
+  up:"#4a9eff",dn:"#ffb84a",
+  tack:"#ff6b4a",gybe:"#4adfff",
+  trk:"#00d4aa",course:"#ffb84a",
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   GEO / MATH
+   ═══════════════════════════════════════════════════════════════════ */
+const RE=6371000,D=Math.PI/180;
+function hav(a1,o1,a2,o2){const dl=(a2-a1)*D,do2=(o2-o1)*D;const a=Math.sin(dl/2)**2+Math.cos(a1*D)*Math.cos(a2*D)*Math.sin(do2/2)**2;return 2*RE*Math.asin(Math.sqrt(a))}
+function bear(a1,o1,a2,o2){const dl=(o2-o1)*D;return((Math.atan2(Math.sin(dl)*Math.cos(a2*D),Math.cos(a1*D)*Math.sin(a2*D)-Math.sin(a1*D)*Math.cos(a2*D)*Math.cos(dl))/D)+360)%360}
+function adiff(a,b){return((b-a+540)%360)-180}
+const ms2k=s=>s*1.94384,m2nm=m=>m/1852;
+function fT(s){if(s<0)s=0;const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.floor(s%60);return h>0?`${h}:${String(m).padStart(2,"0")}:${String(c).padStart(2,"0")}`:`${m}:${String(c).padStart(2,"0")}`}
+function sm(arr,w=5){return arr.map((_,i)=>{const s=Math.max(0,i-Math.floor(w/2)),e=Math.min(arr.length,i+Math.ceil(w/2));const sl=arr.slice(s,e);return sl.reduce((a,b)=>a+b,0)/sl.length})}
+
+/* ═══════════════════════════════════════════════════════════════════
+   WSC MARK DATABASE
+   ═══════════════════════════════════════════════════════════════════ */
+const WSC_MARKS={
+  // Fixed racing marks around the Solent/Southampton Water
+  "Hamble":{lat:50.8521,lon:-1.3089,fixed:true},
+  "Castle":{lat:50.8469,lon:-1.3064,fixed:true},
+  "Coronation":{lat:50.8445,lon:-1.2988,fixed:true},
+  "BP":{lat:50.8398,lon:-1.3039,fixed:true},
+  "Reach":{lat:50.8367,lon:-1.2945,fixed:true},
+  "Esso":{lat:50.8509,lon:-1.2874,fixed:true},
+  "NE Netley":{lat:50.8620,lon:-1.3510,fixed:true},
+  "Calshot":{lat:50.8107,lon:-1.3015,fixed:true},
+  "Hill Head":{lat:50.8140,lon:-1.2440,fixed:true},
+  "Hook":{lat:50.8240,lon:-1.2350,fixed:true},
+  "N Sturbridge":{lat:50.8340,lon:-1.2698,fixed:true},
+  "S Sturbridge":{lat:50.8290,lon:-1.2710,fixed:true},
+  "Browndown":{lat:50.8050,lon:-1.2240,fixed:true},
+  "DZ":{lat:50.7990,lon:-1.2590,fixed:true},
+  "Jordan":{lat:50.8560,lon:-1.3180,fixed:true},
+  // Laid marks — positions are approximate defaults, user adjusts
+  "W":{lat:50.8350,lon:-1.2900,fixed:false,desc:"Windward laid mark"},
+  "L":{lat:50.8450,lon:-1.3050,fixed:false,desc:"Leeward laid mark"},
+  "G1":{lat:50.8430,lon:-1.3020,fixed:false,desc:"Gate mark 1"},
+  "G2":{lat:50.8430,lon:-1.3060,fixed:false,desc:"Gate mark 2"},
+  "X":{lat:50.8400,lon:-1.2960,fixed:false,desc:"Laid mark X"},
+  "Y":{lat:50.8380,lon:-1.3020,fixed:false,desc:"Laid mark Y"},
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   WSC COURSE DATABASE
+   Course letter -> ordered array of mark names per lap
+   Start and Finish are implicit (committee boat area)
+   ═══════════════════════════════════════════════════════════════════ */
+const WSC_COURSES={
+  "A":{name:"A — Triangle Sausage",marks:["Castle","Coronation","BP","Castle","BP"],type:"triangle-sausage"},
+  "B":{name:"B — Windward Leeward",marks:["W","L","W","L"],type:"windward-leeward"},
+  "C":{name:"C — Olympic Triangle",marks:["Castle","Reach","BP","Castle"],type:"triangle"},
+  "D":{name:"D — Solent Long",marks:["Castle","N Sturbridge","Hook","Hill Head","Coronation","BP"],type:"distance"},
+  "E":{name:"E — Harbour",marks:["Hamble","Jordan","NE Netley","Hamble"],type:"harbour"},
+  "F":{name:"F — Short Windward Leeward",marks:["W","G1","W","G1"],type:"windward-leeward"},
+  "G":{name:"G — Gate Course",marks:["W","G1","G2","W","G1","G2"],type:"gate"},
+  "H":{name:"H — Esso Triangle",marks:["Esso","Coronation","Castle","Esso"],type:"triangle"},
+  "T":{name:"T — Training Triangle",marks:["Castle","Coronation","BP"],type:"triangle"},
+  "W":{name:"W — Windward Mark Only",marks:["W"],type:"windward"},
+  "CUSTOM":{name:"Custom Course",marks:[],type:"custom"},
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   FILE PARSERS
+   ═══════════════════════════════════════════════════════════════════ */
+function parseGPX(text){
+  const doc=new DOMParser().parseFromString(text,"text/xml");
+  const pts=[];
+  doc.querySelectorAll("trkpt").forEach(pt=>{
+    const lat=parseFloat(pt.getAttribute("lat")),lon=parseFloat(pt.getAttribute("lon"));
+    const tEl=pt.querySelector("time");
+    if(!tEl||isNaN(lat)||isNaN(lon))return;
+    pts.push({lat,lon,time:new Date(tEl.textContent).getTime()/1000});
+  });
+  return pts;
+}
+
+function parseFIT(buf){
+  const view=new DataView(buf),pts=[];
+  const SEMI=180/Math.pow(2,31);
+  const headerSize=view.getUint8(0);
+  let offset=headerSize;
+  const dataSize=view.getUint32(4,true);
+  const endOff=headerSize+dataSize;
+  const defs={};
+  try{
+    while(offset<endOff-1){
+      const rh=view.getUint8(offset);offset++;
+      if(rh&0x80){const def=defs[rh&0x03];if(def)offset+=def.size;continue;}
+      const isDef=(rh&0x40)!==0,lt=rh&0x0F;
+      if(isDef){
+        offset++;const arch=view.getUint8(offset);offset++;
+        const gm=arch?view.getUint16(offset):view.getUint16(offset,true);offset+=2;
+        const nf=view.getUint8(offset);offset++;let ts=0;const flds=[];
+        for(let f=0;f<nf;f++){const fn=view.getUint8(offset);offset++;const fs=view.getUint8(offset);offset++;const bt=view.getUint8(offset);offset++;flds.push({n:fn,s:fs,b:bt});ts+=fs;}
+        if(rh&0x20){const nd=view.getUint8(offset);offset++;for(let f=0;f<nd;f++){const fs2=view.getUint8(offset+1);flds.push({n:-1,s:fs2,b:0,d:true});ts+=fs2;offset+=3;}}
+        defs[lt]={gm,flds,size:ts,arch};
+      }else{
+        const def=defs[lt];if(!def)break;
+        if(def.gm===0){
+          let lat=null,lon=null,ts=null;let fo=offset;
+          for(const f of def.flds){
+            if(f.d){fo+=f.s;continue;}
+            try{
+              if(f.n===0&&f.s===4){const v=def.arch?view.getInt32(fo):view.getInt32(fo,true);if(v!==0x7FFFFFFF)lat=v*SEMI;}
+              else if(f.n===1&&f.s===4){const v=def.arch?view.getInt32(fo):view.getInt32(fo,true);if(v!==0x7FFFFFFF)lon=v*SEMI;}
+              else if(f.n===253&&f.s===4){const v=def.arch?view.getUint32(fo):view.getUint32(fo,true);if(v!==0xFFFFFFFF)ts=v+631065600;}
+            }catch(e){}
+            fo+=f.s;
+          }
+          if(lat!==null&&lon!==null&&ts!==null&&Math.abs(lat)<90&&Math.abs(lon)<180)pts.push({lat,lon,time:ts});
+        }
+        offset+=def.size;
+      }
+    }
+  }catch(e){console.warn("FIT parse:",e)}
+  return pts;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   STRAVA API
+   ═══════════════════════════════════════════════════════════════════ */
+function stravaAuthURL(){return`https://www.strava.com/oauth/authorize?client_id=${CONFIG.STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(STRAVA_REDIRECT)}&response_type=code&scope=activity:read_all&approval_prompt=auto`}
+
+async function exchangeToken(code) {
+  const r = await fetch(`${CONFIG.WORKER_URL}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, grant_type: "authorization_code" }),
+  });
+  return r.json();
+}
+
+async function refreshToken(refreshTok) {
+  const r = await fetch(`${CONFIG.WORKER_URL}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshTok, grant_type: "refresh_token" }),
+  });
+  return r.json();
+}
+
+async function saveUser(athlete, tokens) {
+  return supabase.upsert("users", {
+    strava_id: athlete.id,
+    firstname: athlete.firstname,
+    lastname: athlete.lastname,
+    profile_pic: athlete.profile_medium || athlete.profile,
+    access_token: tokens.access_token,
+    refresh_token: tokens.refresh_token,
+    token_expires: tokens.expires_at,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+async function loadUser(stravaId) {
+  const rows = await supabase.select("users", `strava_id=eq.${stravaId}&limit=1`);
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
+async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
+  return supabase.upsert("analyses", {
+    strava_id: stravaId,
+    activity_id: String(activityId),
+    activity_name: activityName,
+    activity_date: activityDate,
+    course_letter: courseSetup.courseLetter || null,
+    laps: courseSetup.laps || 1,
+    wind_direction: results.windDir,
+    mark_overrides: courseSetup.markOverrides || {},
+    stats: results.stats,
+    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt })),
+    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt })),
+    leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
+    updated_at: new Date().toISOString(),
+  });
+}
+
+async function loadAnalyses(stravaId) {
+  return supabase.select("analyses", `strava_id=eq.${stravaId}&order=activity_date.desc&limit=50`);
+}
+
+async function fetchActs(tok,page=1){
+  const r=await fetch(`https://www.strava.com/api/v3/athlete/activities?per_page=30&page=${page}`,{headers:{Authorization:`Bearer ${tok}`}});
+  return r.json();
+}
+
+async function fetchStreams(tok,id){
+  const r=await fetch(`https://www.strava.com/api/v3/activities/${id}/streams?keys=time,latlng,velocity_smooth,heartrate,altitude&key_by_type=true`,{headers:{Authorization:`Bearer ${tok}`}});
+  return r.json();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANALYSIS ENGINE
+   ═══════════════════════════════════════════════════════════════════ */
+function enrich(pts){
+  return pts.map((p,i)=>{
+    if(i===0)return{...p,sog:0,cog:0,dist:0};
+    const pr=pts[i-1],dt=p.time-pr.time;
+    if(dt<=0||dt>30)return{...p,sog:0,cog:0,dist:0};
+    const d=hav(pr.lat,pr.lon,p.lat,p.lon),b=bear(pr.lat,pr.lon,p.lat,p.lon);
+    return{...p,sog:d/dt,cog:b,dist:d,dt};
+  });
+}
+
+function estWind(pts){
+  const bins=new Array(36).fill(0);let cnt=0;
+  for(let i=10;i<pts.length-10;i++){
+    const s=ms2k(pts[i].ss||0);if(s<1.5||s>12)continue;
+    bins[Math.floor(pts[i].cog/10)%36]++;cnt++;
+  }
+  if(cnt<20)return{dir:0,conf:0};
+  const peaks=[];
+  for(let i=0;i<36;i++){if(bins[i]>bins[(i+35)%36]&&bins[i]>bins[(i+1)%36]&&bins[i]>cnt*0.04)peaks.push({a:i*10+5,c:bins[i]})}
+  peaks.sort((a,b)=>b.c-a.c);
+  if(peaks.length>=2){
+    const d=Math.abs(adiff(peaks[0].a,peaks[1].a));
+    if(d>60&&d<140){const bis=(peaks[0].a+adiff(peaks[0].a,peaks[1].a)/2+360)%360;return{dir:Math.round(bis)%360,conf:Math.min(peaks[0].c+peaks[1].c,cnt)/cnt}}
+  }
+  return peaks.length>=1?{dir:peaks[0].a,conf:0.3}:{dir:0,conf:0};
+}
+
+function detectMans(pts,wd){
+  const res=[];let i=15;
+  while(i<pts.length-15){
+    if(ms2k(pts[i].ss||0)<1.0){i++;continue}
+    const bef=pts[i-8].cog,aft=pts[Math.min(i+12,pts.length-1)].cog;
+    const ch=Math.abs(adiff(bef,aft));
+    if(ch>55){
+      const rb=((bef-wd+360)%360),ra=((aft-wd+360)%360);
+      const bU=rb<90||rb>270,aU=ra<90||ra>270;
+      let tp;if(bU&&aU)tp="tack";else if(!bU&&!aU)tp="gybe";else tp=ch>130?"gybe":"tack";
+      res.push({type:tp,idx:i,time:pts[i].time,cogB:bef,cogA:aft,ch});
+      i+=18;
+    }else i++;
+  }
+  return res;
+}
+
+function scoreMan(m,pts,wd){
+  const i=m.idx;
+  const pre=pts.slice(Math.max(0,i-15),i-3),post=pts.slice(i+5,Math.min(pts.length,i+25));
+  const vmg=p=>{const r=((p.cog-wd+360)%360),va=r>180?360-r:r;return ms2k(p.ss||0)*Math.cos(va*D)};
+  const preV=pre.length?Math.abs(pre.reduce((a,p)=>a+vmg(p),0)/pre.length):0;
+  const postV=post.length?Math.abs(post.reduce((a,p)=>a+vmg(p),0)/post.length):0;
+  const preS=pre.length?pre.reduce((a,p)=>a+ms2k(p.ss||0),0)/pre.length:0;
+  const win=pts.slice(Math.max(0,i-5),Math.min(pts.length,i+15));
+  const minS=Math.min(...win.map(p=>ms2k(p.ss||0)));
+  const postSp=post.map(p=>ms2k(p.ss||0));
+  const tgt=preS*0.9,ri=postSp.findIndex(s=>s>=tgt),rt=ri>=0?ri:postSp.length;
+  const prof=pts.slice(Math.max(0,i-10),Math.min(pts.length,i+25)).map((p,j)=>({t:j-(i-Math.max(0,i-10)),speed:parseFloat(ms2k(p.ss||0).toFixed(1))}));
+  const sr=preS>0?(minS/preS)*100:0;
+  const vr=preV>0?Math.min((postV/preV)*100,100):0;
+  const rr=Math.max(0,100-rt*8);
+  const q=Math.round(sr*0.3+vr*0.4+rr*0.3);
+  return{...m,preV,postV,preS,minS,rt,prof,q};
+}
+
+function detectLegsFromMarks(pts,markPositions,laps){
+  // Detect when the track passes close to each mark in sequence
+  const legs=[];
+  if(!markPositions||markPositions.length<2)return legs;
+
+  // Build full mark sequence for all laps
+  const fullSeq=[];
+  for(let lap=0;lap<laps;lap++){
+    markPositions.forEach((m,i)=>{
+      fullSeq.push({...m,lap:lap+1,seqIdx:fullSeq.length});
+    });
+  }
+
+  // Find closest approach to each mark in sequence
+  const roundings=[];
+  let searchFrom=0;
+  const ROUNDING_DIST=80; // metres — consider rounded if within this distance
+
+  for(const mark of fullSeq){
+    let bestDist=Infinity,bestIdx=-1;
+    for(let i=searchFrom;i<pts.length;i++){
+      const d=hav(pts[i].lat,pts[i].lon,mark.lat,mark.lon);
+      if(d<bestDist){bestDist=d;bestIdx=i;}
+      // If we've passed through and are moving away, stop searching
+      if(d>bestDist+50&&bestDist<ROUNDING_DIST)break;
+    }
+    if(bestDist<ROUNDING_DIST*3&&bestIdx>searchFrom){
+      roundings.push({mark:mark.name,idx:bestIdx,dist:bestDist,lap:mark.lap});
+      searchFrom=bestIdx+5;
+    }
+  }
+
+  // Create legs between roundings
+  for(let i=0;i<roundings.length-1;i++){
+    const si=roundings[i].idx,ei=roundings[i+1].idx;
+    const legPts=pts.slice(si,ei+1);
+    if(legPts.length<5)continue;
+    const dist=legPts.reduce((a,p)=>a+(p.dist||0),0);
+    const straightDist=hav(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
+    const speeds=legPts.map(p=>ms2k(p.ss||0)).filter(s=>s>0.3);
+    const avgSpd=speeds.length?speeds.reduce((a,b)=>a+b,0)/speeds.length:0;
+    const maxSpd=speeds.length?Math.max(...speeds):0;
+    const dur=legPts[legPts.length-1].time-legPts[0].time;
+    const eff=dist>0?(straightDist/dist*100):100;
+
+    // Determine leg bearing to classify as upwind/downwind/reach
+    const legBearing=bear(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
+
+    legs.push({
+      from:roundings[i].mark,to:roundings[i+1].mark,
+      lap:roundings[i].lap,
+      startIdx:si,endIdx:ei,
+      distance:dist,straightDistance:straightDist,
+      duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
+      efficiency:eff,legBearing,
+      type:"leg", // Will be classified with wind data
+    });
+  }
+  return legs;
+}
+
+function classifyLegs(legs,wd){
+  return legs.map(l=>{
+    const rel=((l.legBearing-wd+360)%360);
+    let type;
+    if(rel<60||rel>300)type="upwind";
+    else if(rel>120&&rel<240)type="downwind";
+    else type="reach";
+
+    // Calculate VMG for classified legs using stored indices
+    return{...l,type};
+  });
+}
+
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1){
+  if(!rawPts||rawPts.length<20)return null;
+  const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
+  const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
+  const en=enrich(deduped);
+  const sogArr=sm(en.map(p=>p.sog),7);
+  en.forEach((p,i)=>{p.ss=sogArr[i]});
+
+  const speeds=en.map(p=>ms2k(p.ss)).filter(s=>s>0.3);
+  const maxSpeed=speeds.length?Math.max(...speeds):0;
+  const avgSpeed=speeds.length?speeds.reduce((a,b)=>a+b,0)/speeds.length:0;
+  const totalDist=en.reduce((a,p)=>a+(p.dist||0),0);
+  const duration=en[en.length-1].time-en[0].time;
+
+  const windEst=estWind(en);
+  const wd=userWind!==null?userWind:windEst.dir;
+
+  const mans=detectMans(en,wd);
+  const tacks=mans.filter(m=>m.type==="tack").map(m=>scoreMan(m,en,wd));
+  const gybes=mans.filter(m=>m.type==="gybe").map(m=>scoreMan(m,en,wd));
+
+  // Legs — use mark positions if available, otherwise detect from manoeuvres
+  let legs=[];
+  if(markPositions&&markPositions.length>=2){
+    legs=detectLegsFromMarks(en,markPositions,laps);
+    legs=classifyLegs(legs,wd);
+  }
+
+  // Compute VMG for each leg
+  legs=legs.map(l=>{
+    const legPts=en.slice(l.startIdx,l.endIdx+1);
+    const vmgs=legPts.map(p=>{
+      const r=((p.cog-wd+360)%360),va=r>180?360-r:r;
+      return ms2k(p.ss||0)*Math.cos(va*D);
+    });
+    const avgVMG=vmgs.length?Math.abs(vmgs.reduce((a,b)=>a+b,0)/vmgs.length):0;
+    return{...l,avgVMG};
+  });
+
+  const streaks={};
+  [2,3,4,5,6].forEach(th=>{let lo=0,cu=0;en.forEach(p=>{if(ms2k(p.ss)>=th){cu++;if(cu>lo)lo=cu}else cu=0});streaks[th]=lo});
+
+  const speedTL=en.filter((_,i)=>i%3===0).map(p=>({time:p.time-en[0].time,speed:parseFloat(ms2k(p.ss).toFixed(2)),cog:Math.round(p.cog)}));
+
+  let portS=0,stbdS=0;
+  en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
+
+  return{points:en,windDir:wd,windEst,stats:{totalDist,duration,maxSpeed,avgSpeed,tackCount:tacks.length,gybeCount:gybes.length},tacks,gybes,legs,streaks,speedTL,portS,stbdS};
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   UI COMPONENTS
+   ═══════════════════════════════════════════════════════════════════ */
+function Stat({label,value,unit,color=C.acc,icon}){
+  return(<div style={{background:C.card,borderRadius:12,padding:"14px 16px",border:`1px solid ${C.bdr}`,minWidth:100,flex:1}}>
+    <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1.2,marginBottom:5}}>{icon&&<span style={{marginRight:5}}>{icon}</span>}{label}</div>
+    <div style={{fontSize:24,fontWeight:700,color,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.1}}>{value}{unit&&<span style={{fontSize:12,color:C.txM,fontWeight:400,marginLeft:3}}>{unit}</span>}</div>
+  </div>);
+}
+
+function ManCard({m,index}){
+  const qc=m.q>=70?C.acc:m.q>=45?C.gld:C.wrn;
+  return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
+    <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}18`,color:qc,fontWeight:800,fontSize:15,fontFamily:"'JetBrains Mono',monospace"}}>{m.q}</div>
+    <div style={{flex:1,minWidth:0}}>
+      <div style={{fontSize:12,fontWeight:600,color:C.txt}}>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}<span style={{color:C.txM,fontWeight:400,marginLeft:6}}>{Math.round(m.ch)}°</span></div>
+      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{m.preS.toFixed(1)}→{m.minS.toFixed(1)}kts · {m.rt}s recov · VMG {m.preV.toFixed(1)}→{m.postV.toFixed(1)}</div>
+    </div>
+    <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
+  </div>);
+}
+
+function WindRose({wd,onChange}){
+  return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,textAlign:"center"}}>
+    <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Wind Direction</div>
+    <div style={{width:100,height:100,margin:"0 auto 10px",position:"relative",border:`2px solid ${C.bdrL}`,borderRadius:50}}>
+      {["N","E","S","W"].map((d,i)=><div key={d} style={{position:"absolute",fontSize:10,color:C.txD,fontWeight:600,...[{top:3,left:"50%",transform:"translateX(-50%)"},{right:5,top:"50%",transform:"translateY(-50%)"},{bottom:3,left:"50%",transform:"translateX(-50%)"},{left:5,top:"50%",transform:"translateY(-50%)"}][i]}}>{d}</div>)}
+      <div style={{position:"absolute",top:"50%",left:"50%",width:3,height:38,background:C.wrn,borderRadius:2,transform:`translate(-50%,-100%) rotate(${wd}deg)`,transformOrigin:"bottom center"}}/>
+      <div style={{position:"absolute",top:"50%",left:"50%",width:7,height:7,background:C.wrn,borderRadius:4,transform:"translate(-50%,-50%)"}}/>
+    </div>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+      <input type="range" min="0" max="359" value={wd} onChange={e=>onChange(parseInt(e.target.value))} style={{width:80}}/>
+      <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc,fontSize:16,fontWeight:700,width:40}}>{wd}°</span>
+    </div>
+  </div>);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAP COMPONENT
+   ═══════════════════════════════════════════════════════════════════ */
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
+  const mapContainer=useRef(null);
+  const mapRef=useRef(null);
+  const markersRef=useRef([]);
+
+  useEffect(()=>{
+    if(!mapContainer.current||mapRef.current)return;
+    mapboxgl.accessToken=CONFIG.MAPBOX_TOKEN;
+    const map=new mapboxgl.Map({
+      container:mapContainer.current,
+      style:"mapbox://styles/mapbox/satellite-streets-v12",
+      center:[-1.3050,50.8420],
+      zoom:13,
+    });
+    mapRef.current=map;
+
+    map.on("load",()=>{
+      // Add track if available
+      if(trackPoints&&trackPoints.length>1){
+        map.addSource("track",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}}});
+        map.addLayer({id:"track-line",type:"line",source:"track",paint:{"line-color":C.trk,"line-width":3,"line-opacity":0.8}});
+        // Fit bounds to track
+        const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
+        map.fitBounds([[Math.min(...lons)-0.005,Math.min(...lats)-0.003],[Math.max(...lons)+0.005,Math.max(...lats)+0.003]],{padding:40});
+      }
+
+      // Add course line
+      if(courseMarks&&courseMarks.length>1){
+        map.addSource("course",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:courseMarks.map(m=>[m.lon,m.lat])}}});
+        map.addLayer({id:"course-line",type:"line",source:"course",paint:{"line-color":C.course,"line-width":2,"line-opacity":0.6,"line-dasharray":[4,3]}});
+      }
+    });
+
+    return()=>{map.remove();mapRef.current=null};
+  },[]);
+
+  // Add/update markers
+  useEffect(()=>{
+    const map=mapRef.current;if(!map)return;
+    // Remove existing markers
+    markersRef.current.forEach(m=>m.remove());
+    markersRef.current=[];
+
+    if(!marks)return;
+
+    Object.entries(marks).forEach(([name,mk])=>{
+      const el=document.createElement("div");
+      el.style.cssText=`width:28px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;cursor:${mk.fixed?"default":"grab"};border:2px solid ${mk.fixed?C.blu:C.gld};background:${mk.fixed?"#111d33dd":"#111d33dd"};color:${mk.fixed?C.blu:C.gld};`;
+      el.textContent=name.substring(0,3);
+
+      const marker=new mapboxgl.Marker({element:el,draggable:!mk.fixed})
+        .setLngLat([mk.lon,mk.lat])
+        .setPopup(new mapboxgl.Popup({offset:12}).setHTML(`<strong>${name}</strong>${mk.fixed?"":" (drag to adjust)"}${mk.desc?`<br/><span style="color:#8899b0">${mk.desc}</span>`:""}`))
+        .addTo(map);
+
+      if(!mk.fixed){
+        marker.on("dragend",()=>{
+          const lngLat=marker.getLngLat();
+          if(onMarkDrag)onMarkDrag(name,lngLat.lat,lngLat.lng);
+        });
+      }
+
+      markersRef.current.push(marker);
+    });
+  },[marks]);
+
+  // Update track and course lines when data changes
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    if(trackPoints&&trackPoints.length>1){
+      const src=map.getSource("track");
+      if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}});
+    }
+    if(courseMarks&&courseMarks.length>1){
+      const src=map.getSource("course");
+      if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:courseMarks.map(m=>[m.lon,m.lat])}});
+    }
+  },[trackPoints,courseMarks]);
+
+  return <div ref={mapContainer} style={{width:"100%",height:"100%",borderRadius:12}}/>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN APP
+   ═══════════════════════════════════════════════════════════════════ */
+function App(){
+  const [view,setView]=useState("home");
+  const [sTok,setSTok]=useState(null);
+  const [sAth,setSAth]=useState(null);
+  const [acts,setActs]=useState([]);
+  const [loadingActs,setLoadingActs]=useState(false);
+  const [rawPoints,setRawPoints]=useState(null);
+  const [actName,setActName]=useState("");
+  const [analysis,setAnalysis]=useState(null);
+  const [windOvr,setWindOvr]=useState(null);
+  const [processing,setProcessing]=useState(false);
+  const [tab,setTab]=useState("overview");
+  const [courseLetter,setCourseLetter]=useState("");
+  const [laps,setLaps]=useState(1);
+  const [markOverrides,setMarkOverrides]=useState({});
+  const [actId,setActId]=useState(null);
+  const [actDate,setActDate]=useState(null);
+  const fileRef=useRef(null);
+
+  // OAuth callback
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const code = p.get("code");
+    if (code) {
+      window.history.replaceState({}, "", window.location.pathname);
+      exchangeToken(code).then(async d => {
+        if (d.access_token) {
+          setSTok(d.access_token);
+          setSAth(d.athlete);
+          localStorage.setItem("ss_strava_id", String(d.athlete.id));
+          await saveUser(d.athlete, d);
+          setView("activities");
+        }
+      }).catch(console.error);
+    }
+  }, []);
+
+  // Restore session from Supabase
+  useEffect(() => {
+    (async () => {
+      try {
+        const sid = localStorage.getItem("ss_strava_id");
+        if (!sid) return;
+        const user = await loadUser(parseInt(sid));
+        if (!user) return;
+        if (user.token_expires * 1000 > Date.now()) {
+          setSTok(user.access_token);
+          setSAth({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname });
+        } else if (user.refresh_token) {
+          const d = await refreshToken(user.refresh_token);
+          if (d.access_token) {
+            setSTok(d.access_token);
+            setSAth({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname });
+            await saveUser({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname }, d);
+          }
+        }
+      } catch (e) { console.error("Session restore:", e); }
+    })();
+  }, []);
+
+  // Load activities
+  const loadActs=useCallback(async()=>{
+    if(!sTok)return;setLoadingActs(true);
+    try{const a=await fetchActs(sTok);if(Array.isArray(a))setActs(a)}catch(e){console.error(e)}
+    setLoadingActs(false);
+  },[sTok]);
+
+  useEffect(()=>{if(sTok&&view==="activities"&&acts.length===0)loadActs()},[sTok,view,loadActs,acts.length]);
+
+  // Analyse Strava activity
+  const analyseStrava=useCallback(async(act)=>{
+    if(!sTok)return;setProcessing(true);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    try{
+      const streams=await fetchStreams(sTok,act.id);
+      if(streams.latlng&&streams.time){
+        const pts=streams.time.data.map((t,i)=>({time:new Date(act.start_date).getTime()/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
+        setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+        setView("course-setup");
+      }
+    }catch(e){console.error(e);alert("Failed to load activity")}
+    setProcessing(false);
+  },[sTok]);
+
+  // Handle file upload
+  const handleFile=useCallback(async(file)=>{
+    setProcessing(true);setActName(file.name.replace(/\.(gpx|fit)$/i,""));
+    try{
+      let pts;
+      if(file.name.toLowerCase().endsWith(".fit")){pts=parseFIT(await file.arrayBuffer())}
+      else{pts=parseGPX(await file.text())}
+      if(pts.length<20){alert("Not enough GPS points");setProcessing(false);return}
+      const t0=pts[0].time;
+      setActId(`file-${Date.now()}`);
+      setActDate(new Date(t0>1e12?t0:t0*1000).toISOString());
+      setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+      setView("course-setup");
+    }catch(e){console.error(e);alert("Failed to parse: "+e.message)}
+    setProcessing(false);
+  },[]);
+
+  // Get effective mark positions for selected course
+  const effectiveMarks=useMemo(()=>{
+    if(!courseLetter||!WSC_COURSES[courseLetter])return{};
+    const course=WSC_COURSES[courseLetter];
+    const uniqueNames=[...new Set(course.marks)];
+    const marks={};
+    uniqueNames.forEach(name=>{
+      const base=WSC_MARKS[name];
+      if(!base)return;
+      const ovr=markOverrides[name];
+      marks[name]={
+        lat:ovr?ovr.lat:base.lat,
+        lon:ovr?ovr.lon:base.lon,
+        fixed:base.fixed,
+        desc:base.desc||"",
+        name,
+      };
+    });
+    return marks;
+  },[courseLetter,markOverrides]);
+
+  // Course mark sequence for drawing lines
+  const courseMarkSeq=useMemo(()=>{
+    if(!courseLetter||!WSC_COURSES[courseLetter])return[];
+    return WSC_COURSES[courseLetter].marks.map(name=>{
+      const m=effectiveMarks[name];
+      return m?{name,lat:m.lat,lon:m.lon}:null;
+    }).filter(Boolean);
+  },[courseLetter,effectiveMarks]);
+
+  // Run analysis with current settings
+  const doAnalysis=useCallback(async()=>{
+    if(!rawPoints)return;
+    setProcessing(true);
+    const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
+    const result=runAnalysis(rawPoints,windOvr,markArr,laps);
+    setAnalysis(result);
+    if(result&&windOvr===null)setWindOvr(result.windDir);
+    setTab("overview");
+    setView("analysis");
+    if (sAth?.id && result) {
+      try {
+        await saveAnalysis(sAth.id, actId, actName, actDate, result, { courseLetter, laps, markOverrides });
+      } catch (e) { console.warn("Save failed:", e); }
+    }
+    setProcessing(false);
+  },[rawPoints,windOvr,courseMarkSeq,laps,sAth,actId,actName,actDate,courseLetter,markOverrides]);
+
+  // Re-run when wind changes
+  const curAnalysis=useMemo(()=>{
+    if(!analysis||!rawPoints)return analysis;
+    if(windOvr!==null&&windOvr!==analysis.windDir){
+      const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
+      return runAnalysis(rawPoints,windOvr,markArr,laps);
+    }
+    return analysis;
+  },[analysis,windOvr,rawPoints,courseMarkSeq,laps]);
+
+  const effWind=windOvr!==null?windOvr:(curAnalysis?.windDir||0);
+
+  // Handle mark drag
+  const onMarkDrag=useCallback((name,lat,lng)=>{
+    setMarkOverrides(prev=>({...prev,[name]:{lat,lon:lng}}));
+  },[]);
+
+  const hdr={display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 20px",borderBottom:`1px solid ${C.bdr}`,background:`${C.bg}ee`,backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100};
+  const btn=(bg,fg,bdr)=>({background:bg,color:fg,border:bdr?`1px solid ${bdr}`:"none",borderRadius:8,padding:"10px 18px",fontSize:14,fontWeight:600,cursor:"pointer"});
+
+  /* ─── HOME ─── */
+  if(view==="home"){
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={{maxWidth:480,margin:"0 auto",padding:"70px 20px",textAlign:"center"}}>
+        <div style={{fontSize:44,fontWeight:800,marginBottom:6,background:`linear-gradient(135deg,${C.acc},${C.blu})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",letterSpacing:-1}}>SailStats</div>
+        <div style={{fontSize:15,color:C.txM,marginBottom:44,lineHeight:1.6}}>GPS track analysis for dinghy sailors.<br/>Tacks, gybes, VMG, speed — with WSC course support.</div>
+
+        <a href={stravaAuthURL()} style={{...btn("#fc4c02","#fff"),display:"flex",alignItems:"center",justifyContent:"center",gap:10,width:"100%",textDecoration:"none",marginBottom:14,padding:"14px 24px"}}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169"/></svg>
+          Connect with Strava
+        </a>
+
+        <div style={{fontSize:12,color:C.txD,margin:"16px 0"}}>— or —</div>
+
+        <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
+        <button onClick={()=>fileRef.current?.click()} style={{...btn("transparent",C.acc,C.acc),display:"flex",alignItems:"center",justifyContent:"center",gap:10,width:"100%",border:`2px solid ${C.acc}`}}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          Upload GPX or FIT File
+        </button>
+
+        {processing&&<div style={{marginTop:20,color:C.acc,fontSize:13}}>Processing...</div>}
+
+        <div style={{marginTop:50,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,textAlign:"left"}}>
+          {[["WSC Courses","Preloaded mark positions & course definitions"],["Tack Scoring","Quality score 0-100 with speed profile"],["Leg Analysis","Split by mark roundings with VMG"],["Drag Marks","Adjust laid mark positions on the map"]].map(([t,d])=>(
+            <div key={t} style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`}}>
+              <div style={{fontSize:12,fontWeight:600,color:C.txt,marginBottom:3}}>{t}</div>
+              <div style={{fontSize:10,color:C.txM,lineHeight:1.5}}>{d}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>);
+  }
+
+  /* ─── ACTIVITIES ─── */
+  if(view==="activities"){
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button onClick={() => {
+          setSTok(null); setSAth(null);
+          localStorage.removeItem("ss_strava_id");
+          setView("home");
+        }} style={{background:"none",border:"none",color:C.txM,fontSize:12}}>Sign Out</button>
+        <div style={{fontSize:15,fontWeight:700,color:C.acc}}>SailStats</div>
+        <div style={{fontSize:11,color:C.txM}}>{sAth?.firstname}</div>
+      </div>
+      <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:18,fontWeight:700}}>Your Activities</div>
+          <button onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:11}}>+ Upload File</button>
+          <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
+        </div>
+        {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center"}}>Loading...</div>}
+        {processing&&<div style={{color:C.acc,padding:30,textAlign:"center"}}>Processing...</div>}
+        {acts.map(act=>(
+          <button key={act.id} onClick={()=>analyseStrava(act)} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:C.card,borderRadius:10,padding:"12px 16px",marginBottom:5,border:`1px solid ${C.bdr}`,textAlign:"left",transition:"border-color 0.15s"}} onMouseOver={e=>e.currentTarget.style.borderColor=C.acc} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>
+            <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`}}>
+              {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{act.name}</div>
+              <div style={{fontSize:10,color:C.txM,marginTop:2}}>{new Date(act.start_date_local).toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"})} · {fT(act.elapsed_time)}{act.distance?` · ${m2nm(act.distance).toFixed(1)}nm`:""}</div>
+            </div>
+            <div style={{color:C.txD,fontSize:16}}>›</div>
+          </button>
+        ))}
+      </div>
+    </div>);
+  }
+
+  /* ─── COURSE SETUP ─── */
+  if(view==="course-setup"){
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button onClick={()=>sTok?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
+        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName}</div>
+        <div style={{width:40}}/>
+      </div>
+      <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:16}}>Course Setup</div>
+
+        {/* Course & Laps selector */}
+        <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+          <div style={{flex:2,minWidth:180}}>
+            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Course</label>
+            <select value={courseLetter} onChange={e=>setCourseLetter(e.target.value)} style={{width:"100%",padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif"}}>
+              <option value="">— Select course —</option>
+              {Object.entries(WSC_COURSES).map(([k,v])=><option key={k} value={k}>{v.name}</option>)}
+            </select>
+          </div>
+          <div style={{flex:1,minWidth:80}}>
+            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Laps</label>
+            <select value={laps} onChange={e=>setLaps(parseInt(e.target.value))} style={{width:"100%",padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif"}}>
+              {[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {/* Map */}
+        <div style={{height:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <CourseMap
+            marks={Object.keys(effectiveMarks).length>0?effectiveMarks:null}
+            trackPoints={rawPoints}
+            courseMarks={courseMarkSeq}
+            onMarkDrag={onMarkDrag}
+          />
+        </div>
+
+        {/* Mark legend */}
+        {courseLetter&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Course Marks</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {Object.entries(effectiveMarks).map(([name,mk])=>(
+              <div key={name} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:`${mk.fixed?C.blu:C.gld}15`,border:`1px solid ${mk.fixed?C.blu:C.gld}33`}}>
+                <div style={{width:6,height:6,borderRadius:3,background:mk.fixed?C.blu:C.gld}}/>
+                <span style={{fontSize:11,color:mk.fixed?C.blu:C.gld,fontWeight:600}}>{name}</span>
+                {!mk.fixed&&<span style={{fontSize:9,color:C.txD}}>drag</span>}
+              </div>
+            ))}
+          </div>
+          {WSC_COURSES[courseLetter]&&<div style={{fontSize:11,color:C.txM,marginTop:8}}>
+            Sequence: {WSC_COURSES[courseLetter].marks.join(" → ")}{laps>1?` × ${laps} laps`:""}
+          </div>}
+        </div>}
+
+        {/* Analyse button */}
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={doAnalysis} style={{...btn(C.acc,"#0a1628"),flex:1,padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
+            {processing?"Analysing...":"Analyse Track"+(courseLetter?` (Course ${courseLetter})`:" (no course)")}
+          </button>
+          {courseLetter&&<button onClick={()=>{setCourseLetter("");doAnalysis()}} style={{...btn("transparent",C.txM,C.bdr),padding:"14px 18px",fontSize:13}}>
+            Skip Course
+          </button>}
+        </div>
+      </div>
+    </div>);
+  }
+
+  /* ─── ANALYSIS ─── */
+  if(view==="analysis"&&curAnalysis){
+    const a=curAnalysis;
+    const tabs=["overview","manoeuvres","legs","speed"];
+
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Course</button>
+        <div style={{fontSize:13,fontWeight:600,color:C.txt,maxWidth:"50%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{actName}{courseLetter?` · Course ${courseLetter}`:""}{laps>1?` · ${laps}L`:""}</div>
+        <div style={{width:40}}/>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:0,padding:"0 14px",borderBottom:`1px solid ${C.bdr}`,overflowX:"auto"}}>
+        {tabs.map(t=><button key={t} onClick={()=>setTab(t)} style={{background:"none",border:"none",padding:"11px 16px",color:tab===t?C.acc:C.txM,fontWeight:tab===t?700:400,fontSize:12,textTransform:"capitalize",borderBottom:tab===t?`2px solid ${C.acc}`:"2px solid transparent",whiteSpace:"nowrap"}}>{t}</button>)}
+      </div>
+
+      <div style={{maxWidth:700,margin:"0 auto",padding:"16px 14px"}}>
+
+        {/* OVERVIEW */}
+        {tab==="overview"&&<>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+            <Stat label="Distance" value={m2nm(a.stats.totalDist).toFixed(2)} unit="nm" icon="📏"/>
+            <Stat label="Duration" value={fT(a.stats.duration)} icon="⏱"/>
+            <Stat label="Max Speed" value={a.stats.maxSpeed.toFixed(1)} unit="kts" color={C.gld} icon="⚡"/>
+          </div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+            <Stat label="Avg Speed" value={a.stats.avgSpeed.toFixed(1)} unit="kts" color={C.blu} icon="〰"/>
+            <Stat label="Tacks" value={a.stats.tackCount} color={C.tack} icon="↗"/>
+            <Stat label="Gybes" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
+          </div>
+
+          <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+            <WindRose wd={effWind} onChange={setWindOvr}/>
+            <div style={{flex:1,minWidth:180}}>
+              <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,height:"100%"}}>
+                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack Split</div>
+                <div style={{display:"flex",gap:3,height:24,borderRadius:6,overflow:"hidden",marginBottom:10}}>
+                  <div style={{background:C.port,flex:a.portS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>Port</div>
+                  <div style={{background:C.stbd,flex:a.stbdS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000"}}>Stbd</div>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.txM}}>
+                  <span>{Math.round(a.portS/(a.portS+a.stbdS||1)*100)}%</span>
+                  <span>{Math.round(a.stbdS/(a.portS+a.stbdS||1)*100)}%</span>
+                </div>
+                {a.windEst&&<div style={{marginTop:12,fontSize:10,color:C.txD,lineHeight:1.6}}>
+                  Auto wind: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)<br/>
+                  <span style={{color:C.txM}}>Adjust compass to refine</span>
+                </div>}
+              </div>
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:12}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed Over Time</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <AreaChart data={a.speedTL}>
+                <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                <XAxis dataKey="time" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
+                <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
+                <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false}/>
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed Streaks</div>
+            <ResponsiveContainer width="100%" height={100}>
+              <BarChart data={Object.entries(a.streaks).map(([k,v])=>({th:`≥${k}kts`,s:v}))}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                <XAxis dataKey="th" tick={{fill:C.txM,fontSize:10}} stroke={C.bdr}/>
+                <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}}/>
+                <Bar dataKey="s" name="seconds" radius={[4,4,0,0]}>{Object.keys(a.streaks).map((k,i)=><Cell key={k} fill={[C.acc,C.blu,C.gld,C.wrn,C.port][i]}/>)}</Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </>}
+
+        {/* MANOEUVRES */}
+        {tab==="manoeuvres"&&<>
+          <div style={{display:"flex",gap:6,marginBottom:14}}>
+            <Stat label="Avg Tack" color={C.tack} value={a.tacks.length?Math.round(a.tacks.reduce((s,t)=>s+t.q,0)/a.tacks.length):"—"} unit="/100"/>
+            <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="/100"/>
+          </div>
+
+          {(a.tacks.length>0||a.gybes.length>0)&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Quality Distribution</div>
+            <ResponsiveContainer width="100%" height={120}>
+              <BarChart data={[...a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,tp:"tack"})),...a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,tp:"gybe"}))]}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/><XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/><YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}}/>
+                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{[...a.tacks,...a.gybes].map((m,i)=><Cell key={i} fill={m.q>=70?C.acc:m.q>=45?C.gld:C.wrn}/>)}</Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>}
+
+          {a.tacks.length>0&&<><div style={{fontSize:13,fontWeight:700,color:C.tack,marginBottom:6}}>Tacks ({a.tacks.length})</div>{a.tacks.map((t,i)=><ManCard key={`t${i}`} m={t} index={i}/>)}</>}
+          {a.gybes.length>0&&<><div style={{fontSize:13,fontWeight:700,color:C.gybe,marginBottom:6,marginTop:14}}>Gybes ({a.gybes.length})</div>{a.gybes.map((g,i)=><ManCard key={`g${i}`} m={g} index={i}/>)}</>}
+          {!a.tacks.length&&!a.gybes.length&&<div style={{textAlign:"center",color:C.txM,padding:30}}>No manoeuvres detected. Try adjusting wind direction.</div>}
+        </>}
+
+        {/* LEGS */}
+        {tab==="legs"&&<>
+          {a.legs.length>0?<>
+            <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:8,padding:"6px 12px",marginBottom:4}}>
+              <div style={{width:60}}>From→To</div>
+              <div style={{width:55}}>Type</div>
+              <div style={{flex:1}}>Dist</div>
+              <div style={{width:50}}>Time</div>
+              <div style={{width:50}}>Spd</div>
+              <div style={{width:42}}>VMG</div>
+              <div style={{width:38}}>Eff</div>
+            </div>
+            {a.legs.map((l,i)=>{
+              const tc=l.type==="upwind"?C.up:l.type==="downwind"?C.dn:C.txM;
+              return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:C.card,borderRadius:8,marginBottom:3,border:`1px solid ${C.bdr}`,fontSize:11}}>
+                <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
+                <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
+                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{m2nm(l.distance).toFixed(2)}nm</div>
+                <div style={{width:50,color:C.txM}}>{fT(l.duration)}</div>
+                <div style={{width:50,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
+                <div style={{width:42,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVMG.toFixed(1)}</div>
+                <div style={{width:38,color:C.txM}}>{l.efficiency.toFixed(0)}%</div>
+              </div>);
+            })}
+
+            <div style={{display:"flex",gap:8,marginTop:14}}>
+              {["upwind","downwind","reach"].map(type=>{
+                const tl=a.legs.filter(l=>l.type===type);if(!tl.length)return null;
+                const as2=tl.reduce((s,l)=>s+l.avgSpeed,0)/tl.length;
+                const av=tl.reduce((s,l)=>s+l.avgVMG,0)/tl.length;
+                const ae=tl.reduce((s,l)=>s+l.efficiency,0)/tl.length;
+                const tc2=type==="upwind"?C.up:type==="downwind"?C.dn:C.txM;
+                return(<div key={type} style={{flex:1,background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`}}>
+                  <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",color:tc2,marginBottom:8}}>{type} ({tl.length})</div>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:2}}>
+                    Avg: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{as2.toFixed(1)}kts</span><br/>
+                    VMG: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{av.toFixed(1)}kts</span><br/>
+                    Eff: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{ae.toFixed(0)}%</span>
+                  </div>
+                </div>);
+              })}
+            </div>
+          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Mark roundings not detected — try adjusting mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Course Setup</button></div>}
+        </>}
+
+        {/* SPEED */}
+        {tab==="speed"&&<>
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed Distribution</div>
+            {(()=>{
+              const bins=new Array(20).fill(0);
+              a.points.forEach(p=>{const k=ms2k(p.ss||0);if(k<0.3)return;bins[Math.min(Math.floor(k*2),19)]++});
+              return(<ResponsiveContainer width="100%" height={140}>
+                <BarChart data={bins.map((c,i)=>({r:`${(i/2).toFixed(1)}`,c}))}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/><XAxis dataKey="r" tick={{fill:C.txD,fontSize:8}} stroke={C.bdr}/>
+                  <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                  <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}}/>
+                  <Bar dataKey="c" name="samples" fill={C.blu} radius={[2,2,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>);
+            })()}
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed by Heading (relative to wind)</div>
+            {(()=>{
+              const ab={};for(let i=0;i<360;i+=15)ab[i]=[];
+              a.points.forEach(p=>{const s=ms2k(p.ss||0);if(s<0.5)return;const r=((p.cog-effWind+360)%360);ab[Math.round(r/15)*15%360]?.push(s)});
+              const pd=Object.entries(ab).map(([k,v])=>({label:`${k}°`,avg:v.length?v.reduce((a,b)=>a+b,0)/v.length:0,max:v.length?Math.max(...v):0})).sort((a,b)=>parseInt(a.label)-parseInt(b.label));
+              return(<ResponsiveContainer width="100%" height={220}>
+                <RadarChart data={pd}><PolarGrid stroke={C.bdr}/><PolarAngleAxis dataKey="label" tick={{fill:C.txD,fontSize:8}}/>
+                <PolarRadiusAxis tick={{fill:C.txD,fontSize:8}}/>
+                <Radar name="Avg" dataKey="avg" stroke={C.acc} fill={C.acc} fillOpacity={0.15} strokeWidth={2}/>
+                <Radar name="Max" dataKey="max" stroke={C.gld} fill="none" strokeWidth={1} strokeDasharray="4 4"/>
+                <Legend wrapperStyle={{fontSize:10,color:C.txM}}/></RadarChart>
+              </ResponsiveContainer>);
+            })()}
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Streak Records</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              {Object.entries(a.streaks).map(([k,v])=>(
+                <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:`${C.bg}88`,borderRadius:8}}>
+                  <span style={{fontSize:11,color:C.txM}}>≥{k}kts</span>
+                  <span style={{fontSize:16,fontWeight:700,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{fT(v)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>}
+
+      </div>
+    </div>);
+  }
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
