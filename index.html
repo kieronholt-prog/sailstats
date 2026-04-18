@@ -130,6 +130,25 @@ function cropTrackPoints(pts,startOffsetSec,durationSec){
   return s.filter(p=>p.time>=start&&p.time<=end);
 }
 
+/** HH:MM:SS from seconds (always two-digit hours). */
+function formatHMS(totalSec){
+  const s=Math.max(0,Math.floor(Number(totalSec)||0));
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+}
+/** Parse HH:MM:SS, MM:SS, or seconds; invalid → null. */
+function parseHMS(str){
+  const t=String(str).trim();
+  if(t==="")return null;
+  const parts=t.split(":").map(p=>p.trim());
+  if(parts.length===0||parts.length>3)return null;
+  for(const p of parts){ if(p==="")return null; if(!/^\d+$/.test(p))return null; }
+  const n=parts.map(p=>parseInt(p,10));
+  if(n.length===3)return n[0]*3600+n[1]*60+n[2];
+  if(n.length===2)return n[0]*60+n[1];
+  return n[0];
+}
+
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
 function parseMarkSpec(row){
   if(Array.isArray(row)&&row.length)return{name:String(row[0]),tack:row[1]==="P"||row[1]==="S"?row[1]:null};
@@ -681,8 +700,8 @@ function App(){
   const [markOverrides,setMarkOverrides]=useState({});
   const [actId,setActId]=useState(null);
   const [actDate,setActDate]=useState(null);
-  const [cropStartOffset,setCropStartOffset]=useState(0);
-  const [cropDuration,setCropDuration]=useState(null);
+  const [cropStartText,setCropStartText]=useState("00:00:00");
+  const [cropDurationText,setCropDurationText]=useState("");
   const fileRef=useRef(null);
 
   const trackMeta=useMemo(()=>{
@@ -692,10 +711,25 @@ function App(){
     return{t0,t1,spanSec:t1-t0,n:s.length};
   },[rawPoints]);
 
+  const cropStartSecParsed=useMemo(()=>{
+    if(!trackMeta)return 0;
+    const p=parseHMS(cropStartText);
+    const sec=p==null?0:p;
+    return Math.max(0,Math.min(sec,trackMeta.spanSec));
+  },[cropStartText,trackMeta]);
+
+  const cropDurationSecParsed=useMemo(()=>{
+    const t=cropDurationText.trim();
+    if(t==="")return null;
+    const p=parseHMS(t);
+    if(p==null||p<=0)return null;
+    return p;
+  },[cropDurationText]);
+
   const croppedPoints=useMemo(()=>{
     if(!rawPoints||rawPoints.length<2)return rawPoints;
-    return cropTrackPoints(rawPoints,cropStartOffset,cropDuration);
-  },[rawPoints,cropStartOffset,cropDuration]);
+    return cropTrackPoints(rawPoints,cropStartSecParsed,cropDurationSecParsed);
+  },[rawPoints,cropStartSecParsed,cropDurationSecParsed]);
 
   const croppedMeta=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<2)return null;
@@ -704,8 +738,14 @@ function App(){
   },[croppedPoints]);
 
   useEffect(()=>{
-    setCropStartOffset(0);
-    setCropDuration(null);
+    setCropStartText("00:00:00");
+    if(!rawPoints||rawPoints.length<2){
+      setCropDurationText("");
+      return;
+    }
+    const s=[...rawPoints].sort((a,b)=>a.time-b.time);
+    const span=s[s.length-1].time-s[0].time;
+    setCropDurationText(formatHMS(span));
   },[rawPoints]);
 
   // OAuth callback
@@ -981,26 +1021,38 @@ function App(){
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop</div>
           <div style={{fontSize:12,color:C.txM,marginBottom:10,lineHeight:1.5}}>
-            Full recording: <strong style={{color:C.txt}}>{fT(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
-            {croppedMeta&&<span> · Cropped: <strong style={{color:C.acc}}>{fT(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
+            Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
+            {croppedMeta&&<span> · Cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
           </div>
           <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{flex:1,minWidth:120}}>
-              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Start after first point (s)</label>
-              <input type="number" min={0} max={Math.ceil(trackMeta.spanSec)} step={1} value={cropStartOffset}
-                onChange={e=>{const v=Math.max(0,Math.min(Number(e.target.value)||0,trackMeta.spanSec));setCropStartOffset(v);}}
+            <div style={{flex:1,minWidth:140}}>
+              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Start after first point (HH:MM:SS)</label>
+              <input type="text" inputMode="numeric" placeholder="00:00:00" value={cropStartText}
+                onChange={e=>setCropStartText(e.target.value)}
+                onBlur={()=>{
+                  const p=parseHMS(cropStartText);
+                  if(p==null)setCropStartText("00:00:00");
+                  else setCropStartText(formatHMS(Math.min(p,trackMeta.spanSec)));
+                }}
                 style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
             </div>
-            <div style={{flex:1,minWidth:120}}>
-              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Duration (s)</label>
-              <input type="number" min={0} step={1} placeholder="to end"
-                value={cropDuration==null?"":cropDuration}
-                onChange={e=>{const t=e.target.value.trim();if(t==="")setCropDuration(null);else{const v=Math.max(0,Number(t)||0);setCropDuration(v);}}}
+            <div style={{flex:1,minWidth:140}}>
+              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Duration (HH:MM:SS)</label>
+              <input type="text" inputMode="numeric" placeholder="empty = to end"
+                value={cropDurationText}
+                onChange={e=>setCropDurationText(e.target.value)}
+                onBlur={()=>{
+                  const t=cropDurationText.trim();
+                  if(t==="")return;
+                  const p=parseHMS(t);
+                  if(p==null||p<=0)setCropDurationText("");
+                  else setCropDurationText(formatHMS(p));
+                }}
                 style={{width:"100%",padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
             </div>
-            <button type="button" onClick={()=>{setCropStartOffset(0);setCropDuration(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
+            <button type="button" onClick={()=>{setCropStartText("00:00:00");setCropDurationText(formatHMS(trackMeta.spanSec));}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
           </div>
-          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Leave duration empty to keep everything from the start offset to the end of the file. Analysis and the map use the cropped track.</div>
+          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). Leave duration empty to run to the end of the file.</div>
         </div>}
 
         {/* Course & Laps selector */}
