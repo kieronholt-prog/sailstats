@@ -337,8 +337,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     wind_direction: results.windDir,
     mark_overrides: courseSetup.markOverrides || {},
     stats: results.stats,
-    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt })),
-    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt })),
+    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing })),
+    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing })),
     leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
     updated_at: new Date().toISOString(),
   }, "strava_id,activity_id");
@@ -372,6 +372,9 @@ function enrich(pts){
   });
 }
 
+/** Auto wind (meteorological ° FROM): histogram of COG in 10° bins while moving (1.5–12 kn).
+ *  Two dominant headings ~60–140° apart → bisector of the shorter arc (beat angles → wind axis).
+ *  Single peak → that heading; low confidence if sparse peaks. */
 function estWind(pts){
   const bins=new Array(36).fill(0);let cnt=0;
   for(let i=10;i<pts.length-10;i++){
@@ -389,6 +392,16 @@ function estWind(pts){
   return peaks.length>=1?{dir:peaks[0].a,conf:0.3}:{dir:0,conf:0};
 }
 
+/** Port vs starboard tack relative to wind FROM (°), same rule as portS/stbdS in runAnalysis. */
+function tackSideFromWind(cog,wd){
+  const r=((Number(cog)-Number(wd)+360)%360);
+  return r>180?"S":"P";
+}
+
+/** Tack / gybe: COG change >55° over ~8 pts before vs ~12 after, min speed 1 kn.
+ *  Relative to wd (wind FROM): COG in “upwind” semicircle (within 90° of wind axis) both before & after → tack;
+ *  both in downwind semicircle → gybe; mixed → large turn (>130°) → gybe else tack.
+ *  crossing: tack side before → after (P→S = port tack to starboard tack). */
 function detectMans(pts,wd){
   const res=[];let i=15;
   while(i<pts.length-15){
@@ -399,7 +412,9 @@ function detectMans(pts,wd){
       const rb=((bef-wd+360)%360),ra=((aft-wd+360)%360);
       const bU=rb<90||rb>270,aU=ra<90||ra>270;
       let tp;if(bU&&aU)tp="tack";else if(!bU&&!aU)tp="gybe";else tp=ch>130?"gybe":"tack";
-      res.push({type:tp,idx:i,time:pts[i].time,cogB:bef,cogA:aft,ch});
+      const sB=tackSideFromWind(bef,wd),sA=tackSideFromWind(aft,wd);
+      const crossing=`${sB}→${sA}`;
+      res.push({type:tp,idx:i,time:pts[i].time,cogB:bef,cogA:aft,ch,crossing,sideBef:sB,sideAft:sA});
       i+=18;
     }else i++;
   }
@@ -422,7 +437,8 @@ function scoreMan(m,pts,wd){
   const vr=preV>0?Math.min((postV/preV)*100,100):0;
   const rr=Math.max(0,100-rt*8);
   const q=Math.round(sr*0.3+vr*0.4+rr*0.3);
-  return{...m,preV,postV,preS,minS,rt,prof,q};
+  const pt=pts[m.idx];
+  return{...m,preV,postV,preS,minS,rt,prof,q,lat:pt.lat,lon:pt.lon};
 }
 
 /** Full rounding order: optional preamble (once) then lap marks × laps (matches WSC Course Selector). */
@@ -566,40 +582,67 @@ function Stat({label,value,unit,color=C.acc,icon}){
   </div>);
 }
 
+/** Bar colour: quality tier + crossing (P→S vs S→P), port vs starboard tint. */
+function manBarFill(q,crossing,isGybe){
+  const ps=crossing==="P→S",sp=crossing==="S→P";
+  const hi=q>=70,mid=q>=45;
+  if(!ps&&!sp){
+    if(hi)return isGybe?C.gybe:C.acc;if(mid)return C.gld;return C.wrn;
+  }
+  if(isGybe){
+    if(ps){if(hi)return"#b06eff";if(mid)return"#c99aff";return C.wrn;}
+    if(hi)return C.gybe;if(mid)return"#6bd8f2";return C.wrn;
+  }
+  if(ps){if(hi)return C.port;if(mid)return"#ff8a7e";return"#ffb3a8";}
+  if(hi)return C.stbd;if(mid)return"#7dffc0";return"#b0ffd8";
+}
+
 function ManCard({m,index}){
   const qc=m.q>=70?C.acc:m.q>=45?C.gld:C.wrn;
+  const cx=m.crossing;
+  const cxSt=cx==="P→S"?{bg:`${C.port}22`,fg:C.port,br:C.port}:cx==="S→P"?{bg:`${C.stbd}22`,fg:C.stbd,br:C.stbd}:{bg:`${C.txM}18`,fg:C.txM,br:C.txD};
   return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
     <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}18`,color:qc,fontWeight:800,fontSize:15,fontFamily:"'JetBrains Mono',monospace"}}>{m.q}</div>
     <div style={{flex:1,minWidth:0}}>
-      <div style={{fontSize:12,fontWeight:600,color:C.txt}}>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}<span style={{color:C.txM,fontWeight:400,marginLeft:6}}>{Math.round(m.ch)}°</span></div>
+      <div style={{fontSize:12,fontWeight:600,color:C.txt,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}<span style={{color:C.txM,fontWeight:400,marginLeft:6}}>{Math.round(m.ch)}°</span></span>
+        {cx&&<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",padding:"2px 8px",borderRadius:6,background:cxSt.bg,color:cxSt.fg,border:`1px solid ${cxSt.br}55`}}>{cx}</span>}
+      </div>
       <div style={{fontSize:10,color:C.txM,marginTop:2}}>{m.preS.toFixed(1)}→{m.minS.toFixed(1)}kts · {m.rt}s recov · VMG {m.preV.toFixed(1)}→{m.postV.toFixed(1)}</div>
     </div>
     <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
   </div>);
 }
 
-function WindRose({wd,onChange}){
-  return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,textAlign:"center"}}>
-    <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Wind Direction</div>
-    <div style={{width:100,height:100,margin:"0 auto 10px",position:"relative",border:`2px solid ${C.bdrL}`,borderRadius:50}}>
-      {["N","E","S","W"].map((d,i)=><div key={d} style={{position:"absolute",fontSize:10,color:C.txD,fontWeight:600,...[{top:3,left:"50%",transform:"translateX(-50%)"},{right:5,top:"50%",transform:"translateY(-50%)"},{bottom:3,left:"50%",transform:"translateX(-50%)"},{left:5,top:"50%",transform:"translateY(-50%)"}][i]}}>{d}</div>)}
-      <div style={{position:"absolute",top:"50%",left:"50%",width:3,height:38,background:C.wrn,borderRadius:2,transform:`translate(-50%,-100%) rotate(${wd}deg)`,transformOrigin:"bottom center"}}/>
+function WindRose({wd,onChange,compact,hint}){
+  const dia=compact?86:100;
+  const pad=compact?10:16;
+  const fs=compact?14:16;
+  return(<div style={{background:C.card,borderRadius:12,padding:pad,border:`1px solid ${C.bdr}`,textAlign:"center",height:compact?"100%":"auto",display:compact?"flex":"block",flexDirection:"column",justifyContent:"space-between"}}>
+    <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:compact?6:10}}>Wind (from)</div>
+    <div style={{width:dia,height:dia,margin:compact?"0 auto 6px":"0 auto 10px",position:"relative",border:`2px solid ${C.bdrL}`,borderRadius:50,flexShrink:0}}>
+      {["N","E","S","W"].map((d,i)=><div key={d} style={{position:"absolute",fontSize:compact?9:10,color:C.txD,fontWeight:600,...[{top:2,left:"50%",transform:"translateX(-50%)"},{right:4,top:"50%",transform:"translateY(-50%)"},{bottom:2,left:"50%",transform:"translateX(-50%)"},{left:4,top:"50%",transform:"translateY(-50%)"}][i]}}>{d}</div>)}
+      <div style={{position:"absolute",top:"50%",left:"50%",width:3,height:Math.round(dia*0.38),background:C.wrn,borderRadius:2,transform:`translate(-50%,-100%) rotate(${wd}deg)`,transformOrigin:"bottom center"}}/>
       <div style={{position:"absolute",top:"50%",left:"50%",width:7,height:7,background:C.wrn,borderRadius:4,transform:"translate(-50%,-50%)"}}/>
     </div>
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-      <input type="range" min="0" max="359" value={wd} onChange={e=>onChange(parseInt(e.target.value))} style={{width:80}}/>
-      <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc,fontSize:16,fontWeight:700,width:40}}>{wd}°</span>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
+      <input type="range" min="0" max="359" value={wd} onChange={e=>onChange(parseInt(e.target.value,10))} style={{width:compact?110:80,flex:1,minWidth:60}}/>
+      <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc,fontSize:fs,fontWeight:700,minWidth:38}}>{wd}°</span>
     </div>
+    {hint&&<div style={{marginTop:8,fontSize:9,color:C.txD,lineHeight:1.45}}>{hint}</div>}
   </div>);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
-function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const markersRef=useRef([]);
+  const manMarkersRef=useRef([]);
+  const [mapBearing,setMapBearing]=useState(0);
+  const [mapLoaded,setMapLoaded]=useState(false);
 
   useEffect(()=>{
     if(!mapContainer.current||mapRef.current)return;
@@ -612,35 +655,32 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
     });
     mapRef.current=map;
 
+    const syncBearing=()=>setMapBearing(map.getBearing());
+    map.on("rotate",syncBearing);
+
     map.on("load",()=>{
-      // Add track if available
       if(trackPoints&&trackPoints.length>1){
         map.addSource("track",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}}});
         map.addLayer({id:"track-line",type:"line",source:"track",paint:{"line-color":C.trk,"line-width":3,"line-opacity":0.8}});
-        // Fit bounds to track
         const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
         map.fitBounds([[Math.min(...lons)-0.005,Math.min(...lats)-0.003],[Math.max(...lons)+0.005,Math.max(...lats)+0.003]],{padding:40});
       }
-
-      // Add course line
       if(courseMarks&&courseMarks.length>1){
         map.addSource("course",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:courseMarks.map(m=>[m.lon,m.lat])}}});
         map.addLayer({id:"course-line",type:"line",source:"course",paint:{"line-color":C.course,"line-width":2,"line-opacity":0.6,"line-dasharray":[4,3]}});
       }
+      syncBearing();
+      setMapLoaded(true);
     });
 
-    return()=>{map.remove();mapRef.current=null};
+    return()=>{map.off("rotate",syncBearing);map.remove();mapRef.current=null;setMapLoaded(false)};
   },[]);
 
-  // Add/update markers
   useEffect(()=>{
-    const map=mapRef.current;if(!map)return;
-    // Remove existing markers
+    const map=mapRef.current;if(!map||!mapLoaded)return;
     markersRef.current.forEach(m=>m.remove());
     markersRef.current=[];
-
     if(!marks)return;
-
     Object.entries(marks).forEach(([name,mk])=>{
       const el=document.createElement("div");
       let border,fg,bg;
@@ -650,24 +690,40 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
       el.style.cssText=`width:28px;height:28px;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;font-size:8px;font-weight:700;font-family:'JetBrains Mono',monospace;cursor:${mk.fixed?"default":"grab"};border:2px solid ${border};background:${bg};color:${fg};`;
       const ab=document.createElement("span");ab.style.fontSize="9px";ab.textContent=name.substring(0,3);el.appendChild(ab);
       if(mk.roundTack){const tb=document.createElement("span");tb.style.fontSize="7px";tb.style.opacity="0.95";tb.textContent=mk.roundTack;el.appendChild(tb);}
-
       const marker=new mapboxgl.Marker({element:el,draggable:!mk.fixed})
         .setLngLat([mk.lon,mk.lat])
         .setPopup(new mapboxgl.Popup({offset:12}).setHTML(`<strong>${name}</strong>${mk.roundTack?` <span style="color:#8899b0">(${mk.roundTack==="P"?"Port":"Stbd"})</span>`:""}${mk.fixed?"":" (drag to adjust)"}${mk.desc?`<br/><span style="color:#8899b0">${mk.desc}</span>`:""}`))
         .addTo(map);
-
       if(!mk.fixed){
         marker.on("dragend",()=>{
           const lngLat=marker.getLngLat();
           if(onMarkDrag)onMarkDrag(name,lngLat.lat,lngLat.lng);
         });
       }
-
       markersRef.current.push(marker);
     });
-  },[marks]);
+  },[marks,onMarkDrag,mapLoaded]);
 
-  // Update track and course lines when data changes
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!mapLoaded)return;
+    manMarkersRef.current.forEach(m=>m.remove());
+    manMarkersRef.current=[];
+    if(!manoeuvres)return;
+    const add=(m,title,color)=>{
+      const lat=m.lat!=null?m.lat:trackPoints?.[m.idx]?.lat;
+      const lon=m.lon!=null?m.lon:trackPoints?.[m.idx]?.lon;
+      if(lat==null||lon==null)return;
+      const el=document.createElement("div");
+      el.style.cssText=`display:flex;flex-direction:column;align-items:center;padding:4px 8px 5px;border-radius:8px;font-size:11px;font-weight:800;font-family:'JetBrains Mono',monospace;border:2px solid ${color};background:#0a101fcc;color:${color};box-shadow:0 2px 8px rgba(0,0,0,.45);pointer-events:none;line-height:1.15;`;
+      const t1=document.createElement("div");t1.textContent=title;t1.style.whiteSpace="nowrap";
+      el.appendChild(t1);
+      if(m.crossing){const t2=document.createElement("div");t2.textContent=m.crossing;t2.style.fontSize=9;t2.style.fontWeight=700;t2.style.opacity="0.95";t2.style.marginTop="2px";el.appendChild(t2);}
+      manMarkersRef.current.push(new mapboxgl.Marker({element:el,anchor:"bottom"}).setLngLat([lon,lat]).addTo(map));
+    };
+    manoeuvres.tacks.forEach((m,i)=>add(m,`Tack ${i+1}`,C.tack));
+    manoeuvres.gybes.forEach((m,i)=>add(m,`Gybe ${i+1}`,C.gybe));
+  },[manoeuvres,trackPoints,mapLoaded]);
+
   useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     if(trackPoints&&trackPoints.length>1){
@@ -680,7 +736,26 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag}){
     }
   },[trackPoints,courseMarks]);
 
-  return <div ref={mapContainer} style={{width:"100%",height:"100%",borderRadius:12}}/>;
+  const roseSz=84;
+  return(
+    <div style={{position:"relative",width:"100%",height:"100%",borderRadius:12,overflow:"hidden"}}>
+      <div ref={mapContainer} style={{position:"absolute",inset:0,width:"100%",height:"100%"}}/>
+      <div style={{position:"absolute",top:10,right:10,width:roseSz,height:roseSz,pointerEvents:"none",zIndex:4,transform:`rotate(${-mapBearing}deg)`,transformOrigin:"50% 50%",transition:"transform 0.08s linear"}} aria-hidden>
+        <svg width={roseSz} height={roseSz} viewBox="0 0 100 100" style={{display:"block",filter:"drop-shadow(0 1px 3px rgba(0,0,0,.5))"}}>
+          <circle cx="50" cy="50" r="44" fill="#0a101fbb" stroke="#4a6a8a" strokeWidth="1.5"/>
+          {[0,90,180,270].map(deg=>{
+            const rad=(deg-90)*Math.PI/180,x1=50+38*Math.cos(rad),y1=50+38*Math.sin(rad),x2=50+44*Math.cos(rad),y2=50+44*Math.sin(rad);
+            return(<line key={deg} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#8aa4c4" strokeWidth="1.2"/>);
+          })}
+          <text x="50" y="15" textAnchor="middle" fill="#e8edf5" fontSize="11" fontWeight="800" fontFamily="system-ui,sans-serif">N</text>
+          <text x="88" y="54" textAnchor="middle" fill="#a8b8d0" fontSize="10" fontWeight="700" fontFamily="system-ui,sans-serif">E</text>
+          <text x="50" y="92" textAnchor="middle" fill="#a8b8d0" fontSize="10" fontWeight="700" fontFamily="system-ui,sans-serif">S</text>
+          <text x="12" y="54" textAnchor="middle" fill="#a8b8d0" fontSize="10" fontWeight="700" fontFamily="system-ui,sans-serif">W</text>
+          <polygon points="50,22 46,34 54,34" fill="#4a9eff"/>
+        </svg>
+      </div>
+    </div>
+  );
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -918,6 +993,13 @@ function App(){
 
   const markOrderLap1=useMemo(()=>expandCourseMarks(coursePreambleSeq,courseMarkSeq,1),[coursePreambleSeq,courseMarkSeq]);
 
+  /** Live tack/gybe positions for course-setup map (same engine as full analysis). */
+  const setupMapAnalysis=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<20)return null;
+    const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps]);
+
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
     if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
@@ -946,7 +1028,7 @@ function App(){
     return analysis;
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps]);
 
-  const effWind=windOvr!==null?windOvr:(curAnalysis?.windDir||0);
+  const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
 
   // Handle mark drag
   const onMarkDrag=useCallback((name,lat,lng)=>{
@@ -1126,14 +1208,25 @@ function App(){
           </div>
         </div>
 
-        {/* Map */}
-        <div style={{height:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <CourseMap
-            marks={Object.keys(effectiveMarks).length>0?effectiveMarks:null}
-            trackPoints={croppedPoints}
-            courseMarks={courseMapLine}
-            onMarkDrag={onMarkDrag}
-          />
+        {/* Map + wind dial (wind FROM °, meteorological) */}
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16,alignItems:"stretch",minHeight:380}}>
+          <div style={{flex:2,minWidth:280,minHeight:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
+            <CourseMap
+              marks={Object.keys(effectiveMarks).length>0?effectiveMarks:null}
+              trackPoints={croppedPoints}
+              courseMarks={courseMapLine}
+              onMarkDrag={onMarkDrag}
+              manoeuvres={setupMapAnalysis?{tacks:setupMapAnalysis.tacks,gybes:setupMapAnalysis.gybes}:null}
+            />
+          </div>
+          <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
+            <WindRose
+              wd={effWind}
+              onChange={setWindOvr}
+              compact
+              hint={setupMapAnalysis?.windEst?`Auto ${setupMapAnalysis.windEst.dir}° (${(setupMapAnalysis.windEst.conf*100).toFixed(0)}% conf) — slider overrides`:"Slider sets wind FROM · tacks/gybes update on map"}
+            />
+          </div>
         </div>
 
         {/* Mark legend — port (P) red, starboard (S) green */}
@@ -1221,25 +1314,23 @@ function App(){
             <Stat label="Gybes" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
           </div>
 
-          <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
-            <WindRose wd={effWind} onChange={setWindOvr}/>
-            <div style={{flex:1,minWidth:180}}>
-              <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,height:"100%"}}>
-                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack Split</div>
-                <div style={{display:"flex",gap:3,height:24,borderRadius:6,overflow:"hidden",marginBottom:10}}>
-                  <div style={{background:C.port,flex:a.portS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>Port</div>
-                  <div style={{background:C.stbd,flex:a.stbdS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000"}}>Stbd</div>
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.txM}}>
-                  <span>{Math.round(a.portS/(a.portS+a.stbdS||1)*100)}%</span>
-                  <span>{Math.round(a.stbdS/(a.portS+a.stbdS||1)*100)}%</span>
-                </div>
-                {a.windEst&&<div style={{marginTop:12,fontSize:10,color:C.txD,lineHeight:1.6}}>
-                  Auto wind: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)<br/>
-                  <span style={{color:C.txM}}>Adjust compass to refine</span>
-                </div>}
-              </div>
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack split (time on each tack)</div>
+            <div style={{display:"flex",gap:3,height:24,borderRadius:6,overflow:"hidden",marginBottom:10}}>
+              <div style={{background:C.port,flex:a.portS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>Port</div>
+              <div style={{background:C.stbd,flex:a.stbdS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000"}}>Stbd</div>
             </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.txM}}>
+              <span>{Math.round(a.portS/(a.portS+a.stbdS||1)*100)}%</span>
+              <span>{Math.round(a.stbdS/(a.portS+a.stbdS||1)*100)}%</span>
+            </div>
+            <div style={{marginTop:12,fontSize:12,color:C.txt}}>
+              Wind from: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>
+              <span style={{color:C.txD,fontSize:10,marginLeft:8}}>Set on Course &amp; map</span>
+            </div>
+            {a.windEst&&<div style={{marginTop:8,fontSize:10,color:C.txD,lineHeight:1.6}}>
+              Auto estimate: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)
+            </div>}
           </div>
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:12}}>
@@ -1277,13 +1368,35 @@ function App(){
             <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="/100"/>
           </div>
 
-          {(a.tacks.length>0||a.gybes.length>0)&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Quality Distribution</div>
-            <ResponsiveContainer width="100%" height={120}>
-              <BarChart data={[...a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,tp:"tack"})),...a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,tp:"gybe"}))]}>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/><XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/><YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}}/>
-                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{[...a.tacks,...a.gybes].map((m,i)=><Cell key={i} fill={m.q>=70?C.acc:m.q>=45?C.gld:C.wrn}/>)}</Bar>
+          {a.tacks.length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Tack quality</div>
+            <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.5}}>
+              <span style={{color:C.port,fontWeight:700}}>■</span> P→S (port tack → starboard)&nbsp;&nbsp;
+              <span style={{color:C.stbd,fontWeight:700}}>■</span> S→P (starboard → port)
+            </div>
+            <ResponsiveContainer width="100%" height={110}>
+              <BarChart data={a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,crossing:t.crossing||"—"}))}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
+                <YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing}`:lab;}}/>
+                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.tacks.map((t,i)=><Cell key={`tk${i}`} fill={manBarFill(t.q,t.crossing,false)}/>)}</Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>}
+          {a.gybes.length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Gybe quality</div>
+            <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.5}}>
+              <span style={{color:"#b06eff",fontWeight:700}}>■</span> P→S&nbsp;&nbsp;
+              <span style={{color:C.gybe,fontWeight:700}}>■</span> S→P
+            </div>
+            <ResponsiveContainer width="100%" height={110}>
+              <BarChart data={a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,crossing:g.crossing||"—"}))}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
+                <YAxis domain={[0,100]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v} /100`,"Quality"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing}`:lab;}}/>
+                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.gybes.map((g,i)=><Cell key={`gy${i}`} fill={manBarFill(g.q,g.crossing,true)}/>)}</Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>}
