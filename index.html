@@ -799,6 +799,7 @@ function computeMaxSpeedHighlight(en,legs,wd){
   const legTypeLabel=leg?leg.type.charAt(0).toUpperCase()+leg.type.slice(1):"";
   const lapLabel=leg&&leg.lap!=null?(leg.lap===0?"Preamble":`Lap ${leg.lap}`):"";
   return{
+    idx:bestI,
     time:p.time-t0,
     speed:parseFloat(bestS.toFixed(2)),
     twaSample,
@@ -806,6 +807,31 @@ function computeMaxSpeedHighlight(en,legs,wd){
     legTypeLabel,
     lapLabel,
   };
+}
+
+/** Downsample for chart, but always include the global max-speed sample so markers sit on the curve. */
+function buildSpeedTimeSeries(en,maxMark){
+  const t0=en[0].time;
+  const base=en.filter((_,i)=>i%3===0).map(p=>({
+    time:p.time-t0,
+    speed:parseFloat(ms2k(p.ss).toFixed(2)),
+    cog:Math.round(p.cog),
+  }));
+  if(!maxMark||maxMark.idx==null||maxMark.idx<0||maxMark.idx>=en.length)return base;
+  const t=maxMark.time,sp=maxMark.speed,cog=Math.round(en[maxMark.idx].cog);
+  if(!base.length)return[{time:t,speed:sp,cog}];
+  let bestJ=0,bestDt=Infinity;
+  base.forEach((d,j)=>{const dt=Math.abs(d.time-t);if(dt<bestDt){bestDt=dt;bestJ=j;}});
+  const step=base.length>=2?(base[base.length-1].time-base[0].time)/Math.max(1,base.length-1):2;
+  const mergeRadius=Math.max(0.4,step*0.75);
+  if(bestDt<=mergeRadius){
+    return base.map((d,j)=>{
+      if(j!==bestJ)return d;
+      const ns=Math.max(d.speed,sp);
+      return{...d,speed:ns,cog:d.speed<ns?cog:d.cog};
+    });
+  }
+  return[...base,{time:t,speed:sp,cog}].sort((a,b)=>a.time-b.time);
 }
 
 function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null){
@@ -850,13 +876,13 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const streaks={};
   [2,3,4,5,6].forEach(th=>{let lo=0,cu=0;en.forEach(p=>{if(ms2k(p.ss)>=th){cu++;if(cu>lo)lo=cu}else cu=0});streaks[th]=lo});
 
-  const speedTL=en.filter((_,i)=>i%3===0).map(p=>({time:p.time-en[0].time,speed:parseFloat(ms2k(p.ss).toFixed(2)),cog:Math.round(p.cog)}));
+  const maxSpeedMark=computeMaxSpeedHighlight(en,legs,wd);
+  const speedTL=buildSpeedTimeSeries(en,maxSpeedMark);
 
   let portS=0,stbdS=0;
   en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
 
   const upwindByTack=computeUpwindTackLegStats(en,legs,wd);
-  const maxSpeedMark=computeMaxSpeedHighlight(en,legs,wd);
 
   return{points:en,windDir:wd,windEst,stats:{totalDist,duration,maxSpeed,avgSpeed,tackCount:tacks.length,gybeCount:gybes.length},tacks,gybes,legs,streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark};
 }
