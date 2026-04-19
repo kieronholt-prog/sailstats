@@ -34,7 +34,7 @@ button{font-family:inherit;cursor:pointer}a{color:inherit}
 
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef}=React;
-const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart,ReferenceDot,Label}=Recharts;
 
 /* ═══════════════════════════════════════════════════════════════════
    CONFIG
@@ -722,6 +722,79 @@ function classifyLegs(legs,wd){
   });
 }
 
+/** Acute true wind angle (°): angle between COG and wind FROM (0–180). */
+function acuteTwaFromWindDeg(cog,wdFrom){
+  const r=((Number(cog)-wdFrom+360)%360);
+  return r>180?360-r:r;
+}
+
+function circularMeanStdDeg(cogs){
+  if(!cogs||!cogs.length)return{mean:null,std:null,n:0};
+  let sx=0,sy=0;
+  for(const c of cogs){
+    const rad=c*D;
+    sx+=Math.cos(rad);sy+=Math.sin(rad);
+  }
+  const n=cogs.length;
+  sx/=n;sy/=n;
+  const R=Math.hypot(sx,sy);
+  const mean=(Math.atan2(sy,sx)/D+360)%360;
+  const stdDeg=R>1e-6?Math.sqrt(Math.max(0,-2*Math.log(R)))/D:0;
+  return{mean,std:Math.min(stdDeg,120),n};
+}
+
+function sampleStdDev(arr){
+  if(!arr||arr.length<2)return 0;
+  const m=arr.reduce((a,b)=>a+b,0)/arr.length;
+  return Math.sqrt(arr.reduce((s,x)=>s+(x-m)**2,0)/(arr.length-1));
+}
+
+/** Speed / COG stats for samples on upwind legs, split by tack (vs wind FROM). */
+function computeUpwindTackLegStats(en,legs,wd){
+  const portSp=[],portCg=[],stbdSp=[],stbdCg=[];
+  for(const l of legs||[]){
+    if(l.type!=="upwind"||l.startIdx==null||l.endIdx==null)continue;
+    for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
+      const p=en[i],s=ms2k(p.ss||0);
+      if(s<0.3)continue;
+      const r=((p.cog-wd+360)%360);
+      if(r>180){stbdSp.push(s);stbdCg.push(p.cog);}
+      else{portSp.push(s);portCg.push(p.cog);}
+    }
+  }
+  const pack=(spds,cgs)=>{
+    if(!spds.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null};
+    const avgSpeed=spds.reduce((a,b)=>a+b,0)/spds.length;
+    const speedStd=sampleStdDev(spds);
+    const{mean:avgCourse,std:courseStd}=circularMeanStdDeg(cgs);
+    return{n:spds.length,avgSpeed,speedStd,avgCourse,courseStd};
+  };
+  return{port:pack(portSp,portCg),stbd:pack(stbdSp,stbdCg)};
+}
+
+function computeMaxSpeedHighlight(en,legs,wd){
+  if(!en||!en.length)return null;
+  let bestI=-1,bestS=-1;
+  en.forEach((p,i)=>{const s=ms2k(p.ss||0);if(s>bestS){bestS=s;bestI=i;}});
+  if(bestI<0||bestS<0)return null;
+  const p=en[bestI],t0=en[0].time;
+  const twaSample=acuteTwaFromWindDeg(p.cog,wd);
+  let leg=null;
+  for(const l of legs||[]){
+    if(bestI>=l.startIdx&&bestI<=l.endIdx){leg=l;break;}
+  }
+  const legTypeLabel=leg?leg.type.charAt(0).toUpperCase()+leg.type.slice(1):"";
+  const lapLabel=leg&&leg.lap!=null?(leg.lap===0?"Preamble":`Lap ${leg.lap}`):"";
+  return{
+    time:p.time-t0,
+    speed:parseFloat(bestS.toFixed(2)),
+    twaSample,
+    leg,
+    legTypeLabel,
+    lapLabel,
+  };
+}
+
 function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
@@ -769,7 +842,10 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   let portS=0,stbdS=0;
   en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
 
-  return{points:en,windDir:wd,windEst,stats:{totalDist,duration,maxSpeed,avgSpeed,tackCount:tacks.length,gybeCount:gybes.length},tacks,gybes,legs,streaks,speedTL,portS,stbdS};
+  const upwindByTack=computeUpwindTackLegStats(en,legs,wd);
+  const maxSpeedMark=computeMaxSpeedHighlight(en,legs,wd);
+
+  return{points:en,windDir:wd,windEst,stats:{totalDist,duration,maxSpeed,avgSpeed,tackCount:tacks.length,gybeCount:gybes.length},tacks,gybes,legs,streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark};
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1703,6 +1779,34 @@ function App(){
           </div>
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed over time</div>
+            <ResponsiveContainer width="100%" height={180}>
+              <AreaChart data={a.speedTL} margin={{top:18,right:8,left:0,bottom:0}}>
+                <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                <XAxis dataKey="time" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
+                <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,"auto"]}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
+                <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false}/>
+                {a.maxSpeedMark&&<ReferenceDot x={a.maxSpeedMark.time} y={a.maxSpeedMark.speed} r={6} fill={C.gld} stroke="#fff" strokeWidth={2}>
+                  <Label value="Max" position="top" offset={6} fill={C.gld} fontSize={10} fontWeight={700}/>
+                </ReferenceDot>}
+              </AreaChart>
+            </ResponsiveContainer>
+            {a.maxSpeedMark&&<div style={{marginTop:12,fontSize:12,color:C.txt,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`}}>
+              <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Peak {a.maxSpeedMark.speed} kts</strong>
+              {a.maxSpeedMark.leg?<>
+                <span style={{color:C.txM}}> · </span>{a.maxSpeedMark.legTypeLabel} leg<span style={{color:C.txM}}> · </span>{a.maxSpeedMark.leg.from} → {a.maxSpeedMark.leg.to}
+                <span style={{color:C.txM}}> · </span>TWA {Math.round(a.maxSpeedMark.twaSample)}° true
+                <span style={{color:C.txM}}> · </span>{a.maxSpeedMark.lapLabel}
+              </>:<>
+                <span style={{color:C.txM}}> · </span>TWA {Math.round(a.maxSpeedMark.twaSample)}° true
+                <span style={{color:C.txD,fontSize:11}}> (outside mark-based legs)</span>
+              </>}
+            </div>}
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack split (time on each tack)</div>
             <div style={{display:"flex",gap:3,height:24,borderRadius:6,overflow:"hidden",marginBottom:10}}>
               <div style={{background:C.port,flex:a.portS||1,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff"}}>Port</div>
@@ -1721,32 +1825,35 @@ function App(){
             </div>}
           </div>
 
-          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:12}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed Over Time</div>
-            <ResponsiveContainer width="100%" height={160}>
-              <AreaChart data={a.speedTL}>
-                <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                <XAxis dataKey="time" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
-                <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
-                <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false}/>
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed Streaks</div>
-            <ResponsiveContainer width="100%" height={100}>
-              <BarChart data={Object.entries(a.streaks).map(([k,v])=>({th:`≥${k}kts`,s:v}))}>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                <XAxis dataKey="th" tick={{fill:C.txM,fontSize:10}} stroke={C.bdr}/>
-                <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}}/>
-                <Bar dataKey="s" name="seconds" radius={[4,4,0,0]}>{Object.keys(a.streaks).map((k,i)=><Cell key={k} fill={[C.acc,C.blu,C.gld,C.wrn,C.port][i]}/>)}</Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {(()=>{
+            const uw=a.upwindByTack||{port:{},stbd:{}};
+            const row=(title,col,u)=>{
+              const mono={fontFamily:"'JetBrains Mono',monospace"};
+              const v=(x,d)=>x==null||!Number.isFinite(x)?"—":(d!=null?x.toFixed(d):Math.round(x));
+              return(<div key={title} style={{background:`${col}10`,border:`1px solid ${col}44`,borderRadius:10,padding:12}}>
+                <div style={{fontSize:11,fontWeight:700,color:col,marginBottom:10}}>{title}</div>
+                {!u.n?<div style={{fontSize:11,color:C.txM}}>No upwind samples on this tack.</div>:<>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:1.9}}>
+                    Speed (avg)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgSpeed,1)} kts</span></div>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
+                    Speed variability<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.speedStd,2)} kts σ</span></div>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
+                    Avg course (COG)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgCourse,0)}°</span></div>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
+                    Course variability<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.courseStd,1)}°</span></div>
+                  <div style={{fontSize:9,color:C.txD,marginTop:8}}>{u.n} GPS samples · upwind legs only</div>
+                </>}
+              </div>);
+            };
+            return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
+              <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Upwind · port vs starboard</div>
+              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>Stats from GPS points on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from {effWind}°. Course = COG; variability = circular spread (σ°).</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                {row("Upwind · port tack",C.port,uw.port)}
+                {row("Upwind · starboard tack",C.stbd,uw.stbd)}
+              </div>
+            </div>);
+          })()}
         </>}
 
         {/* MANOEUVRES */}
