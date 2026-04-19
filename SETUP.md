@@ -82,9 +82,29 @@ CREATE POLICY "Allow all on analyses" ON analyses FOR ALL USING (true) WITH CHEC
 3. Your default public token is on the main page — copy it
    - Looks like `pk.eyJ1Ijoi...`
 
+**Detailed click-by-click steps** (Supabase SQL, Cloudflare variables, `ALLOWED_ORIGIN`, redeploy): see **[AUTH_WORKER_SETUP.md](./AUTH_WORKER_SETUP.md)** in this repo.
+
+## Step 3b: Supabase Auth + `users.auth_user_id` (required for email login)
+
+1. In Supabase go to **Authentication → Providers** and ensure **Email** is enabled (default).
+2. In **SQL Editor**, run **only** the block below (lines starting with `--` are **SQL comments**, not separate instructions — the whole block is valid PostgreSQL):
+
+```sql
+-- Link Strava row to Supabase Auth user (one Strava account per login)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_user_id UUID UNIQUE;
+CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users(auth_user_id);
+
+-- Optional: tighten RLS later so only the signed-in user can read/write their analyses.
+-- For a first deploy you can keep the existing permissive policies until sessions work.
+```
+
+   Optional: confirm the column with another query or the Table Editor — see **[AUTH_WORKER_SETUP.md](./AUTH_WORKER_SETUP.md)** §1.3.
+
+3. Create a **service role** key (**Settings → API → service_role**). Put it **only** in the Worker (never in `index.html`). The Worker uses it to read/write `users` (Strava tokens) by `auth_user_id`.
+
 ## Step 4: Cloudflare Worker (Auth)
 
-This keeps your Strava client secret secure on the server side.
+This keeps your Strava client secret secure on the server side and implements **email/password sessions** (HttpOnly cookie) plus **Strava API proxying**.
 
 1. Go to [dash.cloudflare.com](https://dash.cloudflare.com)
 2. Go to **Workers & Pages → Create**
@@ -96,8 +116,15 @@ This keeps your Strava client secret secure on the server side.
 8. Go to **Settings → Variables and Secrets** and add:
    - `STRAVA_CLIENT_ID` — your Strava client ID
    - `STRAVA_CLIENT_SECRET` — your Strava client secret (click **Encrypt**)
-   - `ALLOWED_ORIGIN` — `https://YOUR_USERNAME.github.io`
+   - `SUPABASE_URL` — same as in the app (e.g. `https://abcdefgh.supabase.co`)
+   - `SUPABASE_ANON_KEY` — same **anon** / publishable key as in the app (for Auth `signUp` / `signIn` from the Worker)
+   - `SUPABASE_SERVICE_ROLE_KEY` — **service_role** JWT (secret) — for `users` upserts and lookups by `auth_user_id`
+   - `SESSION_SECRET` — long random string (e.g. 32+ bytes from `openssl rand -hex 32`) — encrypts the session cookie
+   - `ALLOWED_ORIGIN` — **exact** frontend origin, **no path**: `https://YOUR_USERNAME.github.io`  
+     If the app is served from a project page, use that origin (e.g. `https://YOUR_USERNAME.github.io/sailstats` is **wrong** — the origin is still `https://YOUR_USERNAME.github.io`).
 9. Note your worker URL — looks like `https://sailstats-auth.YOUR_SUBDOMAIN.workers.dev`
+
+**CORS + cookies:** the browser only sends the `ss_session` cookie on `fetch(..., { credentials: "include" })` when `ALLOWED_ORIGIN` matches the page origin exactly.
 
 ## Step 5: Configure the App
 
@@ -113,7 +140,7 @@ const CONFIG = {
 };
 ```
 
-Replace each value with your actual credentials from steps 1-4.
+Replace each value with your actual credentials from the steps above.
 
 ## Step 6: Deploy to GitHub Pages
 
@@ -132,20 +159,14 @@ Your app is now live at `https://YOUR_USERNAME.github.io/sailstats/`
 
 ```
 Sailor opens app
-  → Taps "Connect with Strava"
-  → Redirected to Strava OAuth page
-  → Authorises the app
-  → Strava redirects back with a code
-  → App sends code to Cloudflare Worker (/token)
-  → Worker exchanges code for tokens using client_secret (kept safe server-side)
-  → Worker returns tokens to the app
-  → App saves user + tokens to Supabase (users table)
-  → App fetches activities from Strava API
-  → Sailor picks an activity, sets up course, analyses
-  → Analysis results saved to Supabase (analyses table)
-  → Next visit: app checks Supabase for existing session
-  → If token expired: Worker refreshes it
-  → Sailor sees their past analyses and can add new ones
+  → Creates a SailStats account (email/password) or signs in
+  → Worker sets HttpOnly session cookie (encrypted Supabase refresh)
+  → Taps “Link Strava” → Strava OAuth → redirect with ?code=
+  → App POSTs code to Worker /strava/exchange (with cookie)
+  → Worker exchanges code, saves tokens in Supabase users row (service role), keyed by auth_user_id
+  → Activities & streams are fetched via Worker proxy (/strava/activities, /strava/streams/…)
+  → Short-lived Supabase JWT returned to the app for saving analyses (RLS-ready)
+  → Next visit: GET /session refreshes cookie + returns Supabase JWT + Strava linked flag
 ```
 
 ## File Structure
@@ -162,8 +183,8 @@ sailstats/
 
 1. **File upload** works immediately — no API keys needed for GPX/FIT upload
 2. **Mapbox** — test by selecting a course in the course setup screen
-3. **Strava** — test by clicking "Connect with Strava" and authorising
-4. **Supabase** — check the tables in the Supabase dashboard after signing in
+3. **Strava** — sign in, then “Link Strava”, then open activities
+4. **Supabase** — check `users` (with `auth_user_id`) and `analyses` in the dashboard after signing in
 
 ## Troubleshooting
 
@@ -174,10 +195,10 @@ sailstats/
 → Check the Mapbox token is correct and not expired
 
 **Login doesn't persist between visits**
-→ Check Supabase URL and anon key are correct. Check browser console for errors.
+→ Confirm `ALLOWED_ORIGIN` matches the browser address **origin** exactly. Cookies are `Secure; SameSite=None` and only sent to the Worker when `fetch(..., { credentials: "include" })` is used (the app does this). Check **Application → Cookies** for `ss_session` on the Worker host.
 
 **Worker returns CORS errors**
-→ Check ALLOWED_ORIGIN in worker environment variables matches your GitHub Pages URL exactly (including https://)
+→ `ALLOWED_ORIGIN` must be the **exact** frontend origin (scheme + host + optional port), not `*`, and must match the page you open. After changing env vars, **redeploy** the Worker.
 
 **Analysis results not saving**
 → Check Supabase tables were created correctly. Check the RLS policies are in place.

@@ -51,18 +51,22 @@ const CONFIG = {
 };
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
+/** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
+let supabaseUserJwt=null;
+
 function supabaseFailed(res) {
   return res && typeof res === "object" && !Array.isArray(res) && (res.code != null || res.message != null || res.error != null || res.hint != null);
 }
 
 const supabase = {
-  headers() {
-    return {
-      "apikey": CONFIG.SUPABASE_ANON_KEY,
-      "Authorization": `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Prefer: "return=representation",
+  headers(){
+    const bearer=supabaseUserJwt||CONFIG.SUPABASE_ANON_KEY;
+    return{
+      "apikey":CONFIG.SUPABASE_ANON_KEY,
+      "Authorization":`Bearer ${bearer}`,
+      "Content-Type":"application/json",
+      Accept:"application/json",
+      Prefer:"return=representation",
     };
   },
   async select(table, query = "") {
@@ -281,49 +285,52 @@ function parseFIT(buf){
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   STRAVA API
+   WORKER API — HttpOnly session cookie + Strava proxy (see worker.js)
    ═══════════════════════════════════════════════════════════════════ */
-function stravaAuthURL(){return`https://www.strava.com/oauth/authorize?client_id=${CONFIG.STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(STRAVA_REDIRECT)}&response_type=code&scope=activity:read_all&approval_prompt=auto`}
-
-async function exchangeToken(code) {
-  const r = await fetch(`${CONFIG.WORKER_URL}/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code, grant_type: "authorization_code" }),
+function workerFetch(path,opts={}){
+  return fetch(`${CONFIG.WORKER_URL}${path}`,{
+    credentials:"include",
+    headers:{"Content-Type":"application/json",...(opts.headers||{})},
+    ...opts,
   });
+}
+
+function stravaAuthURL(){
+  return`https://www.strava.com/oauth/authorize?client_id=${CONFIG.STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(STRAVA_REDIRECT)}&response_type=code&scope=activity:read_all&approval_prompt=auto`;
+}
+
+async function apiGetSession(){
+  const r=await workerFetch("/session",{method:"GET"});
   return r.json();
 }
 
-async function refreshToken(refreshTok) {
-  const r = await fetch(`${CONFIG.WORKER_URL}/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshTok, grant_type: "refresh_token" }),
-  });
+async function apiSignIn(email,password){
+  const r=await workerFetch("/auth/signin",{method:"POST",body:JSON.stringify({email,password})});
   return r.json();
 }
 
-async function saveUser(athlete, tokens) {
-  const nowSec = Math.floor(Date.now() / 1000);
-  const expiresAt = tokens.expires_at != null
-    ? Number(tokens.expires_at)
-    : (tokens.expires_in != null ? nowSec + Number(tokens.expires_in) : null);
-  return supabase.upsert("users", {
-    strava_id: athlete.id,
-    firstname: athlete.firstname,
-    lastname: athlete.lastname,
-    profile_pic: athlete.profile_medium || athlete.profile,
-    access_token: tokens.access_token,
-    refresh_token: tokens.refresh_token,
-    token_expires: expiresAt,
-    updated_at: new Date().toISOString(),
-  }, "strava_id");
+async function apiSignUp(email,password){
+  const r=await workerFetch("/auth/signup",{method:"POST",body:JSON.stringify({email,password})});
+  return r.json();
 }
 
-async function loadUser(stravaId) {
-  const rows = await supabase.select("users", `strava_id=eq.${stravaId}&limit=1`);
-  if (!Array.isArray(rows)) return null;
-  return rows.length > 0 ? rows[0] : null;
+async function apiLogout(){
+  await workerFetch("/auth/logout",{method:"POST",body:"{}"});
+}
+
+async function exchangeStravaLinked(code){
+  const r=await workerFetch("/strava/exchange",{method:"POST",body:JSON.stringify({code,redirect_uri:STRAVA_REDIRECT})});
+  return r.json();
+}
+
+async function fetchActs(page=1){
+  const r=await workerFetch(`/strava/activities?page=${encodeURIComponent(page)}`,{method:"GET"});
+  return r.json();
+}
+
+async function fetchStreams(activityId){
+  const r=await workerFetch(`/strava/streams/${encodeURIComponent(activityId)}`,{method:"GET"});
+  return r.json();
 }
 
 async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
@@ -347,16 +354,6 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
 async function loadAnalyses(stravaId) {
   const rows = await supabase.select("analyses", `strava_id=eq.${stravaId}&order=activity_date.desc&limit=50`);
   return Array.isArray(rows) ? rows : [];
-}
-
-async function fetchActs(tok,page=1){
-  const r=await fetch(`https://www.strava.com/api/v3/athlete/activities?per_page=30&page=${page}`,{headers:{Authorization:`Bearer ${tok}`}});
-  return r.json();
-}
-
-async function fetchStreams(tok,id){
-  const r=await fetch(`https://www.strava.com/api/v3/activities/${id}/streams?keys=time,latlng,velocity_smooth,heartrate,altitude&key_by_type=true`,{headers:{Authorization:`Bearer ${tok}`}});
-  return r.json();
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -820,7 +817,13 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres}){
    ═══════════════════════════════════════════════════════════════════ */
 function App(){
   const [view,setView]=useState("home");
-  const [sTok,setSTok]=useState(null);
+  /** Worker session: user + Strava link + short-lived Supabase JWT (not persisted). */
+  const [session,setSession]=useState(null);
+  const [authEmail,setAuthEmail]=useState("");
+  const [authPassword,setAuthPassword]=useState("");
+  const [authErr,setAuthErr]=useState("");
+  const [authBusy,setAuthBusy]=useState(false);
+  const [showRegister,setShowRegister]=useState(false);
   const [sAth,setSAth]=useState(null);
   const [acts,setActs]=useState([]);
   const [loadingActs,setLoadingActs]=useState(false);
@@ -838,6 +841,21 @@ function App(){
   const [cropStartText,setCropStartText]=useState("00:00:00");
   const [cropDurationText,setCropDurationText]=useState("");
   const fileRef=useRef(null);
+
+  const applyWorkerSession=useCallback((d)=>{
+    if(!d||!d.ok||!d.supabase_access_token)return false;
+    supabaseUserJwt=d.supabase_access_token;
+    setSession({
+      user:d.user,
+      strava:d.strava||{linked:false,athlete:null},
+      supabase_access_token:d.supabase_access_token,
+    });
+    if(d.strava?.athlete){
+      const at=d.strava.athlete;
+      setSAth({id:at.id,firstname:at.firstname||"",lastname:at.lastname||""});
+    }else setSAth(null);
+    return true;
+  },[]);
 
   const trackMeta=useMemo(()=>{
     if(!rawPoints||rawPoints.length<2)return null;
@@ -900,76 +918,54 @@ function App(){
     setCropDurationText(formatHMS(span));
   },[rawPoints]);
 
-  // OAuth callback
-  useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    const code = p.get("code");
-    if (code) {
-      window.history.replaceState({}, "", window.location.pathname);
-      exchangeToken(code).then(async d => {
-        if (d.access_token) {
-          setSTok(d.access_token);
-          setSAth(d.athlete);
-          localStorage.setItem("ss_strava_id", String(d.athlete.id));
-          const saved = await saveUser(d.athlete, d);
-          if (supabaseFailed(saved)) {
-            console.warn("Supabase saveUser failed — you will need to sign in with Strava again on the next visit:", saved);
-          }
-          setView("activities");
-        }
-      }).catch(console.error);
-    }
-  }, []);
-
-  // Restore session from Supabase
-  useEffect(() => {
-    (async () => {
-      try {
-        const sid = localStorage.getItem("ss_strava_id");
-        if (!sid) return;
-        const stravaId = Number(sid);
-        if (!Number.isFinite(stravaId)) return;
-        const user = await loadUser(stravaId);
-        if (!user) {
-          console.warn("Session restore: no user row in Supabase for strava_id", stravaId, "(check API key, RLS policies, and Network tab for /rest/v1/users)");
-          return;
-        }
-        const expSec = user.token_expires != null ? Number(user.token_expires) : 0;
-        const tokenStillValid = expSec > 0 && expSec * 1000 > Date.now();
-        if (tokenStillValid && user.access_token) {
-          setSTok(user.access_token);
-          setSAth({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname });
-        } else if (user.refresh_token) {
-          const d = await refreshToken(user.refresh_token);
-          if (d.access_token) {
-            setSTok(d.access_token);
-            setSAth({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname });
-            const saved = await saveUser({ id: user.strava_id, firstname: user.firstname, lastname: user.lastname }, d);
-            if (supabaseFailed(saved)) console.warn("Session restore: failed to save refreshed tokens:", saved);
-          } else {
-            console.warn("Session restore: token refresh failed (worker CORS, secret, or revoked refresh token):", d);
-          }
-        } else {
-          console.warn("Session restore: access token expired and no refresh_token in Supabase row");
-        }
-      } catch (e) { console.error("Session restore:", e); }
+  // Strava OAuth redirect — link to SailStats account (sign in first)
+  useEffect(()=>{
+    const p=new URLSearchParams(window.location.search);
+    const code=p.get("code");
+    if(!code)return;
+    window.history.replaceState({},"",window.location.pathname);
+    (async()=>{
+      try{
+        const d=await exchangeStravaLinked(code);
+        if(applyWorkerSession(d))setView("activities");
+        else alert(d.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”.":(d.error||"Strava link failed"));
+      }catch(e){console.error(e);alert("Strava link failed")}
     })();
-  }, []);
+  },[applyWorkerSession]);
 
-  // Load activities
+  // Restore SailStats session (HttpOnly cookie via worker)
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        const d=await apiGetSession();
+        if(cancelled)return;
+        if(d.ok&&d.supabase_access_token)applyWorkerSession(d);
+      }catch(e){console.error("Session restore:",e)}
+    })();
+    return()=>{cancelled=true};
+  },[applyWorkerSession]);
+
   const loadActs=useCallback(async()=>{
-    if(!sTok)return;setLoadingActs(true);
-    try{const a=await fetchActs(sTok);if(Array.isArray(a))setActs(a)}catch(e){console.error(e)}
-    setLoadingActs(false);
-  },[sTok]);
-
-  useEffect(()=>{if(sTok&&view==="activities"&&acts.length===0)loadActs()},[sTok,view,loadActs,acts.length]);
-
-  // Analyse Strava activity
-  const analyseStrava=useCallback(async(act)=>{
-    if(!sTok)return;setProcessing(true);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    if(!session?.strava?.linked)return;
+    setLoadingActs(true);
     try{
-      const streams=await fetchStreams(sTok,act.id);
+      const a=await fetchActs(1);
+      if(Array.isArray(a))setActs(a);
+      else if(a&&a.message)console.warn("Activities:",a);
+    }catch(e){console.error(e)}
+    setLoadingActs(false);
+  },[session]);
+
+  useEffect(()=>{
+    if(session?.strava?.linked&&view==="activities"&&acts.length===0)loadActs();
+  },[session,view,loadActs,acts.length]);
+
+  const analyseStrava=useCallback(async(act)=>{
+    if(!session?.strava?.linked)return;
+    setProcessing(true);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    try{
+      const streams=await fetchStreams(act.id);
       if(streams.latlng&&streams.time){
         const pts=streams.time.data.map((t,i)=>({time:new Date(act.start_date).getTime()/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
         setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
@@ -977,7 +973,7 @@ function App(){
       }
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
-  },[sTok]);
+  },[session]);
 
   // Handle file upload
   const handleFile=useCallback(async(file)=>{
@@ -1095,17 +1091,74 @@ function App(){
   const hdr={display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 20px",borderBottom:`1px solid ${C.bdr}`,background:`${C.bg}ee`,backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100};
   const btn=(bg,fg,bdr)=>({background:bg,color:fg,border:bdr?`1px solid ${bdr}`:"none",borderRadius:8,padding:"10px 18px",fontSize:14,fontWeight:600,cursor:"pointer"});
 
+  const signIn=useCallback(async()=>{
+    setAuthErr("");setAuthBusy(true);
+    try{
+      const d=await apiSignIn(authEmail.trim(),authPassword);
+      if(applyWorkerSession(d)){
+        if(d.strava?.linked)setView("activities");
+        else setView("home");
+      }else setAuthErr(typeof d.detail==="object"?JSON.stringify(d.detail):String(d.error||d.message||"Sign in failed"));
+    }catch(e){setAuthErr(String(e.message||e))}
+    finally{setAuthBusy(false)}
+  },[authEmail,authPassword,applyWorkerSession]);
+
+  const signUp=useCallback(async()=>{
+    setAuthErr("");setAuthBusy(true);
+    try{
+      const d=await apiSignUp(authEmail.trim(),authPassword);
+      if(d.needs_confirmation){setAuthErr("");alert(d.message||"Check your email to confirm, then sign in.");setShowRegister(false);return;}
+      if(applyWorkerSession(d))setView("home");
+      else setAuthErr(String(d.error||"Sign up failed"));
+    }catch(e){setAuthErr(String(e.message||e))}
+    finally{setAuthBusy(false)}
+  },[authEmail,authPassword,applyWorkerSession]);
+
+  const signOutAll=useCallback(async()=>{
+    try{await apiLogout()}catch(e){console.warn(e)}
+    supabaseUserJwt=null;
+    setSession(null);
+    setSAth(null);
+    setActs([]);
+    setView("home");
+  },[]);
+
   /* ─── HOME ─── */
   if(view==="home"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={{maxWidth:480,margin:"0 auto",padding:"70px 20px",textAlign:"center"}}>
         <div style={{fontSize:44,fontWeight:800,marginBottom:6,background:`linear-gradient(135deg,${C.acc},${C.blu})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",letterSpacing:-1}}>SailStats</div>
-        <div style={{fontSize:15,color:C.txM,marginBottom:44,lineHeight:1.6}}>GPS track analysis for dinghy sailors.<br/>Tacks, gybes, VMG, speed — with WSC course support.</div>
+        <div style={{fontSize:15,color:C.txM,marginBottom:24,lineHeight:1.6}}>GPS track analysis for dinghy sailors.<br/>Tacks, gybes, VMG, speed — with WSC course support.</div>
 
-        <a href={stravaAuthURL()} style={{...btn("#fc4c02","#fff"),display:"flex",alignItems:"center",justifyContent:"center",gap:10,width:"100%",textDecoration:"none",marginBottom:14,padding:"14px 24px"}}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169"/></svg>
-          Connect with Strava
-        </a>
+        <div style={{background:C.card,borderRadius:12,padding:18,border:`1px solid ${C.bdr}`,marginBottom:20,textAlign:"left"}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:12}}>SailStats account</div>
+          {session?.user?<>
+            <div style={{fontSize:13,color:C.txt,marginBottom:10}}>Signed in as <strong style={{color:C.acc}}>{session.user.email}</strong></div>
+            {session.strava?.linked?<>
+              <button type="button" onClick={()=>setView("activities")} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>Your Strava activities</button>
+            </>:<>
+              <div style={{fontSize:12,color:C.txM,marginBottom:10,lineHeight:1.5}}>Link Strava once. Tokens stay on the server; this device keeps a secure session cookie.</div>
+              <a href={stravaAuthURL()} style={{...btn("#fc4c02","#fff"),display:"flex",alignItems:"center",justifyContent:"center",gap:10,width:"100%",textDecoration:"none",padding:"12px 16px",marginBottom:10}}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169"/></svg>
+                Link Strava
+              </a>
+            </>}
+            <button type="button" onClick={signOutAll} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Sign out</button>
+          </>:<>
+            <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Email</label>
+            <input type="email" autoComplete="username" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} placeholder="you@example.com" style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}/>
+            <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Password</label>
+            <input type="password" autoComplete={showRegister?"new-password":"current-password"} value={authPassword} onChange={e=>setAuthPassword(e.target.value)} placeholder="••••••••" style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}/>
+            {authErr&&<div style={{fontSize:12,color:C.wrn,marginBottom:10}}>{authErr}</div>}
+            {showRegister?<>
+              <button type="button" disabled={authBusy} onClick={signUp} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Create account"}</button>
+              <button type="button" onClick={()=>{setShowRegister(false);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Back to sign in</button>
+            </>:<>
+              <button type="button" disabled={authBusy} onClick={signIn} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Sign in"}</button>
+              <button type="button" onClick={()=>{setShowRegister(true);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Create account</button>
+            </>}
+          </>}
+        </div>
 
         <div style={{fontSize:12,color:C.txD,margin:"16px 0"}}>— or —</div>
 
@@ -1133,13 +1186,9 @@ function App(){
   if(view==="activities"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
-        <button onClick={() => {
-          setSTok(null); setSAth(null);
-          localStorage.removeItem("ss_strava_id");
-          setView("home");
-        }} style={{background:"none",border:"none",color:C.txM,fontSize:12}}>Sign Out</button>
+        <button onClick={signOutAll} style={{background:"none",border:"none",color:C.txM,fontSize:12}}>Sign Out</button>
         <div style={{fontSize:15,fontWeight:700,color:C.acc}}>SailStats</div>
-        <div style={{fontSize:11,color:C.txM}}>{sAth?.firstname}</div>
+        <div style={{fontSize:11,color:C.txM}}>{sAth?.firstname||session?.user?.email||""}</div>
       </div>
       <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -1169,7 +1218,7 @@ function App(){
   if(view==="course-setup"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
-        <button onClick={()=>sTok?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
+        <button onClick={()=>session?.strava?.linked?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
         <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName}</div>
         <div style={{width:40}}/>
       </div>
