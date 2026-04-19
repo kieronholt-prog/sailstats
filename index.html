@@ -925,30 +925,29 @@ function App(){
     setCropDurationText(formatHMS(span));
   },[rawPoints]);
 
-  // Strava OAuth redirect — link to SailStats account (sign in first)
-  useEffect(()=>{
-    const p=new URLSearchParams(window.location.search);
-    const code=p.get("code");
-    if(!code)return;
-    window.history.replaceState({},"",window.location.pathname);
-    (async()=>{
-      try{
-        const d=await exchangeStravaLinked(code);
-        if(applyWorkerSession(d))setView("activities");
-        else alert(d.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”.":(d.error||"Strava link failed"));
-      }catch(e){console.error(e);alert("Strava link failed")}
-    })();
-  },[applyWorkerSession]);
-
-  // Restore SailStats session (HttpOnly cookie via worker)
+  // Restore session from HttpOnly cookie; if Strava returned ?code=, exchange only after /session succeeds
+  // (avoids racing POST /strava/exchange before the browser attaches the cross-site session cookie).
   useEffect(()=>{
     let cancelled=false;
     (async()=>{
       try{
+        const p=new URLSearchParams(window.location.search);
+        const code=p.get("code");
         const d=await apiGetSession();
         if(cancelled)return;
         if(d.ok&&d.supabase_access_token)applyWorkerSession(d);
-      }catch(e){console.error("Session restore:",e)}
+        if(!code)return;
+        if(!d.ok||!d.supabase_access_token){
+          alert("Sign in to SailStats first, then use “Link Strava”.");
+          window.history.replaceState({},"",window.location.pathname);
+          return;
+        }
+        window.history.replaceState({},"",window.location.pathname);
+        const ex=await exchangeStravaLinked(code);
+        if(cancelled)return;
+        if(applyWorkerSession(ex))setView("activities");
+        else alert(ex.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”.":(ex.error||"Strava link failed"));
+      }catch(e){console.error(e);alert("Strava link failed")}
     })();
     return()=>{cancelled=true};
   },[applyWorkerSession]);

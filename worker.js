@@ -112,10 +112,12 @@ async function readSession(request, env) {
 }
 
 function cookieSet(value) {
-  return `${COOKIE}=${value}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${SESS_MAX}`;
+  // Partitioned (CHIPS): improves delivery of this cross-site cookie after top-level
+  // navigations (e.g. Strava OAuth) when the app is on GitHub Pages and the Worker is on workers.dev.
+  return `${COOKIE}=${value}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/; Max-Age=${SESS_MAX}`;
 }
 function cookieClear() {
-  return `${COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0`;
+  return `${COOKIE}=; HttpOnly; Secure; SameSite=None; Partitioned; Path=/; Max-Age=0`;
 }
 
 async function refreshSupabaseSession(env, supabaseRefresh) {
