@@ -34,7 +34,17 @@ button{font-family:inherit;cursor:pointer}a{color:inherit}
 
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef}=React;
-const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart,ReferenceDot,Label}=Recharts;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ComposedChart,Scatter,ReferenceLine,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+
+const PEAK_MARK_ORANGE="#ff9500";
+function PeakSpeedGoldBullet(props){
+  const{cx,cy}=props;
+  return(<g><circle cx={cx} cy={cy} r={6.5} fill="#ffb84a" stroke="#fff" strokeWidth={2}/></g>);
+}
+function PeakSpeedLightning(props){
+  const{cx,cy}=props;
+  return(<text x={cx} y={cy+6} textAnchor="middle" dominantBaseline="middle" fill={PEAK_MARK_ORANGE} fontSize={20}>⚡</text>);
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    CONFIG
@@ -749,27 +759,38 @@ function sampleStdDev(arr){
   return Math.sqrt(arr.reduce((s,x)=>s+(x-m)**2,0)/(arr.length-1));
 }
 
-/** Speed / COG stats for samples on upwind legs, split by tack (vs wind FROM). */
+/** Speed / COG / VMG stats for samples on upwind legs, split by tack (vs wind FROM). */
 function computeUpwindTackLegStats(en,legs,wd){
-  const portSp=[],portCg=[],stbdSp=[],stbdCg=[];
+  const port=[],stbd=[];
   for(const l of legs||[]){
     if(l.type!=="upwind"||l.startIdx==null||l.endIdx==null)continue;
     for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
       const p=en[i],s=ms2k(p.ss||0);
       if(s<0.3)continue;
       const r=((p.cog-wd+360)%360);
-      if(r>180){stbdSp.push(s);stbdCg.push(p.cog);}
-      else{portSp.push(s);portCg.push(p.cog);}
+      const va=r>180?360-r:r;
+      const vmg=ms2k(p.ss||0)*Math.cos(va*D);
+      const o={s,cog:p.cog,vmg};
+      if(r>180)stbd.push(o);else port.push(o);
     }
   }
-  const pack=(spds,cgs)=>{
-    if(!spds.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null};
+  const pack=(arr)=>{
+    if(!arr.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null,avgVMG:null,twaFromWind:null,windRelLabel:null};
+    const spds=arr.map(x=>x.s),cogs=arr.map(x=>x.cog),vmgs=arr.map(x=>x.vmg);
     const avgSpeed=spds.reduce((a,b)=>a+b,0)/spds.length;
     const speedStd=sampleStdDev(spds);
-    const{mean:avgCourse,std:courseStd}=circularMeanStdDeg(cgs);
-    return{n:spds.length,avgSpeed,speedStd,avgCourse,courseStd};
+    const{mean:avgCourse,std:courseStd}=circularMeanStdDeg(cogs);
+    const avgVMG=vmgs.length?Math.abs(vmgs.reduce((a,b)=>a+b,0)/vmgs.length):null;
+    let twaFromWind=null,windRelLabel=null;
+    if(avgCourse!=null&&Number.isFinite(avgCourse)){
+      const acute=acuteTwaFromWindDeg(avgCourse,wd);
+      twaFromWind=acute;
+      const signedFromWind=((avgCourse-wd+540)%360)-180;
+      windRelLabel=`COG ${Math.round(avgCourse)}° (${signedFromWind>=0?"+":""}${Math.round(signedFromWind)}° from wind) · ${Math.round(acute)}° TWA`;
+    }
+    return{n:arr.length,avgSpeed,speedStd,avgCourse,courseStd,avgVMG,twaFromWind,windRelLabel};
   };
-  return{port:pack(portSp,portCg),stbd:pack(stbdSp,stbdCg)};
+  return{port:pack(port),stbd:pack(stbd)};
 }
 
 function computeMaxSpeedHighlight(en,legs,wd){
@@ -1781,20 +1802,26 @@ function App(){
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed over time</div>
             <ResponsiveContainer width="100%" height={180}>
-              <AreaChart data={a.speedTL} margin={{top:18,right:8,left:0,bottom:0}}>
+              <ComposedChart data={a.speedTL} margin={{top:24,right:8,left:0,bottom:0}}>
                 <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="time" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
                 <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,"auto"]}/>
                 <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
                 <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false}/>
-                {a.maxSpeedMark&&<ReferenceDot x={a.maxSpeedMark.time} y={a.maxSpeedMark.speed} r={6} fill={C.gld} stroke="#fff" strokeWidth={2}>
-                  <Label value="Max" position="top" offset={6} fill={C.gld} fontSize={10} fontWeight={700}/>
-                </ReferenceDot>}
-              </AreaChart>
+                {a.maxSpeedMark&&(function(){
+                  const yCap=Math.max(...a.speedTL.map(d=>d.speed),a.maxSpeedMark.speed)*1.14;
+                  const mx=a.maxSpeedMark;
+                  return(<>
+                    <ReferenceLine segment={[{x:mx.time,y:yCap},{x:mx.time,y:mx.speed}]} stroke={PEAK_MARK_ORANGE} strokeWidth={2} strokeDasharray="5 5"/>
+                    <Scatter data={[mx]} dataKey="speed" fill="#ffb84a" shape={PeakSpeedGoldBullet}/>
+                    <Scatter data={[{time:mx.time,speed:yCap}]} dataKey="speed" fill="transparent" shape={PeakSpeedLightning}/>
+                  </>);
+                })()}
+              </ComposedChart>
             </ResponsiveContainer>
             {a.maxSpeedMark&&<div style={{marginTop:12,fontSize:12,color:C.txt,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`}}>
-              <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Peak {a.maxSpeedMark.speed} kts</strong>
+              <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Max Speed {a.maxSpeedMark.speed} kts</strong>
               {a.maxSpeedMark.leg?<>
                 <span style={{color:C.txM}}> · </span>{a.maxSpeedMark.legTypeLabel} leg<span style={{color:C.txM}}> · </span>{a.maxSpeedMark.leg.from} → {a.maxSpeedMark.leg.to}
                 <span style={{color:C.txM}}> · </span>TWA {Math.round(a.maxSpeedMark.twaSample)}° true
@@ -1838,16 +1865,18 @@ function App(){
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
                     Speed variability<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.speedStd,2)} kts σ</span></div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
-                    Avg course (COG)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgCourse,0)}°</span></div>
+                    VMG (avg)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgVMG,2)} kts</span></div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
-                    Course variability<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.courseStd,1)}°</span></div>
+                    Angle from wind (mean COG ± vs wind from)<br/><span style={{...mono,color:C.txt,fontSize:12,lineHeight:1.35,display:"block",marginTop:4}}>{u.windRelLabel||"—"}</span></div>
+                  <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
+                    Course variability (COG σ)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.courseStd,1)}°</span></div>
                   <div style={{fontSize:9,color:C.txD,marginTop:8}}>{u.n} GPS samples · upwind legs only</div>
                 </>}
               </div>);
             };
             return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
               <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Upwind · port vs starboard</div>
-              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>Stats from GPS points on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from {effWind}°. Course = COG; variability = circular spread (σ°).</div>
+              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>GPS samples on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>. VMG = |speed×cos(TWA)| vs wind. Angle line: mean COG with signed offset from wind (±°) and acute TWA. COG σ = circular spread (°).</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                 {row("Upwind · port tack",C.port,uw.port)}
                 {row("Upwind · starboard tack",C.stbd,uw.stbd)}
