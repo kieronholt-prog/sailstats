@@ -950,6 +950,7 @@ function App(){
           if(ex.detail)console.error("Strava link error:",ex.error,ex.detail);
           let msg=ex.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”."
             :ex.error==="strava_linked_other_account"?(ex.detail&&ex.detail.message)||"This Strava account is linked to another SailStats login."
+            :ex.error==="invalid_strava_id"?"Strava returned an unexpected athlete id. Try “Link Strava” again; if it persists, check the console."
             :ex.error==="save_user_failed"?"Could not save your Strava link (see console for details)."
             :(ex.error||"Strava link failed");
           alert(msg);

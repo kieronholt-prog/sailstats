@@ -18,6 +18,14 @@
 const COOKIE = "ss_session";
 const SESS_MAX = 60 * 60 * 24 * 30;
 
+/** Strava athlete ids are positive integers; keep as digit string for Postgres BIGINT (no Number() precision/NaN issues). */
+function normalizeStravaAthleteId(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!/^\d+$/.test(s)) return null;
+  return s;
+}
+
 function parseCookies(h) {
   const o = {};
   const c = h.get("cookie");
@@ -222,8 +230,8 @@ async function getUserRowByStravaId(env, stravaId) {
 
 /** Avoid PostgREST upsert failing on UNIQUE(auth_user_id) when a row already exists for this login. */
 async function saveLinkedStravaUser(env, authUserId, row) {
-  const sid = Number(row.strava_id);
-  if (!Number.isFinite(sid)) return { ok: false, status: 400, data: { message: "invalid_strava_id" } };
+  const sid = normalizeStravaAthleteId(row.strava_id);
+  if (!sid) return { ok: false, status: 400, data: { message: "invalid_strava_id" } };
 
   const byAuth = await getUserRowByAuthId(env, authUserId);
   const byStrava = await getUserRowByStravaId(env, sid);
@@ -503,7 +511,8 @@ export default {
         }
         const d = ex.data;
         const athlete = d.athlete;
-        if (!athlete || !athlete.id) return json({ error: "no_athlete_in_token_response", detail: d }, 400, env);
+        const stravaIdStr = normalizeStravaAthleteId(athlete?.id);
+        if (!athlete || !stravaIdStr) return json({ error: "no_athlete_in_token_response", detail: d }, 400, env);
 
         const nowSec = Math.floor(Date.now() / 1000);
         const expiresAt =
@@ -514,7 +523,7 @@ export default {
             : null;
 
         const row = {
-          strava_id: athlete.id,
+          strava_id: stravaIdStr,
           auth_user_id: authUserId,
           firstname: athlete.firstname,
           lastname: athlete.lastname,
