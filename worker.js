@@ -231,7 +231,9 @@ async function getUserRowByStravaId(env, stravaId) {
 /** Avoid PostgREST upsert failing on UNIQUE(auth_user_id) when a row already exists for this login. */
 async function saveLinkedStravaUser(env, authUserId, row) {
   const sid = normalizeStravaAthleteId(row.strava_id);
-  if (!sid) return { ok: false, status: 400, data: { message: "invalid_strava_id" } };
+  if (!sid) {
+    return { ok: false, reason: "invalid_strava_id", status: 400, data: { message: "invalid_strava_id" } };
+  }
 
   const byAuth = await getUserRowByAuthId(env, authUserId);
   const byStrava = await getUserRowByStravaId(env, sid);
@@ -242,6 +244,7 @@ async function saveLinkedStravaUser(env, authUserId, row) {
   ) {
     return {
       ok: false,
+      reason: "strava_linked_other_account",
       status: 409,
       data: { message: "This Strava account is already linked to a different SailStats login." },
     };
@@ -510,9 +513,10 @@ export default {
           return json({ error: "strava_exchange_failed", detail: ex.data }, ex.status || 400, env);
         }
         const d = ex.data;
-        const athlete = d.athlete;
-        const stravaIdStr = normalizeStravaAthleteId(athlete?.id);
-        if (!athlete || !stravaIdStr) return json({ error: "no_athlete_in_token_response", detail: d }, 400, env);
+        const athlete = d.athlete && typeof d.athlete === "object" ? d.athlete : null;
+        const idRaw = athlete?.id ?? d.athlete_id;
+        const stravaIdStr = normalizeStravaAthleteId(idRaw);
+        if (!stravaIdStr) return json({ error: "no_athlete_in_token_response", detail: d }, 400, env);
 
         const nowSec = Math.floor(Date.now() / 1000);
         const expiresAt =
@@ -525,9 +529,9 @@ export default {
         const row = {
           strava_id: stravaIdStr,
           auth_user_id: authUserId,
-          firstname: athlete.firstname,
-          lastname: athlete.lastname,
-          profile_pic: athlete.profile_medium || athlete.profile,
+          firstname: athlete?.firstname ?? null,
+          lastname: athlete?.lastname ?? null,
+          profile_pic: athlete?.profile_medium || athlete?.profile || null,
           access_token: d.access_token,
           refresh_token: d.refresh_token,
           token_expires: expiresAt,
@@ -535,9 +539,10 @@ export default {
         };
         const up = await saveLinkedStravaUser(env, authUserId, row);
         if (!up.ok) {
-          const st = up.status && Number(up.status) >= 400 ? up.status : 500;
+          const st = typeof up.status === "number" && up.status >= 400 ? up.status : 500;
           const err =
-            st === 409 ? "strava_linked_other_account" : st === 400 ? "invalid_strava_id" : "save_user_failed";
+            up.reason ||
+            (st === 409 ? "strava_linked_other_account" : "save_user_failed");
           return json({ error: err, detail: up.data }, st, env);
         }
 
