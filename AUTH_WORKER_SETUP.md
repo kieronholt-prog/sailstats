@@ -149,6 +149,12 @@ These should match your Strava API application and what you use in `index.html` 
 
 Cloudflare usually applies new variables to **new** requests quickly, but a redeploy guarantees the latest `worker.js` is live.
 
+### 3.0 Wrangler warning: “local configuration differs from the remote”
+
+If `npx wrangler deploy` prints a diff showing dashboard **`vars`** (e.g. `ALLOWED_ORIGIN`, Supabase keys) that are **not** listed in `wrangler.toml`, that is Wrangler comparing **dashboard** settings to your **local file**. This repo sets **`keep_vars = true`** in `wrangler.toml` so a CLI deploy **does not wipe** dashboard **Text** variables. Encrypted **secrets** are not removed by deploy unless you run `wrangler secret delete` (see Cloudflare [Wrangler configuration — Source of truth](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth)).
+
+Longer term, Cloudflare recommends defining non-secret **`[vars]`** in `wrangler.toml` and using **`wrangler secret put`** for secrets so the repo is the single source of truth; until then, dashboard + `keep_vars` is fine.
+
 ### 3.1 If you edit code in the dashboard
 
 1. **Workers & Pages** → your worker → **Edit code**.
