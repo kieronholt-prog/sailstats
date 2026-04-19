@@ -947,11 +947,16 @@ function App(){
         if(cancelled)return;
         if(applyWorkerSession(ex))setView("activities");
         else{
-          if(ex.detail)console.error("Strava link error:",ex.error,ex.detail);
+          if(ex.detail||ex.hint){
+            const d=typeof ex.detail==="object"&&ex.detail!==null?JSON.stringify(ex.detail,null,2):String(ex.detail||"");
+            console.error("Strava link error:",ex.error,d,ex.hint?`\n${ex.hint}`:"");
+          }
+          const pgMsg=(ex.detail&&ex.detail.message)||(ex.detail&&ex.detail.details)||(ex.detail&&ex.detail.hint)||(ex.detail&&ex.detail.error_description)||ex.hint||"";
           let msg=ex.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”."
             :ex.error==="strava_linked_other_account"?(ex.detail&&ex.detail.message)||"This Strava account is linked to another SailStats login."
             :ex.error==="invalid_strava_id"?"Strava returned an unexpected athlete id. Try “Link Strava” again; if it persists, check the console."
-            :ex.error==="save_user_failed"?"Could not save your Strava link (see console for details)."
+            :ex.error==="invalid_strava_tokens"?"Strava did not return usable tokens. Try “Link Strava” again."
+            :ex.error==="save_user_failed"?(pgMsg?`Could not save Strava link: ${pgMsg}`:"Could not save your Strava link (see console for details).")
             :(ex.error||"Strava link failed");
           alert(msg);
         }

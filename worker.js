@@ -26,6 +26,45 @@ function normalizeStravaAthleteId(raw) {
   return s;
 }
 
+/** Build a PostgREST-safe `users` row for insert/patch (types + no junk fields). */
+function buildStravaUserWriteRow(authUserId, row, sidDigitStr) {
+  const n = Number(sidDigitStr);
+  const strava_id = Number.isSafeInteger(n) ? n : sidDigitStr;
+  const aid =
+    typeof authUserId === "string" ? authUserId.trim() : authUserId == null ? "" : String(authUserId).trim();
+  if (!aid) return null;
+
+  let token_expires = row.token_expires;
+  if (token_expires != null) {
+    const t = Math.floor(Number(token_expires));
+    token_expires = Number.isFinite(t) ? t : null;
+  }
+
+  const text = (v, max) => {
+    if (v == null || v === "") return null;
+    const s = typeof v === "string" ? v : String(v);
+    return s.slice(0, max);
+  };
+
+  const out = {
+    strava_id,
+    auth_user_id: aid,
+    access_token: row.access_token == null ? null : String(row.access_token),
+    refresh_token: row.refresh_token == null ? null : String(row.refresh_token),
+    token_expires,
+    updated_at: row.updated_at || new Date().toISOString(),
+  };
+  const fn = text(row.firstname, 300);
+  const ln = text(row.lastname, 300);
+  const pp = text(row.profile_pic, 8000);
+  if (fn) out.firstname = fn;
+  if (ln) out.lastname = ln;
+  if (pp) out.profile_pic = pp;
+
+  if (!out.access_token || !out.refresh_token) return null;
+  return out;
+}
+
 function parseCookies(h) {
   const o = {};
   const c = h.get("cookie");
@@ -250,29 +289,34 @@ async function saveLinkedStravaUser(env, authUserId, row) {
     };
   }
 
-  const tokenFields = {
-    strava_id: sid,
-    firstname: row.firstname,
-    lastname: row.lastname,
-    profile_pic: row.profile_pic,
-    access_token: row.access_token,
-    refresh_token: row.refresh_token,
-    token_expires: row.token_expires,
-    updated_at: row.updated_at,
-  };
+  const write = buildStravaUserWriteRow(authUserId, row, sid);
+  if (!write) {
+    return {
+      ok: false,
+      reason: "invalid_strava_tokens",
+      status: 400,
+      data: { message: "Strava token response missing access_token or refresh_token" },
+    };
+  }
 
-  if (byAuth) return restServicePatchUserByAuthId(env, authUserId, tokenFields);
-  if (byStrava) return restServicePatchUserByStravaId(env, sid, { ...tokenFields, auth_user_id: authUserId });
-  return restServiceUpsertUsers(env, { ...row, strava_id: sid });
+  if (byAuth) {
+    const { auth_user_id, ...patchBody } = write;
+    return restServicePatchUserByAuthId(env, authUserId, patchBody);
+  }
+  if (byStrava) return restServicePatchUserByStravaId(env, sid, write);
+  return restServiceUpsertUsers(env, write);
 }
 
-async function exchangeStrava(env, code) {
+async function exchangeStrava(env, code, redirectUri) {
   const body = {
     client_id: env.STRAVA_CLIENT_ID,
     client_secret: env.STRAVA_CLIENT_SECRET,
     grant_type: "authorization_code",
     code,
   };
+  if (redirectUri && String(redirectUri).trim()) {
+    body.redirect_uri = String(redirectUri).trim();
+  }
   const r = await fetch("https://www.strava.com/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -508,7 +552,7 @@ export default {
         const { code, redirect_uri } = body;
         if (!code) return json({ error: "code_required" }, 400, env);
 
-        const ex = await exchangeStrava(env, code);
+        const ex = await exchangeStrava(env, code, redirect_uri);
         if (!ex.ok || !ex.data.access_token) {
           return json({ error: "strava_exchange_failed", detail: ex.data }, ex.status || 400, env);
         }
@@ -543,7 +587,13 @@ export default {
           const err =
             up.reason ||
             (st === 409 ? "strava_linked_other_account" : "save_user_failed");
-          return json({ error: err, detail: up.data }, st, env);
+          const hint =
+            up.data && typeof up.data === "object" && up.data.message
+              ? String(up.data.message)
+              : up.data && typeof up.data === "object" && up.data.error
+              ? String(up.data.error)
+              : "";
+          return json({ error: err, detail: up.data, hint }, st, env);
         }
 
         const sealed = await seal(env.SESSION_SECRET, {
