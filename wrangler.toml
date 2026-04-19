@@ -8,3 +8,12 @@ compatibility_date = "2024-11-01"
 # Without this, Wrangler can replace dashboard "Text" vars with an empty local set.
 # Secrets (Encrypt) are not deleted by deploy; see Cloudflare "Source of truth" docs.
 keep_vars = true
+
+# Plain "Text" vars (public / same as index.html). Update here if you change CONFIG.
+# Do NOT put SUPABASE_SERVICE_ROLE_KEY, SESSION_SECRET, or STRAVA_CLIENT_SECRET here.
+# Set those as Encrypted secrets in the dashboard (or `wrangler secret put`).
+[vars]
+ALLOWED_ORIGIN = "https://kieronholt-prog.github.io"
+SUPABASE_URL = "https://kqabecigvwvlnuyvpokc.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_Vwrc03E--KoLL5vujZJXvg_nW6ZRyhN"
+STRAVA_CLIENT_ID = "226748"

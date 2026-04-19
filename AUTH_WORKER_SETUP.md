@@ -149,11 +149,14 @@ These should match your Strava API application and what you use in `index.html` 
 
 Cloudflare usually applies new variables to **new** requests quickly, but a redeploy guarantees the latest `worker.js` is live.
 
-### 3.0 Wrangler warning: “local configuration differs from the remote”
+### 3.0 Wrangler: “local configuration differs from the remote” (warning vs failure)
 
-If `npx wrangler deploy` prints a diff showing dashboard **`vars`** (e.g. `ALLOWED_ORIGIN`, Supabase keys) that are **not** listed in `wrangler.toml`, that is Wrangler comparing **dashboard** settings to your **local file**. This repo sets **`keep_vars = true`** in `wrangler.toml` so a CLI deploy **does not wipe** dashboard **Text** variables. Encrypted **secrets** are not removed by deploy unless you run `wrangler secret delete` (see Cloudflare [Wrangler configuration — Source of truth](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth)).
+- **Yellow / triangle “diff”** — Wrangler is comparing dashboard bindings to `wrangler.toml`. That can still appear even when deploy **succeeds**. It is **not** the same as a failed deploy.
+- **`keep_vars = true`** — Stops a CLI deploy from **deleting** extra **Text** variables you only set in the dashboard. Encrypted **secrets** are not removed by deploy unless you run `wrangler secret delete` ([Source of truth](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth)).
+- **`[vars]` in this repo** — Public values (`ALLOWED_ORIGIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `STRAVA_CLIENT_ID`) are listed so local and remote **plain vars** stay aligned; edit them if your GitHub username or Supabase project changes.
+- **`SUPABASE_SERVICE_ROLE_KEY` as plain Text in the dashboard** — If it appears in the diff under `vars`, switch it to an **Encrypted** secret (delete the Text var, add again with **Encrypt**), or use `wrangler secret put SUPABASE_SERVICE_ROLE_KEY`, so it is not treated as a normal `var`.
 
-Longer term, Cloudflare recommends defining non-secret **`[vars]`** in `wrangler.toml` and using **`wrangler secret put`** for secrets so the repo is the single source of truth; until then, dashboard + `keep_vars` is fine.
+If deploy **fails** (non-zero exit), copy the **full** terminal output (or the last ~30 lines) when asking for help.
 
 ### 3.1 If you edit code in the dashboard
 
