@@ -44,10 +44,14 @@ CREATE TABLE analyses (
   tack_scores JSONB DEFAULT '[]',
   gybe_scores JSONB DEFAULT '[]',
   leg_summary JSONB DEFAULT '[]',
+  course_setup JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(strava_id, activity_id)
 );
+
+-- If `analyses` already existed without this column, run once (safe if column exists):
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS course_setup JSONB DEFAULT '{}'::jsonb;
 
 -- Enable Row Level Security
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
@@ -101,6 +105,14 @@ CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users(auth_user_id);
    Optional: confirm the column with another query or the Table Editor — see **[AUTH_WORKER_SETUP.md](./AUTH_WORKER_SETUP.md)** §1.3.
 
 3. Create a **service role** key (**Settings → API → service_role**). Put it **only** in the Worker (never in `index.html`). The Worker uses it to read/write `users` (Strava tokens) by `auth_user_id`.
+
+## Step 3c: Saved course setup column (if “Save course setup” errors)
+
+The app can store crop + course choices per activity in **`analyses.course_setup`**. New installs get this from the main `CREATE TABLE analyses` block above. **Existing** projects should run once in **SQL Editor**:
+
+```sql
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS course_setup JSONB DEFAULT '{}'::jsonb;
+```
 
 ## Step 4: Cloudflare Worker (Auth)
 

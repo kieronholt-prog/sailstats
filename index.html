@@ -350,6 +350,10 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     laps: courseSetup.laps || 1,
     wind_direction: results.windDir,
     mark_overrides: courseSetup.markOverrides || {},
+    course_setup: {
+      cropStartText: courseSetup.cropStartText ?? "00:00:00",
+      cropDurationText: courseSetup.cropDurationText ?? "",
+    },
     stats: results.stats,
     tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing })),
     gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing })),
@@ -361,6 +365,46 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
 async function loadAnalyses(stravaId) {
   const rows = await supabase.select("analyses", `strava_id=eq.${stravaId}&order=activity_date.desc&limit=50`);
   return Array.isArray(rows) ? rows : [];
+}
+
+async function loadAnalysisRow(stravaId, activityId) {
+  const sid = Number(stravaId);
+  const aid = encodeURIComponent(String(activityId));
+  const rows = await supabase.select("analyses", `strava_id=eq.${sid}&activity_id=eq.${aid}&limit=1`);
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+/** Save course / crop / marks / wind without running full analysis (merges with existing row if present). */
+async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
+  const sid = Number(stravaId);
+  const aid = String(activityId);
+  const rowQ = `strava_id=eq.${sid}&activity_id=eq.${encodeURIComponent(aid)}&limit=1`;
+  const rows = await supabase.select("analyses", rowQ);
+  const prev = Array.isArray(rows) && rows[0] ? rows[0] : null;
+  const csPrev = prev?.course_setup && typeof prev.course_setup === "object" ? prev.course_setup : {};
+  const course_setup = {
+    ...csPrev,
+    cropStartText: parts.cropStartText ?? "00:00:00",
+    cropDurationText: parts.cropDurationText ?? "",
+  };
+  const merged = {
+    strava_id: sid,
+    activity_id: aid,
+    activity_name: activityName,
+    activity_date: activityDate,
+    stats: prev && prev.stats && typeof prev.stats === "object" ? prev.stats : {},
+    tack_scores: Array.isArray(prev?.tack_scores) ? prev.tack_scores : [],
+    gybe_scores: Array.isArray(prev?.gybe_scores) ? prev.gybe_scores : [],
+    leg_summary: Array.isArray(prev?.leg_summary) ? prev.leg_summary : [],
+    course_letter: parts.courseLetter || null,
+    laps: Math.max(1, parseInt(parts.laps, 10) || 1),
+    wind_direction: parts.windOvr != null && Number.isFinite(parts.windOvr) ? parts.windOvr : null,
+    mark_overrides: parts.markOverrides && typeof parts.markOverrides === "object" ? parts.markOverrides : {},
+    course_setup,
+    updated_at: new Date().toISOString(),
+  };
+  const res = await supabase.upsert("analyses", merged, "strava_id,activity_id");
+  return !supabaseFailed(res);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -843,6 +887,8 @@ function App(){
   const [courseLetter,setCourseLetter]=useState("");
   const [laps,setLaps]=useState(1);
   const [markOverrides,setMarkOverrides]=useState({});
+  const [setupSaveBusy,setSetupSaveBusy]=useState(false);
+  const [setupSaveMsg,setSetupSaveMsg]=useState(null);
   const [actId,setActId]=useState(null);
   const [actDate,setActDate]=useState(null);
   const [cropStartText,setCropStartText]=useState("00:00:00");
@@ -982,17 +1028,34 @@ function App(){
 
   const analyseStrava=useCallback(async(act)=>{
     if(!session?.strava?.linked)return;
-    setProcessing(true);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    setProcessing(true);setSetupSaveMsg(null);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
     try{
       const streams=await fetchStreams(act.id);
       if(streams.latlng&&streams.time){
         const pts=streams.time.data.map((t,i)=>({time:new Date(act.start_date).getTime()/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
-        setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+        setRawPoints(pts);
+        setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+        setCropStartText("00:00:00");setCropDurationText("");
+        const sid=session?.strava?.athlete?.id ?? sAth?.id;
+        if(sid!=null){
+          const row=await loadAnalysisRow(sid,String(act.id));
+          if(row){
+            if(row.course_letter)setCourseLetter(String(row.course_letter));
+            if(row.laps!=null)setLaps(Math.max(1,parseInt(row.laps,10)||1));
+            if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
+            if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
+            const cs=row.course_setup;
+            if(cs&&typeof cs==="object"){
+              if(typeof cs.cropStartText==="string")setCropStartText(cs.cropStartText);
+              if(typeof cs.cropDurationText==="string")setCropDurationText(cs.cropDurationText);
+            }
+          }
+        }
         setView("course-setup");
       }
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
-  },[session]);
+  },[session,sAth]);
 
   // Handle file upload
   const handleFile=useCallback(async(file)=>{
@@ -1082,13 +1145,75 @@ function App(){
     if(result&&windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
     setView("analysis");
-    if (sAth?.id && result) {
+    const sid = session?.strava?.athlete?.id ?? sAth?.id;
+    if (sid != null && result) {
       try {
-        await saveAnalysis(sAth.id, actId, actName, actDate, result, { courseLetter, laps, markOverrides });
+        await saveAnalysis(sid, actId, actName, actDate, result, {
+          courseLetter,
+          laps,
+          markOverrides,
+          cropStartText,
+          cropDurationText,
+        });
       } catch (e) { console.warn("Save failed:", e); }
     }
     setProcessing(false);
-  },[rawPoints,croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,sAth,actId,actName,actDate,courseLetter,markOverrides]);
+  },[
+    rawPoints,
+    croppedPoints,
+    windOvr,
+    courseMarkSeq,
+    coursePreambleSeq,
+    laps,
+    session,
+    sAth,
+    actId,
+    actName,
+    actDate,
+    courseLetter,
+    markOverrides,
+    cropStartText,
+    cropDurationText,
+  ]);
+
+  const saveCourseSetupOnly = useCallback(async () => {
+    const sid = session?.strava?.athlete?.id ?? sAth?.id;
+    if (sid == null || String(actId || "").startsWith("file-")) {
+      alert("Save course setup needs a Strava-linked activity (not a file-only upload).");
+      return;
+    }
+    setSetupSaveBusy(true);
+    setSetupSaveMsg(null);
+    try {
+      const ok = await saveCourseSetup(sid, actId, actName, actDate, {
+        courseLetter,
+        laps,
+        markOverrides,
+        windOvr,
+        cropStartText,
+        cropDurationText,
+      });
+      setSetupSaveMsg(ok ? "Saved course setup." : "Could not save — check console.");
+      if (ok) setTimeout(() => setSetupSaveMsg(null), 4000);
+      else console.warn("saveCourseSetup failed");
+    } catch (e) {
+      console.error(e);
+      setSetupSaveMsg("Could not save.");
+    }
+    setSetupSaveBusy(false);
+  }, [
+    session,
+    sAth,
+    actId,
+    actName,
+    actDate,
+    courseLetter,
+    laps,
+    markOverrides,
+    windOvr,
+    cropStartText,
+    cropDurationText,
+  ]);
 
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
@@ -1402,6 +1527,32 @@ function App(){
           {courseLetter&&<button onClick={()=>{setCourseLetter("");doAnalysis()}} style={{...btn("transparent",C.txM,C.bdr),padding:"14px 18px",fontSize:13}}>
             Skip Course
           </button>}
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center",marginTop:14}}>
+          <button
+            type="button"
+            disabled={
+              setupSaveBusy ||
+              !(session?.strava?.athlete?.id ?? sAth?.id) ||
+              String(actId || "").startsWith("file-")
+            }
+            onClick={saveCourseSetupOnly}
+            style={{
+              ...btn("transparent", C.acc, C.acc),
+              padding: "10px 16px",
+              fontSize: 13,
+              opacity:
+                setupSaveBusy || !(session?.strava?.athlete?.id ?? sAth?.id) || String(actId || "").startsWith("file-")
+                  ? 0.45
+                  : 1,
+            }}
+          >
+            {setupSaveBusy ? "Saving…" : "Save course setup"}
+          </button>
+          {setupSaveMsg && <span style={{ fontSize: 12, color: C.acc }}>{setupSaveMsg}</span>}
+          <span style={{ fontSize: 11, color: C.txD, lineHeight: 1.45, maxWidth: 420 }}>
+            Saves course, crop, mark positions & wind for this activity (no full analysis required). Reloads when you open the activity again.
+          </span>
         </div>
       </div>
     </div>);
