@@ -595,7 +595,7 @@ function fwdRel(cog,refDeg){
  *  Port→starboard tack: mean COG over ~4s at start of a 10–20s window lies in (wd+30°)–(wd+60°),
  *  mean COG over ~4s at end lies in (wd−60°)–(wd−30°) i.e. 300°–330° relative to wd. S→P tack is the mirror.
  *  Gybe: same ±30–60° pattern relative to downwind (wd+180°), both ends sailing downwind (wind-relative 90°–270°).
- *  First matching window length W (10…20s, shortest first) wins; 10s cooldown between events. */
+ *  First matching window length W (10…20s, shortest first) wins; 12s cooldown between events. */
 function detectMans(pts,wd){
   const wdN=Number(wd)%360;
   const dRef=(wdN+180)%360;
@@ -619,14 +619,14 @@ function detectMans(pts,wd){
       else{
         const g0=fwdRel(cog0,dRef),g1=fwdRel(cog1,dRef);
         const down=f0>90&&f0<270&&f1>90&&f1<270;
-        if(down&&g0>=30&&g0<=60&&g1>=300&&g1<=330){type="gybe";crossing="P→S";}
-        else if(down&&g0>=300&&g0<=330&&g1>=30&&g1<=60){type="gybe";crossing="S→P";}
+        if(down&&g0>=30&&g0<=60&&g1>=300&&g1<=330){type="gybe";crossing="S→P";}
+        else if(down&&g0>=300&&g0<=330&&g1>=30&&g1<=60){type="gybe";crossing="P→S";}
         else continue;
       }
       const sB=tackSideFromWind(cog0,wdN),sA=tackSideFromWind(cog1,wdN);
       hit={type,idx:i,time:te,cogB:cog0,cogA:cog1,ch:Math.abs(adiff(cog0,cog1)),crossing,sideBef:sB,sideAft:sA,winSec:W};
     }
-    if(hit){res.push(hit);coolT=te+10;}
+    if(hit){res.push(hit);coolT=te+12;}
   }
   return res;
 }
