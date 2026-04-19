@@ -34,17 +34,9 @@ button{font-family:inherit;cursor:pointer}a{color:inherit}
 
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef}=React;
-const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ComposedChart,Scatter,ReferenceLine,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,Customized,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
 
 const PEAK_MARK_ORANGE="#ff9500";
-function PeakSpeedGoldBullet(props){
-  const{cx,cy}=props;
-  return(<g><circle cx={cx} cy={cy} r={6.5} fill="#ffb84a" stroke="#fff" strokeWidth={2}/></g>);
-}
-function PeakSpeedLightning(props){
-  const{cx,cy}=props;
-  return(<text x={cx} y={cy+6} textAnchor="middle" dominantBaseline="middle" fill={PEAK_MARK_ORANGE} fontSize={20}>⚡</text>);
-}
 
 /* ═══════════════════════════════════════════════════════════════════
    CONFIG
@@ -1802,23 +1794,35 @@ function App(){
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed over time</div>
             <ResponsiveContainer width="100%" height={180}>
-              <ComposedChart data={a.speedTL} margin={{top:24,right:8,left:0,bottom:0}}>
+              <AreaChart data={a.speedTL} margin={{top:24,right:8,left:0,bottom:0}}>
                 <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                <XAxis dataKey="time" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
+                <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr}/>
                 <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,"auto"]}/>
                 <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
                 <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false}/>
-                {a.maxSpeedMark&&(function(){
-                  const yCap=Math.max(...a.speedTL.map(d=>d.speed),a.maxSpeedMark.speed)*1.14;
-                  const mx=a.maxSpeedMark;
-                  return(<>
-                    <ReferenceLine segment={[{x:mx.time,y:yCap},{x:mx.time,y:mx.speed}]} stroke={PEAK_MARK_ORANGE} strokeWidth={2} strokeDasharray="5 5"/>
-                    <Scatter data={[mx]} dataKey="speed" fill="#ffb84a" shape={PeakSpeedGoldBullet}/>
-                    <Scatter data={[{time:mx.time,speed:yCap}]} dataKey="speed" fill="transparent" shape={PeakSpeedLightning}/>
-                  </>);
-                })()}
-              </ComposedChart>
+                {a.maxSpeedMark&&a.speedTL&&a.speedTL.length>0&&(
+                  <Customized component={(chartProps)=>{
+                    const mx=a.maxSpeedMark,tl=a.speedTL;
+                    const{xAxisMap,yAxisMap,offset}=chartProps;
+                    if(!xAxisMap||!yAxisMap||!offset)return null;
+                    const xAxis=Object.values(xAxisMap)[0],yAxis=Object.values(yAxisMap)[0];
+                    if(!xAxis?.scale||!yAxis?.scale)return null;
+                    const sx=xAxis.scale,sy=yAxis.scale;
+                    const yCap=Math.max(...tl.map(d=>d.speed),mx.speed)*1.14;
+                    const cx=offset.left+sx(mx.time);
+                    const cy=offset.top+sy(mx.speed);
+                    const cyTop=offset.top+sy(yCap);
+                    return(
+                      <g className="max-speed-mark" pointerEvents="none">
+                        <line x1={cx} y1={cyTop} x2={cx} y2={cy} stroke={PEAK_MARK_ORANGE} strokeWidth={2} strokeDasharray="5 5"/>
+                        <circle cx={cx} cy={cy} r={6.5} fill="#ffb84a" stroke="#fff" strokeWidth={2}/>
+                        <text x={cx} y={cyTop-4} textAnchor="middle" fill={PEAK_MARK_ORANGE} fontSize={18} dominantBaseline="bottom">⚡</text>
+                      </g>
+                    );
+                  }}/>
+                )}
+              </AreaChart>
             </ResponsiveContainer>
             {a.maxSpeedMark&&<div style={{marginTop:12,fontSize:12,color:C.txt,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`}}>
               <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Max Speed {a.maxSpeedMark.speed} kts</strong>
