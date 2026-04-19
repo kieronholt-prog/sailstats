@@ -305,9 +305,20 @@ export default {
       if (path === "/auth/signup" && request.method === "POST") {
         if (!env.SESSION_SECRET) return json({ error: "SESSION_SECRET not configured" }, 500, env);
         const body = await request.json().catch(() => ({}));
-        const { email, password } = body;
+        const { email, password, email_redirect_to } = body;
         if (!email || !password) return json({ error: "email_and_password_required" }, 400, env);
-        const { ok, data } = await supabaseAuth(env, "signup", { email, password });
+        let redirectTo = null;
+        if (email_redirect_to && typeof email_redirect_to === "string") {
+          try {
+            const u = new URL(email_redirect_to.trim());
+            if (u.origin === env.ALLOWED_ORIGIN) redirectTo = email_redirect_to.trim();
+          } catch {
+            /* ignore */
+          }
+        }
+        const signupPayload = { email, password };
+        if (redirectTo) signupPayload.options = { email_redirect_to: redirectTo };
+        const { ok, data } = await supabaseAuth(env, "signup", signupPayload);
         if (!ok) return json({ error: "signup_failed", detail: data }, 400, env);
         if (!data.access_token || !data.refresh_token) {
           return json(

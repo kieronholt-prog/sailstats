@@ -310,7 +310,14 @@ async function apiSignIn(email,password){
 }
 
 async function apiSignUp(email,password){
-  const r=await workerFetch("/auth/signup",{method:"POST",body:JSON.stringify({email,password})});
+  const r=await workerFetch("/auth/signup",{
+    method:"POST",
+    body:JSON.stringify({
+      email,
+      password,
+      email_redirect_to:STRAVA_REDIRECT,
+    }),
+  });
   return r.json();
 }
 

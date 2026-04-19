@@ -52,6 +52,21 @@ You want **one row** back with `data_type` = `uuid`. If you get **zero rows**, t
 1. Left sidebar → **Authentication** → **Providers**.
 2. Under **Email**, ensure it is **enabled** (and configure “Confirm email” vs instant sign-in to match how you want signups to behave).
 
+### 1.4b Confirm links go to GitHub Pages (not `localhost:3000`)
+
+If the email confirmation opens **`http://localhost:3000`** with `otp_expired` / `access_denied`, Supabase is using the wrong **Site URL** or the redirect is not allowlisted.
+
+1. **Authentication** → **URL Configuration**.
+2. **Site URL** — set to the URL you actually use in the browser for SailStats, for example:
+   - Project page: `https://YOUR_USERNAME.github.io/REPO_NAME/` (include the repo path if the app lives there).
+3. **Redirect URLs** — add every URL the app may use after email confirmation (Supabase must allow them). Examples:
+   - `https://YOUR_USERNAME.github.io/REPO_NAME/**` (wildcard, if your project supports it), or
+   - Exact entries such as `https://YOUR_USERNAME.github.io/REPO_NAME/` and `https://YOUR_USERNAME.github.io/REPO_NAME/index.html`.
+
+The app sends **`email_redirect_to`** on sign-up (same base as the current page). It must match **Redirect URLs** and share the same **origin** as **`ALLOWED_ORIGIN`** on the Worker.
+
+After changing URLs, **request a new confirmation email** (sign up again or use Supabase “resend” if available); old links may still point at the previous Site URL.
+
 ### 1.5 Copy keys you will need for the Worker
 
 1. Left sidebar → **Settings** (gear) → **API**.
