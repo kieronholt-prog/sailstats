@@ -157,7 +157,53 @@ async function restServiceUpsertUsers(env, row) {
     body: JSON.stringify([row]),
   });
   const data = await r.json().catch(() => ({}));
-  return { ok: r.ok, data };
+  return { ok: r.ok, data, status: r.status };
+}
+
+async function restParseResponse(res) {
+  const t = await res.text();
+  if (!t.trim()) return {};
+  try {
+    return JSON.parse(t);
+  } catch {
+    return { _parse_error: t.slice(0, 200) };
+  }
+}
+
+async function restServicePatchUserByAuthId(env, authUserId, partial) {
+  const r = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/users?auth_user_id=eq.${encodeURIComponent(authUserId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(partial),
+    }
+  );
+  const data = await restParseResponse(r);
+  return { ok: r.ok, data, status: r.status };
+}
+
+async function restServicePatchUserByStravaId(env, stravaId, partial) {
+  const r = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/users?strava_id=eq.${encodeURIComponent(String(stravaId))}`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(partial),
+    }
+  );
+  const data = await restParseResponse(r);
+  return { ok: r.ok, data, status: r.status };
 }
 
 async function getUserRowByAuthId(env, authUserId) {
@@ -165,6 +211,48 @@ async function getUserRowByAuthId(env, authUserId) {
   const { ok, data } = await restServiceGet(env, q);
   if (!ok || !Array.isArray(data) || !data.length) return null;
   return data[0];
+}
+
+async function getUserRowByStravaId(env, stravaId) {
+  const q = `/rest/v1/users?strava_id=eq.${encodeURIComponent(String(stravaId))}&select=*&limit=1`;
+  const { ok, data } = await restServiceGet(env, q);
+  if (!ok || !Array.isArray(data) || !data.length) return null;
+  return data[0];
+}
+
+/** Avoid PostgREST upsert failing on UNIQUE(auth_user_id) when a row already exists for this login. */
+async function saveLinkedStravaUser(env, authUserId, row) {
+  const sid = Number(row.strava_id);
+  if (!Number.isFinite(sid)) return { ok: false, status: 400, data: { message: "invalid_strava_id" } };
+
+  const byAuth = await getUserRowByAuthId(env, authUserId);
+  const byStrava = await getUserRowByStravaId(env, sid);
+  const stravaOwner = byStrava?.auth_user_id;
+  if (
+    stravaOwner &&
+    String(stravaOwner).replace(/-/g, "").toLowerCase() !== String(authUserId).replace(/-/g, "").toLowerCase()
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      data: { message: "This Strava account is already linked to a different SailStats login." },
+    };
+  }
+
+  const tokenFields = {
+    strava_id: sid,
+    firstname: row.firstname,
+    lastname: row.lastname,
+    profile_pic: row.profile_pic,
+    access_token: row.access_token,
+    refresh_token: row.refresh_token,
+    token_expires: row.token_expires,
+    updated_at: row.updated_at,
+  };
+
+  if (byAuth) return restServicePatchUserByAuthId(env, authUserId, tokenFields);
+  if (byStrava) return restServicePatchUserByStravaId(env, sid, { ...tokenFields, auth_user_id: authUserId });
+  return restServiceUpsertUsers(env, { ...row, strava_id: sid });
 }
 
 async function exchangeStrava(env, code) {
@@ -436,8 +524,13 @@ export default {
           token_expires: expiresAt,
           updated_at: new Date().toISOString(),
         };
-        const up = await restServiceUpsertUsers(env, row);
-        if (!up.ok) return json({ error: "save_user_failed", detail: up.data }, 500, env);
+        const up = await saveLinkedStravaUser(env, authUserId, row);
+        if (!up.ok) {
+          const st = up.status && Number(up.status) >= 400 ? up.status : 500;
+          const err =
+            st === 409 ? "strava_linked_other_account" : st === 400 ? "invalid_strava_id" : "save_user_failed";
+          return json({ error: err, detail: up.data }, st, env);
+        }
 
         const sealed = await seal(env.SESSION_SECRET, {
           supabase_refresh: sb.refresh_token,

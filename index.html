@@ -946,7 +946,14 @@ function App(){
         const ex=await exchangeStravaLinked(code);
         if(cancelled)return;
         if(applyWorkerSession(ex))setView("activities");
-        else alert(ex.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”.":(ex.error||"Strava link failed"));
+        else{
+          if(ex.detail)console.error("Strava link error:",ex.error,ex.detail);
+          let msg=ex.error==="sign_in_first"?"Sign in to SailStats first, then use “Link Strava”."
+            :ex.error==="strava_linked_other_account"?(ex.detail&&ex.detail.message)||"This Strava account is linked to another SailStats login."
+            :ex.error==="save_user_failed"?"Could not save your Strava link (see console for details)."
+            :(ex.error||"Strava link failed");
+          alert(msg);
+        }
       }catch(e){console.error(e);alert("Strava link failed")}
     })();
     return()=>{cancelled=true};
