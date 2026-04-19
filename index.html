@@ -58,6 +58,14 @@ function supabaseFailed(res) {
   return res && typeof res === "object" && !Array.isArray(res) && (res.code != null || res.message != null || res.error != null || res.hint != null);
 }
 
+/** Valid Postgres timestamptz or null (never invalid strings). */
+function toIsoTimestamptz(v) {
+  if (v == null || v === "") return null;
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString();
+}
+
 const supabase = {
   headers(){
     const bearer=supabaseUserJwt||CONFIG.SUPABASE_ANON_KEY;
@@ -88,6 +96,32 @@ const supabase = {
     });
     const data = await r.json();
     if (!r.ok) console.error("[Supabase] UPSERT", table, r.status, data);
+    return data;
+  },
+  async patch(table, query, partial) {
+    const r = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      method: "PATCH",
+      headers: { ...this.headers(), Prefer: "return=minimal" },
+      body: JSON.stringify(partial),
+    });
+    let data = {};
+    try {
+      data = await r.json();
+    } catch (_) {
+      data = {};
+    }
+    if (!r.ok) console.error("[Supabase] PATCH", table, r.status, data);
+    return { ok: r.ok, status: r.status, data };
+  },
+  /** Single-row insert (no upsert). */
+  async insert(table, row) {
+    const r = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { ...this.headers(), Prefer: "return=minimal" },
+      body: JSON.stringify([row]),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) console.error("[Supabase] INSERT", table, r.status, data);
     return data;
   },
 };
@@ -345,7 +379,7 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     strava_id: stravaId,
     activity_id: String(activityId),
     activity_name: activityName,
-    activity_date: activityDate,
+    activity_date: toIsoTimestamptz(activityDate),
     course_letter: courseSetup.courseLetter || null,
     laps: courseSetup.laps || 1,
     wind_direction: results.windDir,
@@ -374,7 +408,12 @@ async function loadAnalysisRow(stravaId, activityId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
-/** Save course / crop / marks / wind without running full analysis (merges with existing row if present). */
+function unknownCourseSetupColumn(err) {
+  const s = JSON.stringify(err || {}).toLowerCase();
+  return s.includes("course_setup") && (s.includes("column") || s.includes("schema") || s.includes("could not find"));
+}
+
+/** Save course / crop / marks / wind without full analysis — PATCH if row exists, else INSERT. */
 async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
   const sid = Number(stravaId);
   const aid = String(activityId);
@@ -387,15 +426,10 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
     cropStartText: parts.cropStartText ?? "00:00:00",
     cropDurationText: parts.cropDurationText ?? "",
   };
-  const merged = {
-    strava_id: sid,
-    activity_id: aid,
-    activity_name: activityName,
-    activity_date: activityDate,
-    stats: prev && prev.stats && typeof prev.stats === "object" ? prev.stats : {},
-    tack_scores: Array.isArray(prev?.tack_scores) ? prev.tack_scores : [],
-    gybe_scores: Array.isArray(prev?.gybe_scores) ? prev.gybe_scores : [],
-    leg_summary: Array.isArray(prev?.leg_summary) ? prev.leg_summary : [],
+  const ad = toIsoTimestamptz(activityDate);
+  const patchBody = {
+    activity_name: activityName || null,
+    activity_date: ad,
     course_letter: parts.courseLetter || null,
     laps: Math.max(1, parseInt(parts.laps, 10) || 1),
     wind_direction: parts.windOvr != null && Number.isFinite(parts.windOvr) ? parts.windOvr : null,
@@ -403,8 +437,37 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
     course_setup,
     updated_at: new Date().toISOString(),
   };
-  const res = await supabase.upsert("analyses", merged, "strava_id,activity_id");
-  return !supabaseFailed(res);
+  const filter = `strava_id=eq.${sid}&activity_id=eq.${encodeURIComponent(aid)}`;
+
+  const insertTry = async (body) => {
+    const ins = {
+      strava_id: sid,
+      activity_id: aid,
+      ...body,
+      stats: {},
+      tack_scores: [],
+      gybe_scores: [],
+      leg_summary: [],
+    };
+    const res = await supabase.insert("analyses", ins);
+    return supabaseFailed(res) ? res : null;
+  };
+
+  if (prev) {
+    let pr = await supabase.patch("analyses", filter, patchBody);
+    if (!pr.ok && unknownCourseSetupColumn(pr.data)) {
+      const { course_setup: _drop, ...fallback } = patchBody;
+      pr = await supabase.patch("analyses", filter, fallback);
+    }
+    return pr.ok;
+  }
+
+  let err = await insertTry(patchBody);
+  if (err && unknownCourseSetupColumn(err)) {
+    const { course_setup: _d2, ...fb } = patchBody;
+    err = await insertTry(fb);
+  }
+  return !err;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1185,6 +1248,10 @@ function App(){
     setSetupSaveBusy(true);
     setSetupSaveMsg(null);
     try {
+      try {
+        const sess = await apiGetSession();
+        if (sess?.ok && sess.supabase_access_token) supabaseUserJwt = sess.supabase_access_token;
+      } catch (_) {}
       const ok = await saveCourseSetup(sid, actId, actName, actDate, {
         courseLetter,
         laps,
