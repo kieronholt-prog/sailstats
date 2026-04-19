@@ -375,6 +375,14 @@ async function fetchStreams(activityId){
 }
 
 async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
+  const prev = await loadAnalysisRow(stravaId, activityId);
+  const csPrev = prev?.course_setup && typeof prev.course_setup === "object" ? prev.course_setup : {};
+  const course_setup = buildPersistedCourseSetup(csPrev, {
+    cropStartText: courseSetup.cropStartText,
+    cropDurationText: courseSetup.cropDurationText,
+    cropStartSec: courseSetup.cropStartSec,
+    cropDurationSec: courseSetup.cropDurationSec,
+  });
   return supabase.upsert("analyses", {
     strava_id: stravaId,
     activity_id: String(activityId),
@@ -384,10 +392,7 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     laps: courseSetup.laps || 1,
     wind_direction: results.windDir,
     mark_overrides: courseSetup.markOverrides || {},
-    course_setup: {
-      cropStartText: courseSetup.cropStartText ?? "00:00:00",
-      cropDurationText: courseSetup.cropDurationText ?? "",
-    },
+    course_setup,
     stats: results.stats,
     tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing })),
     gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing })),
@@ -413,6 +418,41 @@ function unknownCourseSetupColumn(err) {
   return s.includes("course_setup") && (s.includes("column") || s.includes("schema") || s.includes("could not find"));
 }
 
+/** Merge `course_setup` JSONB: keeps prior keys, updates crop text + canonical seconds used for the map/track. */
+function buildPersistedCourseSetup(csPrev, opts) {
+  const base = csPrev && typeof csPrev === "object" ? { ...csPrev } : {};
+  const out = { ...base };
+  if (opts.cropStartText !== undefined) {
+    const t = opts.cropStartText == null ? "" : String(opts.cropStartText).trim();
+    out.cropStartText = t === "" ? "00:00:00" : t;
+  }
+  if (opts.cropDurationText !== undefined)
+    out.cropDurationText = opts.cropDurationText == null ? "" : String(opts.cropDurationText);
+  if (opts.cropStartSec !== undefined && opts.cropStartSec !== null && Number.isFinite(opts.cropStartSec))
+    out.cropStartSec = Math.max(0, opts.cropStartSec);
+  if (opts.cropDurationSec !== undefined) {
+    out.cropDurationSec =
+      opts.cropDurationSec == null || !Number.isFinite(opts.cropDurationSec) || opts.cropDurationSec <= 0
+        ? null
+        : opts.cropDurationSec;
+  }
+  if (out.cropStartText === undefined) out.cropStartText = "00:00:00";
+  if (out.cropDurationText === undefined) out.cropDurationText = "";
+  return out;
+}
+
+function applyCourseSetupCropFromRow(cs, setCropStartText, setCropDurationText) {
+  if (!cs || typeof cs !== "object") return;
+  if (typeof cs.cropStartText === "string")
+    setCropStartText(cs.cropStartText.trim() === "" ? "00:00:00" : cs.cropStartText);
+  else if (typeof cs.cropStartSec === "number" && Number.isFinite(cs.cropStartSec))
+    setCropStartText(formatHMS(Math.max(0, Math.floor(cs.cropStartSec))));
+  if (typeof cs.cropDurationText === "string") setCropDurationText(cs.cropDurationText);
+  else if (cs.cropDurationSec == null || cs.cropDurationSec === "" || !Number.isFinite(cs.cropDurationSec) || cs.cropDurationSec <= 0)
+    setCropDurationText("");
+  else setCropDurationText(formatHMS(Math.floor(cs.cropDurationSec)));
+}
+
 /** Save course / crop / marks / wind without full analysis — PATCH if row exists, else INSERT. */
 async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
   const sid = Number(stravaId);
@@ -421,11 +461,12 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
   const rows = await supabase.select("analyses", rowQ);
   const prev = Array.isArray(rows) && rows[0] ? rows[0] : null;
   const csPrev = prev?.course_setup && typeof prev.course_setup === "object" ? prev.course_setup : {};
-  const course_setup = {
-    ...csPrev,
-    cropStartText: parts.cropStartText ?? "00:00:00",
-    cropDurationText: parts.cropDurationText ?? "",
-  };
+  const course_setup = buildPersistedCourseSetup(csPrev, {
+    cropStartText: parts.cropStartText,
+    cropDurationText: parts.cropDurationText,
+    cropStartSec: parts.cropStartSec,
+    cropDurationSec: parts.cropDurationSec,
+  });
   const ad = toIsoTimestamptz(activityDate);
   const patchBody = {
     activity_name: activityName || null,
@@ -1107,11 +1148,7 @@ function App(){
             if(row.laps!=null)setLaps(Math.max(1,parseInt(row.laps,10)||1));
             if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
             if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
-            const cs=row.course_setup;
-            if(cs&&typeof cs==="object"){
-              if(typeof cs.cropStartText==="string")setCropStartText(cs.cropStartText);
-              if(typeof cs.cropDurationText==="string")setCropDurationText(cs.cropDurationText);
-            }
+            applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
           }
         }
         setView("course-setup");
@@ -1217,6 +1254,8 @@ function App(){
           markOverrides,
           cropStartText,
           cropDurationText,
+          cropStartSec: cropStartSecParsed,
+          cropDurationSec: cropDurationSecParsed,
         });
       } catch (e) { console.warn("Save failed:", e); }
     }
@@ -1237,6 +1276,8 @@ function App(){
     markOverrides,
     cropStartText,
     cropDurationText,
+    cropStartSecParsed,
+    cropDurationSecParsed,
   ]);
 
   const saveCourseSetupOnly = useCallback(async () => {
@@ -1259,6 +1300,8 @@ function App(){
         windOvr,
         cropStartText,
         cropDurationText,
+        cropStartSec: cropStartSecParsed,
+        cropDurationSec: cropDurationSecParsed,
       });
       setSetupSaveMsg(ok ? "Saved course setup." : "Could not save — check console.");
       if (ok) setTimeout(() => setSetupSaveMsg(null), 4000);
@@ -1280,6 +1323,8 @@ function App(){
     windOvr,
     cropStartText,
     cropDurationText,
+    cropStartSecParsed,
+    cropDurationSecParsed,
   ]);
 
   // Re-run when wind changes

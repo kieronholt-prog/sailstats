@@ -108,7 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users(auth_user_id);
 
 ## Step 3c: Saved course setup column (if “Save course setup” errors)
 
-The app can store crop + course choices per activity in **`analyses.course_setup`**. New installs get this from the main `CREATE TABLE analyses` block above. **Existing** projects should run once in **SQL Editor**:
+The app stores crop + course choices per activity in **`analyses.course_setup`** (JSON), including `cropStartText` / `cropDurationText` plus optional numeric `cropStartSec` / `cropDurationSec` so the same window reloads after save. New installs get this from the main `CREATE TABLE analyses` block above. **Existing** projects should run once in **SQL Editor**:
 
 ```sql
 ALTER TABLE analyses ADD COLUMN IF NOT EXISTS course_setup JSONB DEFAULT '{}'::jsonb;
