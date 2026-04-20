@@ -154,6 +154,39 @@ const C={
    ═══════════════════════════════════════════════════════════════════ */
 const RE=6371000,D=Math.PI/180;
 function hav(a1,o1,a2,o2){const dl=(a2-a1)*D,do2=(o2-o1)*D;const a=Math.sin(dl/2)**2+Math.cos(a1*D)*Math.cos(a2*D)*Math.sin(do2/2)**2;return 2*RE*Math.asin(Math.sqrt(a))}
+/** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
+function destinationPoint(lat,lon,bearingDeg,distM){
+  const δ=distM/RE,θ=bearingDeg*D;
+  const φ1=lat*D,λ1=lon*D;
+  const φ2=Math.asin(Math.sin(φ1)*Math.cos(δ)+Math.cos(φ1)*Math.sin(δ)*Math.cos(θ));
+  let λ2=λ1+Math.atan2(Math.sin(θ)*Math.sin(δ)*Math.cos(φ1),Math.cos(δ)-Math.sin(φ1)*Math.sin(φ2));
+  let lonDeg=λ2/D;
+  while(lonDeg>180)lonDeg-=360;
+  while(lonDeg<-180)lonDeg+=360;
+  return{lat:φ2/D,lon:lonDeg};
+}
+/** Cumulative distance along pts to index nearest (tlat, tlon); returns {alongM, nearestIdx, distToMarkM}. */
+function distanceAlongTrackToNearest(pts,tlat,tlon){
+  if(!pts?.length)return{alongM:0,nearestIdx:0,distToMarkM:Infinity};
+  let cum=0,bestD=Infinity,bestI=0,alongAtBest=0;
+  for(let i=1;i<pts.length;i++){
+    cum+=pts[i].dist||hav(pts[i-1].lat,pts[i-1].lon,pts[i].lat,pts[i].lon);
+    const d=hav(pts[i].lat,pts[i].lon,tlat,tlon);
+    if(d<bestD){bestD=d;bestI=i;alongAtBest=cum;}
+  }
+  const d0=hav(pts[0].lat,pts[0].lon,tlat,tlon);
+  if(d0<bestD)return{alongM:0,nearestIdx:0,distToMarkM:d0};
+  return{alongM:alongAtBest,nearestIdx:bestI,distToMarkM:bestD};
+}
+/** Format epoch seconds as local wall-clock HH:MM:SS (or null). */
+function formatWallClock(epochSec){
+  if(epochSec==null||!Number.isFinite(Number(epochSec)))return null;
+  const s=Number(epochSec);
+  const ms=s>1e12?s:s*1000;
+  try{
+    return new Date(ms).toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+  }catch(_){return null;}
+}
 function bear(a1,o1,a2,o2){const dl=(o2-o1)*D;return((Math.atan2(Math.sin(dl)*Math.cos(a2*D),Math.cos(a1*D)*Math.sin(a2*D)-Math.sin(a1*D)*Math.cos(a2*D)*Math.cos(dl))/D)+360)%360}
 function adiff(a,b){return((b-a+540)%360)-180}
 const ms2k=s=>s*1.94384,m2nm=m=>m/1852;
@@ -725,6 +758,54 @@ function detectMans(pts){
   return{stableSegments,manoeuvres};
 }
 
+/** Supplement stable-segment detection in the first ~90s where segments are still forming (e.g. river start). */
+function detectEarlyMicroManoeuvres(pts){
+  const out=[];
+  const t0=pts[0].time;
+  const maxT=t0+95;
+  let lastT=-1e9;
+  for(let mid=8;mid<pts.length&&pts[mid].time<=maxT;mid++){
+    if(pts[mid].time-lastT<11)continue;
+    const preFrom=Math.max(0,mid-14),preTo=mid-1;
+    const postFrom=mid,postTo=Math.min(pts.length-1,mid+14);
+    if(preTo<=preFrom||postTo<=postFrom)continue;
+    const segBefore=segmentStats(pts,preFrom,preTo);
+    const segAfter=segmentStats(pts,postFrom,postTo);
+    if(segBefore.duration<0.35||segAfter.duration<0.35)continue;
+    const cogChange=Math.abs(adiff(segBefore.meanCOG,segAfter.meanCOG));
+    if(cogChange<44)continue;
+    const preRef=preReferenceFromSegment(pts,segBefore);
+    out.push({
+      type:"unknown",
+      idx:mid,
+      time:pts[mid].time,
+      preCOG:segBefore.meanCOG,
+      postCOG:segAfter.meanCOG,
+      cogB:segBefore.meanCOG,
+      cogA:segAfter.meanCOG,
+      ch:cogChange,
+      cogChange,
+      preSpeed:segBefore.meanSOG,
+      preSegment:segBefore,
+      postSegment:segAfter,
+      gapDuration:Math.max(0,pts[postFrom].time-pts[preTo].time),
+      ...preRef,
+      _early:true,
+    });
+    lastT=pts[mid].time;
+  }
+  return out;
+}
+
+function mergeManoeuvresByTime(segMans,early){
+  const merged=[...segMans];
+  for(const e of early){
+    if(merged.some(m=>Math.abs(m.time-e.time)<14))continue;
+    merged.push(e);
+  }
+  return merged.sort((a,b)=>a.time-b.time);
+}
+
 function buildTackGroups(manoeuvres){
   if(!manoeuvres?.length)return[];
   const groups=[];
@@ -1202,8 +1283,7 @@ function buildTimelineDecorations(analysis){
     const x1=Math.max(0,(analysis.points?.[l.startIdx]?.time??t0)-t0);
     const x2=Math.max(x1,(analysis.points?.[l.endIdx]?.time??t0)-t0);
     const fill=l.type==="upwind"?"rgba(74, 158, 255, 0.06)":l.type==="downwind"?"rgba(255, 184, 74, 0.06)":"transparent";
-    const label=l.type==="upwind"?"↑ Up":l.type==="downwind"?"↓ Down":"→ Reach";
-    return{idx,x1,x2,fill,label};
+    return{idx,x1,x2,fill};
   });
   const markerForTack=(m,i)=>{
     const mt=Number(m.time??t0);
@@ -1246,7 +1326,9 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const totalDist=en.reduce((a,p)=>a+(p.dist||0),0);
   const duration=en[en.length-1].time-en[0].time;
 
-  const{stableSegments,manoeuvres}=detectMans(en);
+  const{stableSegments,manoeuvres:segMans}=detectMans(en);
+  const earlyMans=detectEarlyMicroManoeuvres(en);
+  const manoeuvres=mergeManoeuvresByTime(segMans,earlyMans);
   const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind,en);
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
@@ -1419,7 +1501,7 @@ function WindRose({wd,onChange,compact,hint}){
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
-function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres}){
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const markersRef=useRef([]);
@@ -1512,6 +1594,27 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres}){
       add(m,`G${i+1}`,col);
     });
   },[manoeuvres,trackPoints,mapLoaded]);
+
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!mapLoaded||!map.isStyleLoaded())return;
+    const sf=startFinishLine;
+    if(!sf||sf.lat==null||sf.lon==null||!Number.isFinite(Number(sf.windFromDeg))){
+      try{
+        if(map.getLayer("sf-line"))map.removeLayer("sf-line");
+        if(map.getSource("sf-line"))map.removeSource("sf-line");
+      }catch(_){}
+      return;
+    }
+    const wf=Number(sf.windFromDeg)%360;
+    const a=destinationPoint(sf.lat,sf.lon,wf+90,65);
+    const b=destinationPoint(sf.lat,sf.lon,wf-90,65);
+    const geo={type:"Feature",geometry:{type:"LineString",coordinates:[[a.lon,a.lat],[b.lon,b.lat]]}};
+    if(map.getSource("sf-line"))map.getSource("sf-line").setData(geo);
+    else{
+      map.addSource("sf-line",{type:"geojson",data:geo});
+      map.addLayer({id:"sf-line",type:"line",source:"sf-line",paint:{"line-color":"#ffffff","line-width":2.5,"line-opacity":0.92,"line-dasharray":[2,2]}});
+    }
+  },[startFinishLine,mapLoaded]);
 
   useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
@@ -1781,6 +1884,24 @@ function App(){
     return marks;
   },[courseLetter,markOverrides]);
 
+  /** Always include WSC committee START/FINISH for map + distance hint. */
+  const mapMarksWithStart=useMemo(()=>{
+    const sf=WSC_MARKS["START/FINISH"];
+    if(!sf)return effectiveMarks;
+    return{
+      ...effectiveMarks,
+      "START/FINISH":{lat:sf.lat,lon:sf.lon,fixed:true,desc:sf.desc||"Committee line",name:"START/FINISH"},
+    };
+  },[effectiveMarks]);
+
+  /** Distance from first cropped point along track to nearest approach to START/FINISH. */
+  const distToStartLine=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<2)return null;
+    const sf=WSC_MARKS["START/FINISH"];
+    if(!sf)return null;
+    return distanceAlongTrackToNearest(croppedPoints,sf.lat,sf.lon);
+  },[croppedPoints]);
+
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return[];
@@ -1918,6 +2039,25 @@ function App(){
     }
     return analysis;
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps]);
+
+  /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
+  const timelineDomain=useMemo(()=>{
+    if(!curAnalysis?.speedTL?.length)return null;
+    const tl=curAnalysis.speedTL;
+    const tMin=Math.min(...tl.map(d=>d.time));
+    const tMax=Math.max(...tl.map(d=>d.time));
+    const span=Math.max(1,tMax-tMin);
+    const win=Math.max(20,span/Math.max(1,timelineZoom));
+    const maxScroll=Math.max(0,span-win);
+    const start=tMin+maxScroll*timelineScroll;
+    const end=Math.min(tMax,start+win);
+    return[start,end];
+  },[curAnalysis,timelineZoom,timelineScroll]);
+
+  useEffect(()=>{
+    setTimelineZoom(1);
+    setTimelineScroll(0);
+  },[actId]);
 
   const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
 
@@ -2132,7 +2272,7 @@ function App(){
             </div>
             <button type="button" onClick={()=>{setCropStartText("00:00:00");setCropDurationText(formatHMS(trackMeta.spanSec));}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
           </div>
-          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). <strong style={{color:C.txM}}>− / +</strong> step by {CROP_TIME_STEP_SEC}s. Leave duration empty to run to the end of the file.</div>
+          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). <strong style={{color:C.txM}}>− / +</strong> step by {CROP_TIME_STEP_SEC}s. Leave duration empty to run to the end of the file. Each point stores <strong style={{color:C.txM}}>Unix time</strong> (seconds); local clock for the first point is shown under the map when available.</div>
         </div>}
 
         {/* Course & Laps selector */}
@@ -2156,11 +2296,12 @@ function App(){
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16,alignItems:"stretch",minHeight:380}}>
           <div style={{flex:2,minWidth:280,minHeight:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
             <CourseMap
-              marks={Object.keys(effectiveMarks).length>0?effectiveMarks:null}
+              marks={mapMarksWithStart}
               trackPoints={croppedPoints}
               courseMarks={courseMapLine}
               onMarkDrag={onMarkDrag}
               manoeuvres={setupMapAnalysis?{tacks:setupMapAnalysis.tacks,gybes:setupMapAnalysis.gybes}:null}
+              startFinishLine={WSC_MARKS["START/FINISH"]?{lat:WSC_MARKS["START/FINISH"].lat,lon:WSC_MARKS["START/FINISH"].lon,windFromDeg:effWind}:null}
             />
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
@@ -2172,6 +2313,9 @@ function App(){
             />
           </div>
         </div>
+        {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:11,color:C.txM,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <strong style={{color:C.txt}}>START/FINISH</strong> (WSC): white dashed line on map (perpendicular to wind FROM). Straight-line gap from track to line ~<strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track to closest approach <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong> · first GPS <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{formatWallClock(croppedPoints[0].time)||"—"}</strong> local (Unix seconds in file; crop times are still elapsed from first point).
+        </div>}
 
         {/* Mark legend — port (P) red, starboard (S) green */}
         {courseLetter&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
@@ -2290,22 +2434,11 @@ function App(){
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed + wind timeline</div>
-            {(()=>{
-              const tl=a.speedTL||[];
-              const tMin=tl.length?Math.min(...tl.map(d=>d.time)):0;
-              const tMax=tl.length?Math.max(...tl.map(d=>d.time)):0;
-              const span=Math.max(1,tMax-tMin);
-              const win=Math.max(20,span/Math.max(1,timelineZoom));
-              const maxScroll=Math.max(0,span-win);
-              const start=tMin+maxScroll*timelineScroll;
-              const end=Math.min(tMax,start+win);
-              a._timelineDomain=[start,end];
-              return(<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
-                <span style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:0.8}}>Zoom</span>
-                {[1,2,4,8].map(z=><button key={`z-${z}`} onClick={()=>{setTimelineZoom(z);if(z===1)setTimelineScroll(0);}} style={{...btn(timelineZoom===z?`${C.acc}25`:"transparent",timelineZoom===z?C.acc:C.txM,C.bdr),padding:"4px 8px",fontSize:10}}>{z}x</button>)}
-                {timelineZoom>1&&<input type="range" min="0" max="1000" value={Math.round(timelineScroll*1000)} onChange={e=>setTimelineScroll(Math.max(0,Math.min(1,Number(e.target.value)/1000)))} style={{flex:1,minWidth:140}}/>}
-              </div>);
-            })()}
+            {timelineDomain&&<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+              <span style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:0.8}}>Zoom</span>
+              {[1,2,4,8].map(z=><button key={`z-${z}`} type="button" onClick={()=>{setTimelineZoom(z);if(z===1)setTimelineScroll(0);}} style={{...btn(timelineZoom===z?`${C.acc}25`:"transparent",timelineZoom===z?C.acc:C.txM,C.bdr),padding:"4px 8px",fontSize:10}}>{z}x</button>)}
+              {timelineZoom>1&&<input type="range" min="0" max="1000" value={Math.round(timelineScroll*1000)} onChange={e=>setTimelineScroll(Math.max(0,Math.min(1,Number(e.target.value)/1000)))} style={{flex:1,minWidth:140}}/>}
+            </div>}
             <ResponsiveContainer width="100%" height={180}>
               {(()=>{
                 const tl=(a.speedTL||[]).map(d=>({...d,wind:windAtTime(a.windTrace||[],(a.points?.[0]?.time||0)+d.time,a.windDir)}));
@@ -2314,14 +2447,16 @@ function App(){
                 const yDataMax=tl.length?Math.max(...tl.map(d=>d.speed),mx?.speed||0):0;
                 const yRaw=mx?Math.max(yDataMax*1.08,mx.speed*1.12):yDataMax*1.02||1;
                 const yHi=Math.max(12,Math.ceil((Number.isFinite(yRaw)?yRaw:12)/4)*4);
-                const xDomain=a._timelineDomain||["dataMin","dataMax"];
+                const yTicks=[0,yHi/4,yHi/2,(3*yHi)/4,yHi].map(v=>Math.round(v*1e6)/1e6);
+                const fmtSpdTick=(v)=>{const x=Number(v);if(!Number.isFinite(x))return"";const r=Math.round(x);return Math.abs(x-r)<1e-5?String(r):x.toFixed(1);};
+                const xDomain=timelineDomain||["dataMin","dataMax"];
                 return(
-                  <AreaChart data={tl} margin={{top:24,right:8,left:0,bottom:0}}>
+                  <AreaChart key={`sp-${xDomain[0]}-${xDomain[1]}`} data={tl} margin={{top:24,right:8,left:0,bottom:0}}>
                     <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-sp-${i}`} yAxisId="speed" x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                     <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomain}/>
-                    <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]} ticks={[0,yHi/4,yHi/2,(3*yHi)/4,yHi]}/>
+                    <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]} ticks={yTicks} tickFormatter={fmtSpdTick}/>
                     <YAxis yAxisId="wind" hide domain={["dataMin-20","dataMax+20"]}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="speed"?`${Number(v).toFixed(2)} kts`:`${Math.round(v)}°`,n==="speed"?"Speed":"Wind"]}/>
                     <Area yAxisId="speed" type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
@@ -2377,13 +2512,14 @@ function App(){
                   };
                 });
                 const deco=buildTimelineDecorations(a);
+                const xDomainWind=timelineDomain||["dataMin","dataMax"];
                 return(
-                  <LineChart data={wt} margin={{top:2,right:8,left:0,bottom:0}}>
+                  <LineChart key={`wd-${xDomainWind[0]}-${xDomainWind[1]}`} data={wt} margin={{top:2,right:8,left:0,bottom:0}}>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-wd-${i}`} x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <ReferenceArea y1={yMin} y2={0} fill={`${C.port}22`} ifOverflow="extendDomain"/>
                     <ReferenceArea y1={0} y2={yMax} fill={`${C.stbd}22`} ifOverflow="extendDomain"/>
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={a._timelineDomain||["dataMin","dataMax"]}/>
+                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomainWind}/>
                     <YAxis reversed tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n,p)=>{if(n==="std")return[`±${Number(v).toFixed(1)}°`,"Spread"];const raw=p?.payload?.windDir;return[`${Math.round(raw??(windMid+Number(v)))}°`,"Wind"];}}/>
                     <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
