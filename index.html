@@ -225,6 +225,46 @@ function parseHMS(str){
   if(n.length===2)return n[0]*60+n[1];
   return n[0];
 }
+/** Parse "lat, lon" or "lat lon" (decimal degrees). Returns {lat,lon} or null. */
+function parseLatLonPair(str){
+  const t=String(str).trim();
+  if(!t)return null;
+  const parts=t.split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+  if(parts.length<2)return null;
+  const lat=parseFloat(parts[0]),lon=parseFloat(parts[1]);
+  if(!Number.isFinite(lat)||!Number.isFinite(lon))return null;
+  if(Math.abs(lat)>90||Math.abs(lon)>180)return null;
+  return{lat,lon};
+}
+/** Local tangent-plane metres from ref (small area). */
+function latLonToLocalM(lat,lon,refLat,refLon){
+  const y=(lat-refLat)*111320;
+  const x=(lon-refLon)*111320*Math.cos(refLat*D);
+  return{x,y};
+}
+/** Min distance (m) from point to segment AB in local plane around ref. */
+function distPointToSegmentM(lat,lon,aLat,aLon,bLat,bLon){
+  const refLat=(aLat+bLat)/2,refLon=(aLon+bLon)/2;
+  const p=latLonToLocalM(lat,lon,refLat,refLon);
+  const A=latLonToLocalM(aLat,aLon,refLat,refLon);
+  const B=latLonToLocalM(bLat,bLon,refLat,refLon);
+  const abx=B.x-A.x,aby=B.y-A.y,apx=p.x-A.x,apy=p.y-A.y;
+  const den=abx*abx+aby*aby;
+  const t=den<1e-8?0:Math.max(0,Math.min(1,(apx*abx+apy*aby)/den));
+  const qx=A.x+t*abx,qy=A.y+t*aby;
+  return Math.hypot(p.x-qx,p.y-qy);
+}
+/** Along-track cumulative distance (m) to closest point on segment A–B; also min perpendicular gap (m). */
+function distanceAlongTrackToSegment(pts,aLat,aLon,bLat,bLon){
+  if(!pts?.length)return{alongM:0,distToMarkM:Infinity};
+  let cum=0,bestD=Infinity,bestAlong=0;
+  for(let i=0;i<pts.length;i++){
+    const d=distPointToSegmentM(pts[i].lat,pts[i].lon,aLat,aLon,bLat,bLon);
+    if(i>0)cum+=pts[i].dist||hav(pts[i-1].lat,pts[i-1].lon,pts[i].lat,pts[i].lon);
+    if(d<bestD){bestD=d;bestAlong=cum;}
+  }
+  return{alongM:bestAlong,distToMarkM:bestD};
+}
 
 /** Step for Track crop − / + buttons (seconds). */
 const CROP_TIME_STEP_SEC=5;
@@ -421,6 +461,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     cropDurationText: courseSetup.cropDurationText,
     cropStartSec: courseSetup.cropStartSec,
     cropDurationSec: courseSetup.cropDurationSec,
+    sfLineEndAText: courseSetup.sfLineEndAText,
+    sfLineEndBText: courseSetup.sfLineEndBText,
   });
   return supabase.upsert("analyses", {
     strava_id: stravaId,
@@ -477,6 +519,8 @@ function buildPersistedCourseSetup(csPrev, opts) {
   }
   if (out.cropStartText === undefined) out.cropStartText = "00:00:00";
   if (out.cropDurationText === undefined) out.cropDurationText = "";
+  if (opts.sfLineEndAText !== undefined) out.sfLineEndAText = String(opts.sfLineEndAText ?? "").trim();
+  if (opts.sfLineEndBText !== undefined) out.sfLineEndBText = String(opts.sfLineEndBText ?? "").trim();
   return out;
 }
 
@@ -492,6 +536,14 @@ function applyCourseSetupCropFromRow(cs, setCropStartText, setCropDurationText) 
   else setCropDurationText(formatHMS(Math.floor(cs.cropDurationSec)));
 }
 
+function applySfLineEndsFromRow(cs, setSfLineEndAText, setSfLineEndBText) {
+  if (!cs || typeof cs !== "object") return;
+  if (typeof cs.sfLineEndAText === "string") setSfLineEndAText(cs.sfLineEndAText);
+  else setSfLineEndAText("");
+  if (typeof cs.sfLineEndBText === "string") setSfLineEndBText(cs.sfLineEndBText);
+  else setSfLineEndBText("");
+}
+
 /** Save course / crop / marks / wind without full analysis — PATCH if row exists, else INSERT. */
 async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
   const sid = Number(stravaId);
@@ -505,6 +557,8 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
     cropDurationText: parts.cropDurationText,
     cropStartSec: parts.cropStartSec,
     cropDurationSec: parts.cropDurationSec,
+    sfLineEndAText: parts.sfLineEndAText,
+    sfLineEndBText: parts.sfLineEndBText,
   });
   const ad = toIsoTimestamptz(activityDate);
   const patchBody = {
@@ -693,8 +747,10 @@ function classifyCrossingFromPoints(pts,m,windDir){
   if(!pts?.length||!m?.preSegment||!m?.postSegment){
     return{kind:"none",turnIdx:m?.idx??0,crossing:null,sideBef:m?.sideBef??null,sideAft:m?.sideAft??null};
   }
-  const s=Math.max(0,m.preSegment.endIdx-5);
-  const e=Math.min(pts.length-1,m.postSegment.startIdx+6);
+  const relax=!!m._early;
+  const padPre=relax?12:5,padPost=relax?14:6;
+  const s=Math.max(0,m.preSegment.endIdx-padPre);
+  const e=Math.min(pts.length-1,m.postSegment.startIdx+padPost);
   let bestUp={d:Infinity,idx:m.idx??s},bestDn={d:Infinity,idx:m.idx??s};
   let prevRel=null,crossIdxUp=null,crossIdxDn=null;
   for(let i=s;i<=e;i++){
@@ -711,8 +767,9 @@ function classifyCrossingFromPoints(pts,m,windDir){
     }
     prevRel=rel;
   }
-  const upOK=bestUp.d<=35||crossIdxUp!=null;
-  const dnOK=bestDn.d<=35||crossIdxDn!=null;
+  const upTh=relax?48:35,dnTh=relax?52:35;
+  const upOK=bestUp.d<=upTh||crossIdxUp!=null;
+  const dnOK=bestDn.d<=dnTh||crossIdxDn!=null;
   let kind="none",turnIdx=m.idx??s;
   if(upOK&&(!dnOK||bestUp.d<=bestDn.d+4)){
     kind="tack";
@@ -726,6 +783,10 @@ function classifyCrossingFromPoints(pts,m,windDir){
   const sideBef=preRel>180?"S":"P";
   const sideAft=postRel>180?"S":"P";
   const crossing=sideBef==="P"&&sideAft==="S"?"P→S":sideBef==="S"&&sideAft==="P"?"S→P":"—";
+  if(kind==="none"&&relax&&crossing!=="—"&&Math.abs(adiff(m.preCOG,m.postCOG))>=38){
+    kind="tack";
+    turnIdx=crossIdxUp??crossIdxDn??m.idx??s;
+  }
   return{kind,turnIdx,crossing,sideBef,sideAft};
 }
 
@@ -758,22 +819,22 @@ function detectMans(pts){
   return{stableSegments,manoeuvres};
 }
 
-/** Supplement stable-segment detection in the first ~90s where segments are still forming (e.g. river start). */
+/** Supplement stable-segment detection in the first ~3 min where segments are still forming (e.g. river start). */
 function detectEarlyMicroManoeuvres(pts){
   const out=[];
   const t0=pts[0].time;
-  const maxT=t0+95;
+  const maxT=t0+200;
   let lastT=-1e9;
-  for(let mid=8;mid<pts.length&&pts[mid].time<=maxT;mid++){
-    if(pts[mid].time-lastT<11)continue;
-    const preFrom=Math.max(0,mid-14),preTo=mid-1;
-    const postFrom=mid,postTo=Math.min(pts.length-1,mid+14);
+  for(let mid=5;mid<pts.length&&pts[mid].time<=maxT;mid++){
+    if(pts[mid].time-lastT<5.5)continue;
+    const preFrom=Math.max(0,mid-10),preTo=mid-1;
+    const postFrom=mid,postTo=Math.min(pts.length-1,mid+10);
     if(preTo<=preFrom||postTo<=postFrom)continue;
     const segBefore=segmentStats(pts,preFrom,preTo);
     const segAfter=segmentStats(pts,postFrom,postTo);
-    if(segBefore.duration<0.35||segAfter.duration<0.35)continue;
+    if(segBefore.duration<0.22||segAfter.duration<0.22)continue;
     const cogChange=Math.abs(adiff(segBefore.meanCOG,segAfter.meanCOG));
-    if(cogChange<44)continue;
+    if(cogChange<32)continue;
     const preRef=preReferenceFromSegment(pts,segBefore);
     out.push({
       type:"unknown",
@@ -800,7 +861,8 @@ function detectEarlyMicroManoeuvres(pts){
 function mergeManoeuvresByTime(segMans,early){
   const merged=[...segMans];
   for(const e of early){
-    if(merged.some(m=>Math.abs(m.time-e.time)<14))continue;
+    const gap=e._early?6:14;
+    if(merged.some(m=>Math.abs(m.time-e.time)<gap))continue;
     merged.push(e);
   }
   return merged.sort((a,b)=>a.time-b.time);
@@ -1596,24 +1658,55 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
   },[manoeuvres,trackPoints,mapLoaded]);
 
   useEffect(()=>{
-    const map=mapRef.current;if(!map||!mapLoaded||!map.isStyleLoaded())return;
-    const sf=startFinishLine;
-    if(!sf||sf.lat==null||sf.lon==null||!Number.isFinite(Number(sf.windFromDeg))){
+    const map=mapRef.current;if(!map||!mapLoaded)return;
+    const clearSf=()=>{
       try{
         if(map.getLayer("sf-line"))map.removeLayer("sf-line");
+        if(map.getLayer("sf-line-glow"))map.removeLayer("sf-line-glow");
         if(map.getSource("sf-line"))map.removeSource("sf-line");
       }catch(_){}
+    };
+    const sf=startFinishLine;
+    let coords=null;
+    if(sf&&sf.mode==="ends"&&sf.endA&&sf.endB){
+      const{lat:la,lon:loa}=sf.endA,{lat:lb,lon:lob}=sf.endB;
+      if(Number.isFinite(la)&&Number.isFinite(loa)&&Number.isFinite(lb)&&Number.isFinite(lob))
+        coords=[[loa,la],[lob,lb]];
+    }else if(sf&&sf.lat!=null&&sf.lon!=null&&Number.isFinite(Number(sf.windFromDeg))){
+      const wf=Number(sf.windFromDeg)%360;
+      const half=Number(sf.halfLengthM)>20?Number(sf.halfLengthM):150;
+      const a=destinationPoint(sf.lat,sf.lon,wf+90,half);
+      const b=destinationPoint(sf.lat,sf.lon,wf-90,half);
+      coords=[[a.lon,a.lat],[b.lon,b.lat]];
+    }
+    if(!coords||coords.some(c=>!Number.isFinite(c[0])||!Number.isFinite(c[1]))){
+      clearSf();
       return;
     }
-    const wf=Number(sf.windFromDeg)%360;
-    const a=destinationPoint(sf.lat,sf.lon,wf+90,65);
-    const b=destinationPoint(sf.lat,sf.lon,wf-90,65);
-    const geo={type:"Feature",geometry:{type:"LineString",coordinates:[[a.lon,a.lat],[b.lon,b.lat]]}};
-    if(map.getSource("sf-line"))map.getSource("sf-line").setData(geo);
-    else{
-      map.addSource("sf-line",{type:"geojson",data:geo});
-      map.addLayer({id:"sf-line",type:"line",source:"sf-line",paint:{"line-color":"#ffffff","line-width":2.5,"line-opacity":0.92,"line-dasharray":[2,2]}});
-    }
+    const geo={type:"Feature",geometry:{type:"LineString",coordinates:coords}};
+    const paintGlow={"line-color":"#00e5c5","line-width":10,"line-opacity":0.28,"line-blur":3};
+    const paintLine={"line-color":"#ffffff","line-width":3.5,"line-opacity":1,"line-dasharray":[2,1.5]};
+    let cancelled=false;
+    const apply=()=>{
+      if(cancelled)return;
+      try{
+        if(typeof map.isStyleLoaded==="function"&&!map.isStyleLoaded())return;
+        if(map.getSource("sf-line")){
+          map.getSource("sf-line").setData(geo);
+          return;
+        }
+        map.addSource("sf-line",{type:"geojson",data:geo});
+        map.addLayer({id:"sf-line-glow",type:"line",source:"sf-line",paint:paintGlow});
+        map.addLayer({id:"sf-line",type:"line",source:"sf-line",paint:paintLine});
+      }catch(err){console.warn("[CourseMap] start/finish line:",err);}
+    };
+    const run=()=>{if(!cancelled)apply();};
+    if(typeof map.isStyleLoaded==="function"&&map.isStyleLoaded())requestAnimationFrame(run);
+    else map.once("idle",run);
+    return()=>{
+      cancelled=true;
+      try{map.off("idle",run);}catch(_){}
+    };
   },[startFinishLine,mapLoaded]);
 
   useEffect(()=>{
@@ -1680,6 +1773,8 @@ function App(){
   const [actDate,setActDate]=useState(null);
   const [cropStartText,setCropStartText]=useState("00:00:00");
   const [cropDurationText,setCropDurationText]=useState("");
+  const [sfLineEndAText,setSfLineEndAText]=useState("");
+  const [sfLineEndBText,setSfLineEndBText]=useState("");
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
@@ -1825,6 +1920,7 @@ function App(){
         setRawPoints(pts);
         setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
         setCropStartText("00:00:00");setCropDurationText("");
+        setSfLineEndAText("");setSfLineEndBText("");
         const sid=session?.strava?.athlete?.id ?? sAth?.id;
         if(sid!=null){
           const row=await loadAnalysisRow(sid,String(act.id));
@@ -1834,6 +1930,7 @@ function App(){
             if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
             if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
             applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
+            applySfLineEndsFromRow(row.course_setup,setSfLineEndAText,setSfLineEndBText);
           }
         }
         setView("course-setup");
@@ -1854,6 +1951,7 @@ function App(){
       setActId(`file-${Date.now()}`);
       setActDate(new Date(t0>1e12?t0:t0*1000).toISOString());
       setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+      setSfLineEndAText("");setSfLineEndBText("");
       setView("course-setup");
     }catch(e){console.error(e);alert("Failed to parse: "+e.message)}
     setProcessing(false);
@@ -1884,23 +1982,38 @@ function App(){
     return marks;
   },[courseLetter,markOverrides]);
 
-  /** Always include WSC committee START/FINISH for map + distance hint. */
+  const customSfEnds=useMemo(()=>{
+    const a=parseLatLonPair(sfLineEndAText),b=parseLatLonPair(sfLineEndBText);
+    if(!a||!b)return null;
+    return{endA:a,endB:b};
+  },[sfLineEndAText,sfLineEndBText]);
+
+  /** WSC committee line: custom A–B, else mark + perpendicular line on map. */
   const mapMarksWithStart=useMemo(()=>{
+    if(customSfEnds){
+      return{
+        ...effectiveMarks,
+        SFA:{lat:customSfEnds.endA.lat,lon:customSfEnds.endA.lon,fixed:true,desc:"Committee line end A",name:"SFA"},
+        SFB:{lat:customSfEnds.endB.lat,lon:customSfEnds.endB.lon,fixed:true,desc:"Committee line end B",name:"SFB"},
+      };
+    }
     const sf=WSC_MARKS["START/FINISH"];
     if(!sf)return effectiveMarks;
     return{
       ...effectiveMarks,
       "START/FINISH":{lat:sf.lat,lon:sf.lon,fixed:true,desc:sf.desc||"Committee line",name:"START/FINISH"},
     };
-  },[effectiveMarks]);
+  },[effectiveMarks,customSfEnds]);
 
-  /** Distance from first cropped point along track to nearest approach to START/FINISH. */
+  /** Distance from track to committee line (segment if custom, else mark point). */
   const distToStartLine=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<2)return null;
+    if(customSfEnds)
+      return distanceAlongTrackToSegment(croppedPoints,customSfEnds.endA.lat,customSfEnds.endA.lon,customSfEnds.endB.lat,customSfEnds.endB.lon);
     const sf=WSC_MARKS["START/FINISH"];
     if(!sf)return null;
     return distanceAlongTrackToNearest(croppedPoints,sf.lat,sf.lon);
-  },[croppedPoints]);
+  },[croppedPoints,customSfEnds]);
 
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
@@ -1959,6 +2072,8 @@ function App(){
           cropDurationText,
           cropStartSec: cropStartSecParsed,
           cropDurationSec: cropDurationSecParsed,
+          sfLineEndAText,
+          sfLineEndBText,
         });
       } catch (e) { console.warn("Save failed:", e); }
     }
@@ -1981,6 +2096,8 @@ function App(){
     cropDurationText,
     cropStartSecParsed,
     cropDurationSecParsed,
+    sfLineEndAText,
+    sfLineEndBText,
   ]);
 
   const saveCourseSetupOnly = useCallback(async () => {
@@ -2005,6 +2122,8 @@ function App(){
         cropDurationText,
         cropStartSec: cropStartSecParsed,
         cropDurationSec: cropDurationSecParsed,
+        sfLineEndAText,
+        sfLineEndBText,
       });
       setSetupSaveMsg(ok ? "Saved course setup." : "Could not save — check console.");
       if (ok) setTimeout(() => setSetupSaveMsg(null), 4000);
@@ -2028,6 +2147,8 @@ function App(){
     cropDurationText,
     cropStartSecParsed,
     cropDurationSecParsed,
+    sfLineEndAText,
+    sfLineEndBText,
   ]);
 
   // Re-run when wind changes
@@ -2060,6 +2181,13 @@ function App(){
   },[actId]);
 
   const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
+
+  const courseMapStartFinish=useMemo(()=>{
+    if(customSfEnds)return{mode:"ends",endA:customSfEnds.endA,endB:customSfEnds.endB};
+    const sf=WSC_MARKS["START/FINISH"];
+    if(!sf)return null;
+    return{mode:"perp",lat:sf.lat,lon:sf.lon,windFromDeg:effWind,halfLengthM:150};
+  },[customSfEnds,effWind]);
 
   // Handle mark drag
   const onMarkDrag=useCallback((name,lat,lng)=>{
@@ -2301,7 +2429,7 @@ function App(){
               courseMarks={courseMapLine}
               onMarkDrag={onMarkDrag}
               manoeuvres={setupMapAnalysis?{tacks:setupMapAnalysis.tacks,gybes:setupMapAnalysis.gybes}:null}
-              startFinishLine={WSC_MARKS["START/FINISH"]?{lat:WSC_MARKS["START/FINISH"].lat,lon:WSC_MARKS["START/FINISH"].lon,windFromDeg:effWind}:null}
+              startFinishLine={courseMapStartFinish}
             />
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
@@ -2313,8 +2441,23 @@ function App(){
             />
           </div>
         </div>
+        <div style={{marginBottom:16,padding:"12px 14px",background:C.card,borderRadius:10,border:`1px solid ${C.bdr}`}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Committee line (optional)</div>
+          <div style={{fontSize:10,color:C.txD,lineHeight:1.5,marginBottom:10}}>Leave both blank for the default: line through the WSC START/FINISH mark, perpendicular to wind FROM (teal glow + white dashes). To set the line yourself, enter decimal <strong style={{color:C.txM}}>lat, lon</strong> for each end (e.g. <code style={{color:C.acc}}>50.8512, -1.3087</code>). Saved with course setup.</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <label style={{flex:1,minWidth:200,fontSize:11,color:C.txM}}>End A (lat, lon)
+              <input value={sfLineEndAText} onChange={e=>setSfLineEndAText(e.target.value)} placeholder="50.851, -1.309" style={{display:"block",width:"100%",marginTop:4,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </label>
+            <label style={{flex:1,minWidth:200,fontSize:11,color:C.txM}}>End B (lat, lon)
+              <input value={sfLineEndBText} onChange={e=>setSfLineEndBText(e.target.value)} placeholder="50.8520, -1.3075" style={{display:"block",width:"100%",marginTop:4,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </label>
+          </div>
+          {customSfEnds&&<div style={{fontSize:10,color:C.acc,marginTop:8}}>Using custom line (SFA → SFB on map).</div>}
+          {(sfLineEndAText.trim()||sfLineEndBText.trim())&&!customSfEnds&&<div style={{fontSize:10,color:"#ff8a65",marginTop:8}}>Could not parse both ends — check format (two numbers per field).</div>}
+        </div>
+
         {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:11,color:C.txM,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <strong style={{color:C.txt}}>START/FINISH</strong> (WSC): white dashed line on map (perpendicular to wind FROM). Straight-line gap from track to line ~<strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track to closest approach <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong> · first GPS <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{formatWallClock(croppedPoints[0].time)||"—"}</strong> local (Unix seconds in file; crop times are still elapsed from first point).
+          <strong style={{color:C.txt}}>START/FINISH</strong>{customSfEnds?" (custom ends)":" (WSC)"}: {customSfEnds?"white dashed line = your A–B.":"white dashed + teal glow (perpendicular to wind FROM)."} Shortest gap from track to line ~<strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track to closest approach <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong> · first GPS <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{formatWallClock(croppedPoints[0].time)||"—"}</strong> local (Unix seconds in file; crop times are still elapsed from first point).
         </div>}
 
         {/* Mark legend — port (P) red, starboard (S) green */}
@@ -2455,7 +2598,7 @@ function App(){
                     <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-sp-${i}`} yAxisId="speed" x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomain}/>
+                    <XAxis dataKey="time" type="number" allowDataOverflow tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomain}/>
                     <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]} ticks={yTicks} tickFormatter={fmtSpdTick}/>
                     <YAxis yAxisId="wind" hide domain={["dataMin-20","dataMax+20"]}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="speed"?`${Number(v).toFixed(2)} kts`:`${Math.round(v)}°`,n==="speed"?"Speed":"Wind"]}/>
@@ -2519,7 +2662,7 @@ function App(){
                     <ReferenceArea y1={yMin} y2={0} fill={`${C.port}22`} ifOverflow="extendDomain"/>
                     <ReferenceArea y1={0} y2={yMax} fill={`${C.stbd}22`} ifOverflow="extendDomain"/>
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomainWind}/>
+                    <XAxis dataKey="time" type="number" allowDataOverflow tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomainWind}/>
                     <YAxis reversed tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n,p)=>{if(n==="std")return[`±${Number(v).toFixed(1)}°`,"Spread"];const raw=p?.payload?.windDir;return[`${Math.round(raw??(windMid+Number(v)))}°`,"Wind"];}}/>
                     <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
