@@ -537,6 +537,22 @@ function circularMean(angles){
   return((Math.atan2(sinSum/angles.length,cosSum/angles.length)/D)+360)%360;
 }
 
+function circularMode(angles,binSize=5){
+  if(!angles||!angles.length)return null;
+  const bins=Math.max(1,Math.round(360/binSize));
+  const counts=new Array(bins).fill(0);
+  for(const a of angles){
+    const idx=((Math.floor((((Number(a)%360)+360)%360)/binSize))%bins+bins)%bins;
+    counts[idx]++;
+  }
+  let bestIdx=0,best=-1;
+  for(let i=0;i<bins;i++){
+    const score=counts[i]+0.5*counts[(i+1)%bins]+0.5*counts[(i-1+bins)%bins];
+    if(score>best){best=score;bestIdx=i;}
+  }
+  return((bestIdx+0.5)*binSize)%360;
+}
+
 function circularStdDev(angles){
   if(!angles||angles.length<2)return 0;
   const sinMean=angles.reduce((s,a)=>s+Math.sin(Number(a)*D),0)/angles.length;
@@ -626,8 +642,17 @@ function preReferenceFromSegment(pts,seg){
 function crossingSide(preCOG,postCOG,refDir){
   const a=((preCOG-refDir+360)%360);
   const b=((postCOG-refDir+360)%360);
-  if((a<=180&&b>=180)||(a>=180&&b<=180))return "upwind";
-  return "downwind";
+  const turn=adiff(a,b);
+  const steps=Math.max(8,Math.ceil(Math.abs(turn)/4));
+  let minUp=360,minDn=360;
+  for(let i=0;i<=steps;i++){
+    const r=(a+(turn*i/steps)+360)%360;
+    const dUp=Math.min(r,360-r);
+    const dDn=Math.abs(r-180);
+    if(dUp<minUp)minUp=dUp;
+    if(dDn<minDn)minDn=dDn;
+  }
+  return minUp<=minDn?"upwind":"downwind";
 }
 
 function detectMans(pts){
@@ -2234,27 +2259,44 @@ function App(){
             </ResponsiveContainer>
             <ResponsiveContainer width="100%" height={110}>
               {(()=>{
-                const wt=(a.windTrace||[]).map(w=>({
+                const wtRaw=(a.windTrace||[]).map(w=>({
                   time:w.time-(a.points?.[0]?.time||0),
                   windDir:w.windDir,
-                  windKnown:w.interpolated?null:w.windDir,
-                  windEst:w.interpolated?w.windDir:null,
                   std:w.std||8,
                   interpolated:w.interpolated,
                 }));
+                const windMid=circularMode(wtRaw.map(w=>w.windDir).filter(Number.isFinite),5)??a.windDir;
+                const offsets=wtRaw.map(w=>adiff(windMid,w.windDir));
+                const minOffset=offsets.length?Math.min(...offsets):0;
+                const maxOffset=offsets.length?Math.max(...offsets):0;
+                let yMin=minOffset<0?minOffset*1.1:minOffset*0.9;
+                let yMax=maxOffset>0?maxOffset*1.1:maxOffset*0.9;
+                if(!Number.isFinite(yMin)||!Number.isFinite(yMax)||(Math.abs(yMax-yMin)<0.5)){
+                  yMin=-1;yMax=1;
+                }
+                if(yMin===yMax){yMin-=1;yMax+=1;}
+                const wt=wtRaw.map(w=>{
+                  const plot=adiff(windMid,w.windDir);
+                  return{
+                    ...w,
+                    windPlot:plot,
+                    windKnown:w.interpolated?null:plot,
+                    windEst:w.interpolated?plot:null,
+                  };
+                });
                 const deco=buildTimelineDecorations(a);
                 return(
                   <LineChart data={wt} margin={{top:2,right:8,left:0,bottom:0}}>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-wd-${i}`} x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                     <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
-                    <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
-                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="std"?`±${Number(v).toFixed(1)}°`:`${Math.round(v)}°`,n==="std"?"Spread":"Wind"]}/>
-                    <ReferenceLine y={a.windDir} stroke={C.txD} strokeDasharray="4 4"/>
+                    <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
+                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n,p)=>{if(n==="std")return[`±${Number(v).toFixed(1)}°`,"Spread"];const raw=p?.payload?.windDir;return[`${Math.round(raw??(windMid+Number(v)))}°`,"Wind"];}}/>
+                    <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
                     <Line type="monotone" dataKey="windKnown" connectNulls stroke={C.gld} strokeWidth={2} dot={false} isAnimationActive={false}/>
                     <Line type="monotone" dataKey="windEst" connectNulls stroke={C.gld} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
                     {deco.markers.map((m,i)=><ReferenceLine key={`mk-wd-${i}`} x={m.x} stroke={m.color} strokeWidth={1.2} strokeDasharray="3 3" ifOverflow="extendDomain"/>)}
-                    {deco.markers.filter(m=>m.kind==="tack").map((m,i)=><ReferenceDot key={`arr-wd-${i}`} x={m.x} y={a.windDir} r={0} isFront label={{value:m.shiftLabel,position:"top",fill:C.gld,fontSize:9,fontWeight:700}}/>)}
+                    {deco.markers.filter(m=>m.kind==="tack").map((m,i)=><ReferenceDot key={`arr-wd-${i}`} x={m.x} y={0} r={0} isFront label={{value:m.shiftLabel,position:"top",fill:C.gld,fontSize:9,fontWeight:700}}/>)}
                   </LineChart>
                 );
               })()}
