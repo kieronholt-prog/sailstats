@@ -34,7 +34,7 @@ button{font-family:inherit;cursor:pointer}a{color:inherit}
 
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef}=React;
-const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ReferenceLine,ReferenceDot,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ReferenceLine,ReferenceDot,ReferenceArea,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
 
 const PEAK_MARK_ORANGE="#ff9500";
 function PeakLightningRefShape(props){
@@ -530,146 +530,409 @@ function enrich(pts){
   });
 }
 
-/** Auto wind (meteorological ° FROM): histogram of COG in 10° bins while moving (1.5–12 kn).
- *  Two dominant headings ~60–140° apart → bisector of the shorter arc (beat angles → wind axis).
- *  Single peak → that heading; low confidence if sparse peaks. */
-function estWind(pts){
-  const bins=new Array(36).fill(0);let cnt=0;
-  for(let i=10;i<pts.length-10;i++){
-    const s=ms2k(pts[i].ss||0);if(s<1.5||s>12)continue;
-    bins[Math.floor(pts[i].cog/10)%36]++;cnt++;
-  }
-  if(cnt<20)return{dir:0,conf:0};
-  const peaks=[];
-  for(let i=0;i<36;i++){if(bins[i]>bins[(i+35)%36]&&bins[i]>bins[(i+1)%36]&&bins[i]>cnt*0.04)peaks.push({a:i*10+5,c:bins[i]})}
-  peaks.sort((a,b)=>b.c-a.c);
-  if(peaks.length>=2){
-    const d=Math.abs(adiff(peaks[0].a,peaks[1].a));
-    if(d>60&&d<140){const bis=(peaks[0].a+adiff(peaks[0].a,peaks[1].a)/2+360)%360;return{dir:Math.round(bis)%360,conf:Math.min(peaks[0].c+peaks[1].c,cnt)/cnt}}
-  }
-  return peaks.length>=1?{dir:peaks[0].a,conf:0.3}:{dir:0,conf:0};
+function circularMean(angles){
+  if(!angles||!angles.length)return null;
+  const sinSum=angles.reduce((s,a)=>s+Math.sin(Number(a)*D),0);
+  const cosSum=angles.reduce((s,a)=>s+Math.cos(Number(a)*D),0);
+  return((Math.atan2(sinSum/angles.length,cosSum/angles.length)/D)+360)%360;
 }
 
-/** Port vs starboard tack relative to wind FROM (°), same rule as portS/stbdS in runAnalysis. */
-function tackSideFromWind(cog,wd){
-  const r=((Number(cog)-Number(wd)+360)%360);
-  return r>180?"S":"P";
+function circularStdDev(angles){
+  if(!angles||angles.length<2)return 0;
+  const sinMean=angles.reduce((s,a)=>s+Math.sin(Number(a)*D),0)/angles.length;
+  const cosMean=angles.reduce((s,a)=>s+Math.cos(Number(a)*D),0)/angles.length;
+  const R=Math.max(1e-6,Math.hypot(sinMean,cosMean));
+  return Math.sqrt(Math.max(0,-2*Math.log(R)))/D;
 }
 
-/** Circular mean COG (0–360). */
-function meanCogDeg(degs){
-  if(!degs||!degs.length)return null;
-  let sx=0,sy=0;
-  for(const c of degs){
-    const r=Number(c)*D;
-    sx+=Math.sin(r);sy+=Math.cos(r);
+function weightedCircularMean(items,valueKey,weightKey){
+  if(!items?.length)return null;
+  let sx=0,sy=0,wSum=0;
+  for(const it of items){
+    const a=Number(it[valueKey]);
+    const w=Math.max(0.001,Number(it[weightKey]??1));
+    sx+=Math.sin(a*D)*w;
+    sy+=Math.cos(a*D)*w;
+    wSum+=w;
   }
-  const L=Math.hypot(sx,sy);
-  if(L<1e-9)return Number(degs[0])%360;
-  return((Math.atan2(sx,sy)/D)+360)%360;
-}
-function lowerBoundTime(pts,target){
-  let lo=0,hi=pts.length;
-  while(lo<hi){const mid=(lo+hi)>>1;if(pts[mid].time<target)lo=mid+1;else hi=mid;}
-  return lo;
-}
-/** Mean COG over [tLo,tHi] (seconds) using points with SOG ≥ minKt kn. */
-function meanCogInTimeRange(pts,tLo,tHi,minKt){
-  let k=lowerBoundTime(pts,tLo);
-  const cogs=[];
-  for(;k<pts.length&&pts[k].time<=tHi;k++){
-    if(minKt<=0||ms2k(pts[k].ss||0)>=minKt)cogs.push(pts[k].cog);
-  }
-  if(!cogs.length)return null;
-  return meanCogDeg(cogs);
+  if(wSum<=0)return null;
+  return((Math.atan2(sx/wSum,sy/wSum)/D)+360)%360;
 }
 
-/** Mean |speed·cos(TWA)| (kts) over points in [tLo,tHi] vs wind FROM (wd). */
-function meanAbsVmgInTimeRange(pts,tLo,tHi,wd,minKt=0.5){
-  if(!pts?.length||tHi<tLo)return null;
-  let k=lowerBoundTime(pts,tLo);
-  const vals=[];
-  for(;k<pts.length&&pts[k].time<=tHi+1e-9;k++){
-    const p=pts[k];
-    if(p.time<tLo-1e-9)continue;
-    if(ms2k(p.ss||0)<minKt)continue;
-    const r=((p.cog-wd+360)%360),va=r>180?360-r:r;
-    vals.push(Math.abs(ms2k(p.ss||0)*Math.cos(va*D)));
-  }
-  return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null;
-}
-function fwdRel(cog,refDeg){
-  return((Number(cog)-Number(refDeg)+360)%360);
-}
-
-/** Tack / gybe once wind FROM (wd) is known.
- *  Port→starboard tack: mean COG over ~4s at start of a 10–20s window lies in (wd+30°)–(wd+60°),
- *  mean COG over ~4s at end lies in (wd−60°)–(wd−30°) i.e. 300°–330° relative to wd. S→P tack is the mirror.
- *  Gybe: same ±30–60° pattern relative to downwind (wd+180°), both ends sailing downwind (wind-relative 90°–270°).
- *  First matching window length W (10…20s, shortest first) wins; 12s cooldown between events. */
-function detectMans(pts,wd){
-  const wdN=Number(wd)%360;
-  const dRef=(wdN+180)%360;
-  const res=[];
-  const minKt=1.0;
-  let coolT=-Infinity;
-  for(let i=0;i<pts.length;i++){
-    if(pts[i].time<coolT)continue;
-    if(ms2k(pts[i].ss||0)<minKt)continue;
-    const te=pts[i].time;
-    let hit=null;
-    for(let W=10;W<=20&&!hit;W++){
-      const ts=te-W;
-      const cog0=meanCogInTimeRange(pts,ts,ts+4,minKt);
-      const cog1=meanCogInTimeRange(pts,te-4,te,minKt);
-      if(cog0==null||cog1==null)continue;
-      const f0=fwdRel(cog0,wdN),f1=fwdRel(cog1,wdN);
-      let type,crossing;
-      if(f0>=30&&f0<=60&&f1>=300&&f1<=330){type="tack";crossing="P→S";}
-      else if(f0>=300&&f0<=330&&f1>=30&&f1<=60){type="tack";crossing="S→P";}
-      else{
-        const g0=fwdRel(cog0,dRef),g1=fwdRel(cog1,dRef);
-        const down=f0>90&&f0<270&&f1>90&&f1<270;
-        if(down&&g0>=30&&g0<=60&&g1>=300&&g1<=330){type="gybe";crossing="S→P";}
-        else if(down&&g0>=300&&g0<=330&&g1>=30&&g1<=60){type="gybe";crossing="P→S";}
-        else continue;
-      }
-      const sB=tackSideFromWind(cog0,wdN),sA=tackSideFromWind(cog1,wdN);
-      hit={type,idx:i,time:te,cogB:cog0,cogA:cog1,ch:Math.abs(adiff(cog0,cog1)),crossing,sideBef:sB,sideAft:sA,winSec:W};
-    }
-    if(hit){res.push(hit);coolT=te+12;}
-  }
-  return res;
-}
-
-function scoreMan(m,pts,wd){
-  const i=m.idx,pt=pts[i],te=pt.time;
-  const W=Math.max(6,m.winSec||12);
-  const tTurnStart=te-W;
-  const vmgBef=meanAbsVmgInTimeRange(pts,tTurnStart-10,tTurnStart,wd);
-  const vmgAft=meanAbsVmgInTimeRange(pts,te+1e-3,te+10,wd);
-  const vmgDur=meanAbsVmgInTimeRange(pts,tTurnStart,te,wd);
-  let vmgRef=null;
-  if(vmgBef!=null&&vmgAft!=null)vmgRef=(vmgBef+vmgAft)/2;
-  else vmgRef=vmgBef??vmgAft??null;
-  const refN=vmgRef!=null?Math.max(vmgRef,0.04):0.04;
-  const during=vmgDur!=null?Math.max(vmgDur,0.04):refN;
-  const pct=refN>1e-6&&during>1e-6?(refN/during)*100:100;
-  const q=Number.isFinite(pct)?Math.round(Math.min(pct,999)):100;
-
-  const pre=pts.slice(Math.max(0,i-15),i-3),post=pts.slice(i+5,Math.min(pts.length,i+25));
-  const preS=pre.length?pre.reduce((a,p)=>a+ms2k(p.ss||0),0)/pre.length:0;
-  const win=pts.slice(Math.max(0,i-5),Math.min(pts.length,i+15));
-  const minS=win.length?Math.min(...win.map(p=>ms2k(p.ss||0))):0;
-  const postSp=post.map(p=>ms2k(p.ss||0));
-  const tgt=preS*0.9,ri=postSp.findIndex(s=>s>=tgt),rt=ri>=0?ri:postSp.length;
-  const prof=pts.slice(Math.max(0,i-10),Math.min(pts.length,i+25)).map((p,j)=>({t:j-(i-Math.max(0,i-10)),speed:parseFloat(ms2k(p.ss||0).toFixed(1))}));
+function segmentStats(pts,startIdx,endIdx){
+  const segPts=pts.slice(startIdx,endIdx+1);
+  const cogs=segPts.map(p=>p.cog);
+  const meanCOG=circularMean(cogs);
+  const meanSOG=segPts.length?segPts.reduce((s,p)=>s+ms2k(p.ss||0),0)/segPts.length:0;
+  const startTime=pts[startIdx].time;
+  const endTime=pts[endIdx].time;
   return{
-    ...m,
-    vmgBef,vmgAft,vmgDur,vmgRef:refN,
-    preV:vmgBef??0,postV:vmgAft??0,
-    preS,minS,rt,prof,q,lat:pt.lat,lon:pt.lon,
+    startIdx,endIdx,startTime,endTime,
+    duration:Math.max(0,endTime-startTime),
+    meanCOG:meanCOG??0,
+    meanSOG,
+    cogStdDev:circularStdDev(cogs),
   };
+}
+
+function detectStableSegments(pts){
+  if(!pts?.length)return[];
+  const stable=new Array(pts.length).fill(false);
+  for(let i=0;i<pts.length;i++){
+    if(i<3){stable[i]=false;continue;}
+    const dt=Math.max(1e-6,pts[i].time-pts[i-3].time);
+    const cogRate=Math.abs(adiff(pts[i-3].cog,pts[i].cog))/dt;
+    const sogKt=ms2k(pts[i].ss||0);
+    stable[i]=cogRate<4&&sogKt>1.5;
+    pts[i].cogRate=cogRate;
+    pts[i].isStable=stable[i];
+  }
+  const segments=[];
+  let start=-1;
+  for(let i=0;i<stable.length;i++){
+    if(stable[i]&&start<0)start=i;
+    if((!stable[i]||i===stable.length-1)&&start>=0){
+      const end=stable[i]?i:i-1;
+      const stats=segmentStats(pts,start,end);
+      if(stats.duration>=5)segments.push(stats);
+      start=-1;
+    }
+  }
+  return segments;
+}
+
+function preReferenceFromSegment(pts,seg){
+  if(!seg)return{preRefCOG:null,preRefSpeed:null,refStartIdx:null,refEndIdx:null};
+  if(seg.duration<8){
+    return{
+      preRefCOG:seg.meanCOG,
+      preRefSpeed:seg.meanSOG,
+      refStartIdx:seg.startIdx,
+      refEndIdx:seg.endIdx,
+    };
+  }
+  const refEndTime=seg.endTime-5;
+  let refEndIdx=seg.endIdx;
+  while(refEndIdx>seg.startIdx&&pts[refEndIdx].time>refEndTime)refEndIdx--;
+  const stats=segmentStats(pts,seg.startIdx,Math.max(seg.startIdx,refEndIdx));
+  return{
+    preRefCOG:stats.meanCOG,
+    preRefSpeed:stats.meanSOG,
+    refStartIdx:seg.startIdx,
+    refEndIdx:Math.max(seg.startIdx,refEndIdx),
+  };
+}
+
+function crossingSide(preCOG,postCOG,refDir){
+  const a=((preCOG-refDir+360)%360);
+  const b=((postCOG-refDir+360)%360);
+  if((a<=180&&b>=180)||(a>=180&&b<=180))return "upwind";
+  return "downwind";
+}
+
+function detectMans(pts){
+  const stableSegments=detectStableSegments(pts);
+  const manoeuvres=[];
+  for(let i=0;i<stableSegments.length-1;i++){
+    const segBefore=stableSegments[i],segAfter=stableSegments[i+1];
+    const cogChange=Math.abs(adiff(segBefore.meanCOG,segAfter.meanCOG));
+    if(cogChange<=50)continue;
+    const midIdx=Math.max(segBefore.endIdx,Math.min(segAfter.startIdx,Math.round((segBefore.endIdx+segAfter.startIdx)/2)));
+    const preRef=preReferenceFromSegment(pts,segBefore);
+    manoeuvres.push({
+      type:"unknown",
+      idx:midIdx,
+      time:pts[midIdx].time,
+      preCOG:segBefore.meanCOG,
+      postCOG:segAfter.meanCOG,
+      cogB:segBefore.meanCOG,
+      cogA:segAfter.meanCOG,
+      ch:cogChange,
+      cogChange,
+      preSpeed:segBefore.meanSOG,
+      preSegment:segBefore,
+      postSegment:segAfter,
+      gapDuration:Math.max(0,segAfter.startTime-segBefore.endTime),
+      ...preRef,
+    });
+  }
+  return{stableSegments,manoeuvres};
+}
+
+function buildTackGroups(manoeuvres){
+  if(!manoeuvres?.length)return[];
+  const groups=[];
+  let cur={manoeuvres:[manoeuvres[0]],preSegment:manoeuvres[0].preSegment,postSegment:manoeuvres[0].postSegment,interSegments:[],isSolo:true};
+  for(let i=1;i<manoeuvres.length;i++){
+    const prev=manoeuvres[i-1];
+    const m=manoeuvres[i];
+    const sameBridge=m.preSegment&&prev.postSegment&&m.preSegment.startIdx===prev.postSegment.startIdx&&m.preSegment.endIdx===prev.postSegment.endIdx;
+    const shouldGroup=sameBridge&&m.preSegment.duration<8;
+    if(shouldGroup){
+      cur.manoeuvres.push(m);
+      cur.interSegments.push(m.preSegment);
+      cur.postSegment=m.postSegment;
+      cur.isSolo=false;
+    }else{
+      groups.push(cur);
+      cur={manoeuvres:[m],preSegment:m.preSegment,postSegment:m.postSegment,interSegments:[],isSolo:true};
+    }
+  }
+  groups.push(cur);
+  return groups;
+}
+
+function initialWindFromStableSegments(stableSegments){
+  const bins=new Array(36).fill(0);
+  for(const seg of stableSegments||[]){
+    const idx=Math.floor((seg.meanCOG%360)/10)%36;
+    bins[idx]+=Math.max(1,seg.duration);
+  }
+  const peaks=bins.map((v,i)=>({a:i*10+5,w:v})).sort((a,b)=>b.w-a.w).slice(0,2);
+  if(peaks.length<2)return{dir:0,conf:0};
+  const h1=peaks[0].a,h2=peaks[1].a;
+  const shortBis=(h1+adiff(h1,h2)/2+360)%360;
+  return{dir:Math.round(shortBis)%360,conf:Math.min(0.9,(peaks[0].w+peaks[1].w)/(stableSegments.length*12||1))};
+}
+
+function classifySides(manoeuvres,seedWind){
+  for(const m of manoeuvres){
+    const rel=((m.preRefCOG??m.preCOG)-seedWind+360)%360;
+    m.sideBef=rel>180?"S":"P";
+  }
+  const stbd=manoeuvres.filter(m=>m.sideBef==="S").map(m=>m.preRefCOG??m.preCOG).filter(Number.isFinite);
+  const port=manoeuvres.filter(m=>m.sideBef==="P").map(m=>m.preRefCOG??m.preCOG).filter(Number.isFinite);
+  return{
+    meanStarboardCOG:circularMean(stbd),
+    meanPortCOG:circularMean(port),
+  };
+}
+
+function deriveWindAndClassify(manoeuvres,stableSegments,userWind){
+  const seed=userWind!=null?{dir:Number(userWind)%360,conf:1}:initialWindFromStableSegments(stableSegments);
+  const allAngles=manoeuvres.map(m=>m.cogChange).sort((a,b)=>a-b);
+  const med=allAngles.length?allAngles[Math.floor(allAngles.length/2)]:90;
+  const hi=manoeuvres.filter(m=>Math.abs(m.cogChange-med)<=15);
+  const pool=hi.length>=3?hi:manoeuvres;
+  const sideMeans=classifySides(pool,seed.dir);
+  const meanStarboardCOG=sideMeans.meanStarboardCOG??circularMean(stableSegments.map(s=>s.meanCOG));
+  const meanPortCOG=sideMeans.meanPortCOG??((meanStarboardCOG+90)%360);
+  const cand1=(meanStarboardCOG+adiff(meanStarboardCOG,meanPortCOG)/2+360)%360;
+  const cand2=(cand1+180)%360;
+  const crossCounts=[cand1,cand2].map(c=>manoeuvres.reduce((acc,m)=>acc+(crossingSide(m.preCOG,m.postCOG,c)==="upwind"?1:0),0));
+  const windDir=(userWind!=null?Number(userWind)%360:(crossCounts[0]>=crossCounts[1]?cand1:cand2));
+  const tackAngle=Math.abs(adiff(meanStarboardCOG,meanPortCOG));
+  for(const m of manoeuvres){
+    const side=crossingSide(m.preCOG,m.postCOG,windDir);
+    m.type=side==="upwind"?"tack":"gybe";
+    m.windAtMan=windDir;
+    const preSide=((m.preRefCOG??m.preCOG)-windDir+360)%360;
+    const postSide=((m.postCOG)-windDir+360)%360;
+    m.crossing=preSide<=180&&postSide>180?"P→S":preSide>180&&postSide<=180?"S→P":"—";
+    m.sideAft=m.crossing==="P→S"?"S":m.crossing==="S→P"?"P":null;
+    if(!m.sideBef)m.sideBef=preSide>180?"S":"P";
+  }
+  const conf=Math.min(0.98,Math.max(0.25,pool.length/Math.max(3,manoeuvres.length)));
+  return{
+    windDir,
+    windEst:{dir:Math.round(windDir),conf},
+    tackAngle,
+    meanStarboardCOG,
+    meanPortCOG,
+  };
+}
+
+function buildWindTrace(stableSegments,baselines,startTime,endTime){
+  const close=[];
+  for(const seg of stableSegments||[]){
+    const dP=Math.abs(adiff(seg.meanCOG,baselines.portCOG));
+    const dS=Math.abs(adiff(seg.meanCOG,baselines.stbdCOG));
+    const near=Math.min(dP,dS)<=10;
+    if(!near)continue;
+    const side=dP<=dS?"port":"stbd";
+    const windRaw=side==="stbd"?((seg.meanCOG+baselines.tackAngle/2+360)%360):((seg.meanCOG-baselines.tackAngle/2+360)%360);
+    const conf=seg.duration>10?"high":seg.duration>=5?"medium":"low";
+    close.push({
+      time:(seg.startTime+seg.endTime)/2,
+      windDir:windRaw,
+      confidence:conf,
+      interpolated:false,
+      std:Math.min(20,Math.max(2,seg.cogStdDev)),
+      weight:Math.max(1,seg.duration),
+    });
+  }
+  close.sort((a,b)=>a.time-b.time);
+  const smoothed=close.map((pt,i)=>{
+    const left=pt.time-15,right=pt.time+15;
+    const window=close.filter(x=>x.time>=left&&x.time<=right);
+    const windDir=weightedCircularMean(window,"windDir","weight")??pt.windDir;
+    return{...pt,windDir};
+  });
+  if(smoothed.length===0)return{windTrace:[],windStats:{range:0,avgShiftPeriod:null,trend:"unknown"}};
+  const trace=[...smoothed];
+  if(smoothed[0].time>startTime+2)trace.unshift({...smoothed[0],time:startTime,interpolated:true});
+  if(smoothed[smoothed.length-1].time<endTime-2)trace.push({...smoothed[smoothed.length-1],time:endTime,interpolated:true});
+  for(let i=0;i<trace.length-1;i++){
+    const a=trace[i],b=trace[i+1];
+    if(b.time-a.time>60){
+      const step=30;
+      for(let t=a.time+step;t<b.time;t+=step){
+        const ratio=(t-a.time)/(b.time-a.time);
+        const d=adiff(a.windDir,b.windDir);
+        trace.push({time:t,windDir:(a.windDir+d*ratio+360)%360,confidence:"low",interpolated:true,std:10,weight:1});
+      }
+    }
+  }
+  trace.sort((a,b)=>a.time-b.time);
+  const dirs=trace.map(x=>x.windDir);
+  const unwrapped=[dirs[0]];
+  for(let i=1;i<dirs.length;i++){
+    unwrapped[i]=unwrapped[i-1]+adiff(unwrapped[i-1],dirs[i]);
+  }
+  const range=(Math.max(...unwrapped)-Math.min(...unwrapped))||0;
+  let turns=0,lastSign=0,lastTurnTime=null,periods=[];
+  for(let i=1;i<unwrapped.length;i++){
+    const delta=unwrapped[i]-unwrapped[i-1];
+    const sign=Math.abs(delta)<0.4?0:(delta>0?1:-1);
+    if(sign!==0&&lastSign!==0&&sign!==lastSign){
+      turns++;
+      if(lastTurnTime!=null)periods.push(trace[i].time-lastTurnTime);
+      lastTurnTime=trace[i].time;
+    }else if(sign!==0&&lastSign===0&&lastTurnTime==null){
+      lastTurnTime=trace[i].time;
+    }
+    if(sign!==0)lastSign=sign;
+  }
+  const avgShiftPeriod=periods.length?periods.reduce((a,b)=>a+b,0)/periods.length:null;
+  const net=unwrapped[unwrapped.length-1]-unwrapped[0];
+  const trend=Math.abs(net)>=6?(net>0?"persistent veer":"persistent back"):turns>=2?"oscillating":"stable";
+  return{windTrace:trace,windStats:{range,avgShiftPeriod,trend}};
+}
+
+function windAtTime(windTrace,time,fallback){
+  if(!windTrace?.length)return fallback;
+  if(time<=windTrace[0].time)return windTrace[0].windDir;
+  for(let i=0;i<windTrace.length-1;i++){
+    const a=windTrace[i],b=windTrace[i+1];
+    if(time>=a.time&&time<=b.time){
+      const ratio=(time-a.time)/Math.max(1e-6,b.time-a.time);
+      return(a.windDir+adiff(a.windDir,b.windDir)*ratio+360)%360;
+    }
+  }
+  return windTrace[windTrace.length-1].windDir;
+}
+
+function buildBaselines(stableSegments,meanPortCOG,meanStarboardCOG,tackAngle,windDir){
+  const portSegs=stableSegments.filter(s=>Math.abs(adiff(s.meanCOG,meanPortCOG))<=10);
+  const stbdSegs=stableSegments.filter(s=>Math.abs(adiff(s.meanCOG,meanStarboardCOG))<=10);
+  const weightedMeanSpeed=arr=>{
+    const w=arr.reduce((s,x)=>s+x.duration,0)||1;
+    return arr.reduce((s,x)=>s+x.meanSOG*x.duration,0)/w;
+  };
+  const portSpeed=weightedMeanSpeed(portSegs);
+  const stbdSpeed=weightedMeanSpeed(stbdSegs);
+  const allUp=[...portSegs,...stbdSegs];
+  const upwindVMG=allUp.length?allUp.reduce((s,seg)=>{
+    const rel=Math.abs(adiff(seg.meanCOG,windDir));
+    return s+seg.meanSOG*Math.cos(rel*D)*seg.duration;
+  },0)/(allUp.reduce((s,seg)=>s+seg.duration,0)||1):0;
+  return{
+    portCOG:meanPortCOG,
+    portSpeed,
+    stbdCOG:meanStarboardCOG,
+    stbdSpeed,
+    tackAngle,
+    upwindVMG:Math.abs(upwindVMG),
+  };
+}
+
+function tackTarget(sideAft,baselines){
+  const isPort=sideAft==="P";
+  return{
+    targetCOG:isPort?baselines.portCOG:baselines.stbdCOG,
+    targetSpeed:isPort?baselines.portSpeed:baselines.stbdSpeed,
+  };
+}
+
+function secondsIndexFrom(pts,startIdx,seconds){
+  const target=pts[startIdx].time+seconds;
+  let i=startIdx;
+  while(i<pts.length&&pts[i].time<target)i++;
+  return Math.min(pts.length-1,i);
+}
+
+function speedProfile(pts,idx){
+  const s=Math.max(0,idx-10),e=Math.min(pts.length-1,idx+25);
+  const out=[];
+  for(let i=s;i<=e;i++)out.push({t:Math.round(pts[i].time-pts[idx].time),speed:parseFloat(ms2k(pts[i].ss||0).toFixed(2))});
+  return out;
+}
+
+function scoreGroup(group,pts,baselines,windTrace,windDir){
+  const first=group.manoeuvres[0],last=group.manoeuvres[group.manoeuvres.length-1];
+  const startIdx=first.idx;
+  const endSearch=Math.min(pts.length-1,secondsIndexFrom(pts,startIdx,30));
+  const target=tackTarget(last.sideAft||last.sideBef,baselines);
+  const speedThreshold=(target.targetSpeed||0)*0.9;
+  let speedRecovery=30;
+  for(let i=startIdx;i<=endSearch;i++){
+    if(ms2k(pts[i].ss||0)>=speedThreshold){speedRecovery=Math.round(Math.max(0,pts[i].time-pts[startIdx].time));break;}
+  }
+  let headingConvergence=30;
+  for(let i=last.idx;i<=endSearch;i++){
+    const ok=Math.abs(adiff(pts[i].cog,target.targetCOG))<=5&&i+2<=endSearch&&Math.abs(adiff(pts[i+1].cog,target.targetCOG))<=5&&Math.abs(adiff(pts[i+2].cog,target.targetCOG))<=5;
+    if(ok){headingConvergence=Math.round(Math.max(0,pts[i].time-pts[last.idx].time));break;}
+  }
+  const sampleEnd=Math.min(pts.length-1,secondsIndexFrom(pts,startIdx,speedRecovery));
+  const localWind=windAtTime(windTrace,pts[startIdx].time,windDir);
+  const preVmg=Math.max(0,(first.preRefSpeed??first.preSpeed??0)*Math.cos(Math.abs(adiff(first.preRefCOG??first.preCOG,localWind))*D));
+  let vmgCost=0;
+  for(let i=startIdx;i<=sampleEnd;i++){
+    const w=windAtTime(windTrace,pts[i].time,localWind);
+    const actual=ms2k(pts[i].ss||0)*Math.cos(Math.abs(adiff(pts[i].cog,w))*D);
+    const deficit=Math.max(0,preVmg-actual);
+    vmgCost+=deficit*0.514444*(pts[i].dt||1);
+  }
+  const biasSamples=pts.slice(startIdx,Math.min(pts.length,startIdx+6)).map(p=>adiff(target.targetCOG,p.cog));
+  const exitBiasAmount=biasSamples.length?biasSamples.reduce((s,x)=>s+x,0)/biasSamples.length:0;
+  const exitBias=Math.abs(exitBiasAmount)<=3?"neutral":exitBiasAmount<0?"high":"low";
+  const speedScore=Math.max(0,100-speedRecovery*6);
+  const headingScore=Math.max(0,100-headingConvergence*5);
+  const vmgScore=Math.max(0,100-vmgCost*2);
+  const quality=Math.round(speedScore*0.3+headingScore*0.35+vmgScore*0.35);
+  return{
+    quality,speedRecovery,headingConvergence,vmgCost,exitBias,exitBiasAmount,
+    speedProfile:speedProfile(pts,startIdx),windAtTack:localWind,
+  };
+}
+
+function classifyTackIntent(group,windTrace){
+  if(!windTrace?.length)return{classification:"tactical",classificationConfidence:"low",windShiftBefore:0};
+  const t=group.manoeuvres[0].time;
+  const now=windAtTime(windTrace,t,windTrace[0].windDir);
+  const before=windAtTime(windTrace,t-30,now);
+  const windShiftBefore=adiff(before,now);
+  const side=group.manoeuvres[0].sideBef;
+  const header=(side==="S"&&windShiftBefore<-3)||(side==="P"&&windShiftBefore>3);
+  const lift=(side==="S"&&windShiftBefore>3)||(side==="P"&&windShiftBefore<-3);
+  if(header){
+    return{classification:"reactive",classificationConfidence:Math.abs(windShiftBefore)>5?"high":"medium",windShiftBefore};
+  }
+  if(!header&&Math.abs(windShiftBefore)<3){
+    const after=windAtTime(windTrace,t+25,now);
+    const deltaAfter=adiff(now,after);
+    if((side==="S"&&deltaAfter<-5)||(side==="P"&&deltaAfter>5)){
+      return{classification:"proactive",classificationConfidence:Math.abs(deltaAfter)>7?"high":"medium",windShiftBefore};
+    }
+  }
+  return{classification:lift?"tactical":"tactical",classificationConfidence:Math.abs(windShiftBefore)>3?"medium":"low",windShiftBefore};
+}
+
+/** Auto wind (meteorological ° FROM), now from stable segment geometry. */
+function estWind(pts){
+  const{stableSegments,manoeuvres}=detectMans(pts);
+  const out=deriveWindAndClassify(manoeuvres,stableSegments,null);
+  return out.windEst;
 }
 
 /** Full rounding order: optional preamble (once) then lap marks × laps (matches WSC Course Selector). */
@@ -863,6 +1126,31 @@ function buildSpeedTimeSeries(en,maxMark){
   return[...base,{time:t,speed:sp,cog}].sort((a,b)=>a.time-b.time);
 }
 
+function buildTimelineDecorations(analysis){
+  const t0=analysis?.points?.[0]?.time??0;
+  const legBands=(analysis?.legs||[]).map((l,idx)=>{
+    const x1=Math.max(0,(analysis.points?.[l.startIdx]?.time??t0)-t0);
+    const x2=Math.max(x1,(analysis.points?.[l.endIdx]?.time??t0)-t0);
+    const fill=l.type==="upwind"?"rgba(74, 158, 255, 0.06)":l.type==="downwind"?"rgba(255, 184, 74, 0.06)":"transparent";
+    const label=l.type==="upwind"?"↑ Up":l.type==="downwind"?"↓ Down":"→ Reach";
+    return{idx,x1,x2,fill,label};
+  });
+  const markerForTack=(m,i)=>{
+    const mt=Number(m.time??t0);
+    const now=windAtTime(analysis?.windTrace||[],mt,analysis?.windDir||0);
+    const before=windAtTime(analysis?.windTrace||[],mt-30,now);
+    const delta=adiff(before,now);
+    const shiftArrow=delta>1?"▲":delta<-1?"▼":"•";
+    const shiftLabel=Math.abs(delta)>=1?`${shiftArrow}${Math.round(Math.abs(delta))}°`:shiftArrow;
+    return{x:mt-t0,color:C.tack,label:`T${i+1}`,kind:"tack",shiftLabel};
+  };
+  const markers=[
+    ...(analysis?.tacks||[]).map((m,i)=>markerForTack(m,i)),
+    ...(analysis?.gybes||[]).map((m,i)=>({x:(m.time??t0)-t0,color:C.gybe,label:`G${i+1}`,kind:"gybe"})),
+  ].filter(m=>Number.isFinite(m.x)).sort((a,b)=>a.x-b.x);
+  return{legBands,markers};
+}
+
 function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
@@ -877,12 +1165,51 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const totalDist=en.reduce((a,p)=>a+(p.dist||0),0);
   const duration=en[en.length-1].time-en[0].time;
 
-  const windEst=estWind(en);
-  const wd=userWind!==null?userWind:windEst.dir;
+  const{stableSegments,manoeuvres}=detectMans(en);
+  const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind);
+  const wd=windDerive.windDir;
+  const windEst=windDerive.windEst;
+  const tackGroups=buildTackGroups(manoeuvres);
+  const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
+  const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
+  const windTrace=windBuild.windTrace;
+  const windStats=windBuild.windStats;
 
-  const mans=detectMans(en,wd);
-  const tacks=mans.filter(m=>m.type==="tack").map(m=>scoreMan(m,en,wd));
-  const gybes=mans.filter(m=>m.type==="gybe").map(m=>scoreMan(m,en,wd));
+  for(const g of tackGroups){
+    const perf=scoreGroup(g,en,baselines,windTrace,wd);
+    const intent=classifyTackIntent(g,windTrace);
+    Object.assign(g,perf,intent);
+  }
+
+  const tacks=tackGroups.flatMap(g=>g.manoeuvres.filter(m=>m.type==="tack").map((m,idx)=>{
+    const groupPerf=g.isSolo?{
+      q:g.quality,rt:g.speedRecovery,minS:Math.min(...g.speedProfile.filter(p=>p.t>=0&&p.t<=10).map(p=>p.speed),m.preRefSpeed||m.preSpeed||0),
+      prof:g.speedProfile,exitBias:g.exitBias,exitBiasAmount:g.exitBiasAmount,
+      vmgCost:g.vmgCost,headingConvergence:g.headingConvergence,classification:g.classification,classificationConfidence:g.classificationConfidence,windShiftBefore:g.windShiftBefore,
+    }:{
+      q:null,rt:null,minS:null,prof:speedProfile(en,m.idx),exitBias:null,exitBiasAmount:null,
+      vmgCost:null,headingConvergence:null,classification:g.classification,classificationConfidence:g.classificationConfidence,windShiftBefore:g.windShiftBefore,
+    };
+    const pt=en[m.idx];
+    return{
+      ...m,
+      preS:m.preRefSpeed??m.preSpeed??0,
+      lat:pt.lat,lon:pt.lon,
+      ...groupPerf,
+    };
+  }));
+  const gybes=manoeuvres.filter(m=>m.type==="gybe").map(m=>{
+    const pt=en[m.idx];
+    return{
+      ...m,
+      q:Math.max(0,Math.round(100-Math.max(0,m.gapDuration-4)*4)),
+      rt:Math.round(Math.min(30,m.gapDuration+4)),
+      preS:m.preRefSpeed??m.preSpeed??0,
+      minS:Math.max(0,(m.preRefSpeed??m.preSpeed??0)-1.2),
+      prof:speedProfile(en,m.idx),
+      lat:pt.lat,lon:pt.lon,
+    };
+  });
 
   // Legs — use mark positions if available, otherwise detect from manoeuvres
   let legs=[];
@@ -912,8 +1239,32 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
 
   const upwindByTack=computeUpwindTackLegStats(en,legs,wd);
+  const soloTackScores=tacks.filter(t=>t.q!=null).map(t=>t.q);
+  const avgTackQuality=soloTackScores.length?soloTackScores.reduce((a,b)=>a+b,0)/soloTackScores.length:null;
+  const avgGybeQuality=gybes.length?gybes.reduce((a,b)=>a+(Number(b.q)||0),0)/gybes.length:null;
+  const reactiveTacks=tackGroups.filter(g=>g.classification==="reactive").length;
+  const proactiveTacks=tackGroups.filter(g=>g.classification==="proactive").length;
+  const tacticalTacks=tackGroups.filter(g=>g.classification==="tactical").length;
 
-  return{points:en,windDir:wd,windEst,stats:{totalDist,duration,maxSpeed,avgSpeed,tackCount:tacks.length,gybeCount:gybes.length},tacks,gybes,legs,streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark};
+  return{
+    points:en,
+    windDir:wd,
+    windEst,
+    windTrace,
+    windStats,
+    stableSegments,
+    baselines,
+    tackGroups,
+    stats:{
+      totalDist,duration,maxSpeed,avgSpeed,
+      tackCount:tacks.length,gybeCount:gybes.length,
+      avgTackQuality,avgGybeQuality,
+      reactiveTacks,proactiveTacks,tacticalTacks,
+      windShiftRange:windStats.range,
+      portStbdSplit:{port:portS,stbd:stbdS},
+    },
+    tacks,gybes,legs,streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark,
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -945,17 +1296,20 @@ function ManCard({m,index}){
   const cxSt=cx==="P→S"?{bg:`${C.port}22`,fg:C.port,br:C.port}:cx==="S→P"?{bg:`${C.stbd}22`,fg:C.stbd,br:C.stbd}:{bg:`${C.txM}18`,fg:C.txM,br:C.txD};
   const angNm=m.type==="tack"?"Tack angle":"Gybe angle";
   const ang=Math.round(Number(m.ch)||0);
-  const vb=m.vmgBef!=null?m.vmgBef.toFixed(1):"—",vd=m.vmgDur!=null?m.vmgDur.toFixed(1):"—",va=m.vmgAft!=null?m.vmgAft.toFixed(1):"—",vr=m.vmgRef!=null?m.vmgRef.toFixed(1):"—";
+  const scoreLabel=Number.isFinite(m.q)?`${m.q}%`:"—";
+  const biasText=m.exitBias&&m.exitBias!=="neutral"&&Number.isFinite(m.exitBiasAmount)?` · exited ${Math.abs(m.exitBiasAmount).toFixed(1)}° ${m.exitBias}`:m.exitBias==="neutral"?" · neutral exit":"";
+  const clsBadge=m.classification==="reactive"?"header":m.classification==="proactive"?"anticipated":m.classification==="tactical"?"tactical":"";
   return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
-    <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}22`,color:qc,fontWeight:800,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}>{m.q}%</div>
+    <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}22`,color:qc,fontWeight:800,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}>{scoreLabel}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:12,fontWeight:600,color:C.txt,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}</span>
         {cx&&<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",padding:"2px 8px",borderRadius:6,background:cxSt.bg,color:cxSt.fg,border:`1px solid ${cxSt.br}55`}}>{cx}</span>}
+        {clsBadge&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:6,background:`${C.acc}18`,border:`1px solid ${C.acc}55`,color:C.acc,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5}}>{clsBadge}</span>}
       </div>
       <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
-      <div style={{fontSize:10,color:C.txM,marginTop:2,lineHeight:1.45}}>|VMG| before {vb} · during {vd} · after {va} · ref {vr} kts</div>
-      <div style={{fontSize:10,color:C.txD,marginTop:2}}>{m.preS.toFixed(1)}→{m.minS.toFixed(1)} kts · {m.rt}s speed recov</div>
+      <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"group-scored"}</div>
+      {m.classification&&<div style={{fontSize:10,color:C.txM,marginTop:2}}>{m.classification} ({m.classificationConfidence||"low"}){biasText}</div>}
     </div>
     <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
   </div>);
@@ -1839,35 +2193,79 @@ function App(){
             <Stat label="Tacks" value={a.stats.tackCount} color={C.tack} icon="↗"/>
             <Stat label="Gybes" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
           </div>
+          <div style={{fontSize:11,color:C.txM,marginBottom:12}}>
+            {a.stats.reactiveTacks||0} reactive · {a.stats.proactiveTacks||0} proactive · {a.stats.tacticalTacks||0} tactical
+            {a.windStats?.range!=null&&<span style={{marginLeft:10}}>· wind range {a.windStats.range.toFixed(1)}° ({a.windStats.trend})</span>}
+          </div>
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed over time</div>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed + wind timeline</div>
             <ResponsiveContainer width="100%" height={180}>
               {(()=>{
-                const tl=a.speedTL||[];
+                const tl=(a.speedTL||[]).map(d=>({...d,wind:windAtTime(a.windTrace||[],(a.points?.[0]?.time||0)+d.time,a.windDir)}));
                 const mx=a.maxSpeedMark;
+                const deco=buildTimelineDecorations(a);
                 const yDataMax=tl.length?Math.max(...tl.map(d=>d.speed),mx?.speed||0):0;
                 const yHi=mx?Math.max(yDataMax*1.08,mx.speed*1.12):yDataMax*1.02||1;
                 return(
                   <AreaChart data={tl} margin={{top:24,right:8,left:0,bottom:0}}>
                     <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
+                    {deco.legBands.map((b,i)=><ReferenceArea key={`lb-sp-${i}`} yAxisId="speed" x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                     <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
-                    <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]}/>
-                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={v=>[`${v} kts`,"Speed"]}/>
-                    <Area type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                    <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]}/>
+                    <YAxis yAxisId="wind" hide domain={["dataMin-20","dataMax+20"]}/>
+                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="speed"?`${Number(v).toFixed(2)} kts`:`${Math.round(v)}°`,n==="speed"?"Speed":"Wind"]}/>
+                    <Area yAxisId="speed" type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                    <Line yAxisId="wind" type="monotone" dataKey="wind" stroke={C.gld} strokeWidth={1.4} dot={false} strokeDasharray="5 4" isAnimationActive={false}/>
+                    {deco.markers.map((m,i)=><ReferenceLine key={`mk-sp-${i}`} yAxisId="speed" x={m.x} stroke={m.color} strokeWidth={1.2} strokeDasharray="3 3" ifOverflow="extendDomain"/>)}
+                    {deco.markers.map((m,i)=><ReferenceDot key={`lbl-sp-${i}`} yAxisId="speed" x={m.x} y={yHi*0.965} r={0} isFront label={{value:m.label,position:"insideTop",fill:m.color,fontSize:9,fontWeight:700}}/>)}
                     {mx&&tl.length>0&&(function(){
                       const yCap=Math.max(...tl.map(d=>d.speed),mx.speed)*1.12;
                       return(<>
-                        <ReferenceLine segment={[{x:mx.time,y:yCap},{x:mx.time,y:mx.speed}]} stroke={PEAK_MARK_ORANGE} strokeWidth={2} strokeDasharray="5 5" ifOverflow="visible"/>
-                        <ReferenceDot x={mx.time} y={mx.speed} r={6.5} fill="#ffb84a" stroke="#fff" strokeWidth={2} isFront/>
-                        <ReferenceDot x={mx.time} y={yCap} r={0} fill="none" stroke="none" isFront shape={PeakLightningRefShape}/>
+                        <ReferenceLine yAxisId="speed" segment={[{x:mx.time,y:yCap},{x:mx.time,y:mx.speed}]} stroke={PEAK_MARK_ORANGE} strokeWidth={2} strokeDasharray="5 5" ifOverflow="visible"/>
+                        <ReferenceDot yAxisId="speed" x={mx.time} y={mx.speed} r={6.5} fill="#ffb84a" stroke="#fff" strokeWidth={2} isFront/>
+                        <ReferenceDot yAxisId="speed" x={mx.time} y={yCap} r={0} fill="none" stroke="none" isFront shape={PeakLightningRefShape}/>
                       </>);
                     })()}
                   </AreaChart>
                 );
               })()}
             </ResponsiveContainer>
+            <ResponsiveContainer width="100%" height={110}>
+              {(()=>{
+                const wt=(a.windTrace||[]).map(w=>({
+                  time:w.time-(a.points?.[0]?.time||0),
+                  windDir:w.windDir,
+                  windKnown:w.interpolated?null:w.windDir,
+                  windEst:w.interpolated?w.windDir:null,
+                  std:w.std||8,
+                  interpolated:w.interpolated,
+                }));
+                const deco=buildTimelineDecorations(a);
+                return(
+                  <LineChart data={wt} margin={{top:2,right:8,left:0,bottom:0}}>
+                    {deco.legBands.map((b,i)=><ReferenceArea key={`lb-wd-${i}`} x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
+                    <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
+                    <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
+                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="std"?`±${Number(v).toFixed(1)}°`:`${Math.round(v)}°`,n==="std"?"Spread":"Wind"]}/>
+                    <ReferenceLine y={a.windDir} stroke={C.txD} strokeDasharray="4 4"/>
+                    <Line type="monotone" dataKey="windKnown" connectNulls stroke={C.gld} strokeWidth={2} dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windEst" connectNulls stroke={C.gld} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
+                    {deco.markers.map((m,i)=><ReferenceLine key={`mk-wd-${i}`} x={m.x} stroke={m.color} strokeWidth={1.2} strokeDasharray="3 3" ifOverflow="extendDomain"/>)}
+                    {deco.markers.filter(m=>m.kind==="tack").map((m,i)=><ReferenceDot key={`arr-wd-${i}`} x={m.x} y={a.windDir} r={0} isFront label={{value:m.shiftLabel,position:"top",fill:C.gld,fontSize:9,fontWeight:700}}/>)}
+                  </LineChart>
+                );
+              })()}
+            </ResponsiveContainer>
+            {(()=>{
+              const deco=buildTimelineDecorations(a);
+              if(!deco.legBands.length)return null;
+              return(<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:8,fontSize:10,color:C.txM}}>
+                {deco.legBands.slice(0,8).map((b,i)=><span key={`ll-${i}`} style={{padding:"2px 7px",borderRadius:6,border:`1px solid ${C.bdr}`,background:b.fill==="transparent"?`${C.txD}11`:b.fill,color:C.txM}}>{b.label}</span>)}
+              </div>);
+            })()}
             {a.maxSpeedMark&&<div style={{marginTop:12,fontSize:12,color:C.txt,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`}}>
               <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Max Speed {a.maxSpeedMark.speed} kts</strong>
               {a.maxSpeedMark.leg?<>
@@ -1936,9 +2334,16 @@ function App(){
         {/* MANOEUVRES */}
         {tab==="manoeuvres"&&<>
           <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
-            <Stat label="Avg Tack" color={C.tack} value={a.tacks.length?Math.round(a.tacks.reduce((s,t)=>s+t.q,0)/a.tacks.length):"—"} unit="% vs ref"/>
+            <Stat label="Avg Tack" color={C.tack} value={a.tacks.filter(t=>Number.isFinite(t.q)).length?Math.round(a.tacks.filter(t=>Number.isFinite(t.q)).reduce((s,t)=>s+t.q,0)/a.tacks.filter(t=>Number.isFinite(t.q)).length):"—"} unit="%"/>
             <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="% vs ref"/>
           </div>
+          {a.tackGroups?.length>0&&<div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack groups</div>
+            {a.tackGroups.map((g,i)=><div key={`tg-${i}`} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 10px",borderRadius:8,background:`${C.bg}99`,border:`1px solid ${C.bdr}`,marginBottom:6,fontSize:11}}>
+              <span>Group {i+1} · {g.manoeuvres.length} manoeuvre{g.manoeuvres.length===1?"":"s"} · {g.classification||"tactical"}</span>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Number.isFinite(g.quality)?`${g.quality}%`:"—"}</span>
+            </div>)}
+          </div>}
           {(()=>{
             const tPS=a.tacks.filter(t=>t.crossing==="P→S"),tSP=a.tacks.filter(t=>t.crossing==="S→P");
             const gPS=a.gybes.filter(g=>g.crossing==="P→S"),gSP=a.gybes.filter(g=>g.crossing==="S→P");
