@@ -1224,6 +1224,17 @@ function buildTimelineDecorations(analysis){
   return{legBands,markers};
 }
 
+function legTypeAtAbsTime(analysis,absTime){
+  if(!analysis?.legs?.length||!analysis?.points?.length)return null;
+  for(const l of analysis.legs){
+    const t1=analysis.points?.[l.startIdx]?.time;
+    const t2=analysis.points?.[l.endIdx]?.time;
+    if(!Number.isFinite(t1)||!Number.isFinite(t2))continue;
+    if(absTime>=t1&&absTime<=t2)return l.type||null;
+  }
+  return null;
+}
+
 function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
@@ -2333,15 +2344,19 @@ function App(){
                 if(yMin===yMax){yMin-=1;yMax+=1;}
                 const wt=wtRaw.map(w=>{
                   const plot=adiff(windMid,w.windDir);
-                  const isHigh=!w.interpolated&&w.confidence==="high";
-                  const dotted=!isHigh;
+                  const absTime=(a.points?.[0]?.time||0)+w.time;
+                  const legType=legTypeAtAbsTime(a,absTime);
+                  const isUpwind=legType==="upwind";
+                  const solid=isUpwind&&!w.interpolated;
+                  const dotted=!solid;
                   return{
                     ...w,
                     windPlot:plot,
-                    windKnownRed:isHigh&&plot<=0?plot:null,
-                    windKnownGreen:isHigh&&plot>0?plot:null,
+                    windKnownRed:solid&&plot<=0?plot:null,
+                    windKnownGreen:solid&&plot>0?plot:null,
                     windEstRed:dotted&&plot<=0?plot:null,
                     windEstGreen:dotted&&plot>0?plot:null,
+                    windDotted:dotted?plot:null,
                   };
                 });
                 const deco=buildTimelineDecorations(a);
@@ -2357,8 +2372,7 @@ function App(){
                     <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
                     <Line type="monotone" dataKey="windKnownRed" stroke={C.port} strokeWidth={2} dot={false} isAnimationActive={false}/>
                     <Line type="monotone" dataKey="windKnownGreen" stroke={C.stbd} strokeWidth={2} dot={false} isAnimationActive={false}/>
-                    <Line type="monotone" dataKey="windEstRed" stroke={C.port} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
-                    <Line type="monotone" dataKey="windEstGreen" stroke={C.stbd} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windDotted" stroke={C.gld} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
                     {deco.markers.map((m,i)=><ReferenceLine key={`mk-wd-${i}`} x={m.x} stroke={m.color} strokeWidth={1.2} strokeDasharray="3 3" ifOverflow="extendDomain"/>)}
                   </LineChart>
                 );
