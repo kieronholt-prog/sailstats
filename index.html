@@ -610,7 +610,8 @@ function detectStableSegments(pts){
     if((!stable[i]||i===stable.length-1)&&start>=0){
       const end=stable[i]?i:i-1;
       const stats=segmentStats(pts,start,end);
-      if(stats.duration>=5)segments.push(stats);
+      const minDur=start<=12?3:5;
+      if(stats.duration>=minDur)segments.push(stats);
       start=-1;
     }
   }
@@ -655,16 +656,12 @@ function crossingSide(preCOG,postCOG,refDir){
   return minUp<=minDn?"upwind":"downwind";
 }
 
-function nearestAxisDistanceDeg(relDeg,axisDeg){
-  return Math.abs(adiff(axisDeg,relDeg));
-}
-
 function classifyCrossingFromPoints(pts,m,windDir){
   if(!pts?.length||!m?.preSegment||!m?.postSegment){
     return{kind:"none",turnIdx:m?.idx??0,crossing:null,sideBef:m?.sideBef??null,sideAft:m?.sideAft??null};
   }
-  const s=Math.max(0,m.preSegment.endIdx-2);
-  const e=Math.min(pts.length-1,m.postSegment.startIdx+2);
+  const s=Math.max(0,m.preSegment.endIdx-5);
+  const e=Math.min(pts.length-1,m.postSegment.startIdx+6);
   let bestUp={d:Infinity,idx:m.idx??s},bestDn={d:Infinity,idx:m.idx??s};
   let prevRel=null,crossIdxUp=null,crossIdxDn=null;
   for(let i=s;i<=e;i++){
@@ -681,8 +678,8 @@ function classifyCrossingFromPoints(pts,m,windDir){
     }
     prevRel=rel;
   }
-  const upOK=bestUp.d<=28||crossIdxUp!=null;
-  const dnOK=bestDn.d<=28||crossIdxDn!=null;
+  const upOK=bestUp.d<=35||crossIdxUp!=null;
+  const dnOK=bestDn.d<=35||crossIdxDn!=null;
   let kind="none",turnIdx=m.idx??s;
   if(upOK&&(!dnOK||bestUp.d<=bestDn.d+4)){
     kind="tack";
@@ -1580,6 +1577,8 @@ function App(){
   const [actDate,setActDate]=useState(null);
   const [cropStartText,setCropStartText]=useState("00:00:00");
   const [cropDurationText,setCropDurationText]=useState("");
+  const [timelineZoom,setTimelineZoom]=useState(1);
+  const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
 
   const applyWorkerSession=useCallback((d)=>{
@@ -2291,20 +2290,38 @@ function App(){
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed + wind timeline</div>
+            {(()=>{
+              const tl=a.speedTL||[];
+              const tMin=tl.length?Math.min(...tl.map(d=>d.time)):0;
+              const tMax=tl.length?Math.max(...tl.map(d=>d.time)):0;
+              const span=Math.max(1,tMax-tMin);
+              const win=Math.max(20,span/Math.max(1,timelineZoom));
+              const maxScroll=Math.max(0,span-win);
+              const start=tMin+maxScroll*timelineScroll;
+              const end=Math.min(tMax,start+win);
+              a._timelineDomain=[start,end];
+              return(<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                <span style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:0.8}}>Zoom</span>
+                {[1,2,4,8].map(z=><button key={`z-${z}`} onClick={()=>{setTimelineZoom(z);if(z===1)setTimelineScroll(0);}} style={{...btn(timelineZoom===z?`${C.acc}25`:"transparent",timelineZoom===z?C.acc:C.txM,C.bdr),padding:"4px 8px",fontSize:10}}>{z}x</button>)}
+                {timelineZoom>1&&<input type="range" min="0" max="1000" value={Math.round(timelineScroll*1000)} onChange={e=>setTimelineScroll(Math.max(0,Math.min(1,Number(e.target.value)/1000)))} style={{flex:1,minWidth:140}}/>}
+              </div>);
+            })()}
             <ResponsiveContainer width="100%" height={180}>
               {(()=>{
                 const tl=(a.speedTL||[]).map(d=>({...d,wind:windAtTime(a.windTrace||[],(a.points?.[0]?.time||0)+d.time,a.windDir)}));
                 const mx=a.maxSpeedMark;
                 const deco=buildTimelineDecorations(a);
                 const yDataMax=tl.length?Math.max(...tl.map(d=>d.speed),mx?.speed||0):0;
-                const yHi=mx?Math.max(yDataMax*1.08,mx.speed*1.12):yDataMax*1.02||1;
+                const yRaw=mx?Math.max(yDataMax*1.08,mx.speed*1.12):yDataMax*1.02||1;
+                const yHi=Math.max(12,Math.ceil((Number.isFinite(yRaw)?yRaw:12)/4)*4);
+                const xDomain=a._timelineDomain||["dataMin","dataMax"];
                 return(
                   <AreaChart data={tl} margin={{top:24,right:8,left:0,bottom:0}}>
                     <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.acc} stopOpacity={0.3}/><stop offset="100%" stopColor={C.acc} stopOpacity={0}/></linearGradient></defs>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-sp-${i}`} yAxisId="speed" x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
-                    <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]}/>
+                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={xDomain}/>
+                    <YAxis yAxisId="speed" tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[0,yHi]} ticks={[0,yHi/4,yHi/2,(3*yHi)/4,yHi]}/>
                     <YAxis yAxisId="wind" hide domain={["dataMin-20","dataMax+20"]}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n)=>[n==="speed"?`${Number(v).toFixed(2)} kts`:`${Math.round(v)}°`,n==="speed"?"Speed":"Wind"]}/>
                     <Area yAxisId="speed" type="monotone" dataKey="speed" stroke={C.acc} fill="url(#sg)" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
@@ -2366,7 +2383,7 @@ function App(){
                     <ReferenceArea y1={yMin} y2={0} fill={`${C.port}22`} ifOverflow="extendDomain"/>
                     <ReferenceArea y1={0} y2={yMax} fill={`${C.stbd}22`} ifOverflow="extendDomain"/>
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
-                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
+                    <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={a._timelineDomain||["dataMin","dataMax"]}/>
                     <YAxis reversed tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n,p)=>{if(n==="std")return[`±${Number(v).toFixed(1)}°`,"Spread"];const raw=p?.payload?.windDir;return[`${Math.round(raw??(windMid+Number(v)))}°`,"Wind"];}}/>
                     <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
@@ -2378,13 +2395,6 @@ function App(){
                 );
               })()}
             </ResponsiveContainer>
-            {(()=>{
-              const deco=buildTimelineDecorations(a);
-              if(!deco.legBands.length)return null;
-              return(<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:8,fontSize:10,color:C.txM}}>
-                {deco.legBands.slice(0,8).map((b,i)=><span key={`ll-${i}`} style={{padding:"2px 7px",borderRadius:6,border:`1px solid ${C.bdr}`,background:b.fill==="transparent"?`${C.txD}11`:b.fill,color:C.txM}}>{b.label}</span>)}
-              </div>);
-            })()}
             {a.maxSpeedMark&&<div style={{marginTop:12,fontSize:12,color:C.txt,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`}}>
               <strong style={{color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>Max Speed {a.maxSpeedMark.speed} kts</strong>
               {a.maxSpeedMark.leg?<>
