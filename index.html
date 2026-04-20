@@ -655,6 +655,50 @@ function crossingSide(preCOG,postCOG,refDir){
   return minUp<=minDn?"upwind":"downwind";
 }
 
+function nearestAxisDistanceDeg(relDeg,axisDeg){
+  return Math.abs(adiff(axisDeg,relDeg));
+}
+
+function classifyCrossingFromPoints(pts,m,windDir){
+  if(!pts?.length||!m?.preSegment||!m?.postSegment){
+    return{kind:"none",turnIdx:m?.idx??0,crossing:null,sideBef:m?.sideBef??null,sideAft:m?.sideAft??null};
+  }
+  const s=Math.max(0,m.preSegment.endIdx-2);
+  const e=Math.min(pts.length-1,m.postSegment.startIdx+2);
+  let bestUp={d:Infinity,idx:m.idx??s},bestDn={d:Infinity,idx:m.idx??s};
+  let prevRel=null,crossIdxUp=null,crossIdxDn=null;
+  for(let i=s;i<=e;i++){
+    const rel=((pts[i].cog-windDir+360)%360);
+    const dUp=Math.min(rel,360-rel);
+    const dDn=Math.abs(rel-180);
+    if(dUp<bestUp.d)bestUp={d:dUp,idx:i};
+    if(dDn<bestDn.d)bestDn={d:dDn,idx:i};
+    if(prevRel!=null){
+      const upCross=Math.sign(adiff(0,prevRel))!==Math.sign(adiff(0,rel));
+      const dnCross=Math.sign(adiff(180,prevRel))!==Math.sign(adiff(180,rel));
+      if(crossIdxUp==null&&upCross)crossIdxUp=i;
+      if(crossIdxDn==null&&dnCross)crossIdxDn=i;
+    }
+    prevRel=rel;
+  }
+  const upOK=bestUp.d<=28||crossIdxUp!=null;
+  const dnOK=bestDn.d<=28||crossIdxDn!=null;
+  let kind="none",turnIdx=m.idx??s;
+  if(upOK&&(!dnOK||bestUp.d<=bestDn.d+4)){
+    kind="tack";
+    turnIdx=crossIdxUp??bestUp.idx;
+  }else if(dnOK){
+    kind="gybe";
+    turnIdx=crossIdxDn??bestDn.idx;
+  }
+  const preRel=((m.preRefCOG??m.preCOG)-windDir+360)%360;
+  const postRel=((m.postCOG)-windDir+360)%360;
+  const sideBef=preRel>180?"S":"P";
+  const sideAft=postRel>180?"S":"P";
+  const crossing=sideBef==="P"&&sideAft==="S"?"P→S":sideBef==="S"&&sideAft==="P"?"S→P":"—";
+  return{kind,turnIdx,crossing,sideBef,sideAft};
+}
+
 function detectMans(pts){
   const stableSegments=detectStableSegments(pts);
   const manoeuvres=[];
@@ -733,7 +777,7 @@ function classifySides(manoeuvres,seedWind){
   };
 }
 
-function deriveWindAndClassify(manoeuvres,stableSegments,userWind){
+function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null){
   const seed=userWind!=null?{dir:Number(userWind)%360,conf:1}:initialWindFromStableSegments(stableSegments);
   const allAngles=manoeuvres.map(m=>m.cogChange).sort((a,b)=>a-b);
   const med=allAngles.length?allAngles[Math.floor(allAngles.length/2)]:90;
@@ -748,14 +792,18 @@ function deriveWindAndClassify(manoeuvres,stableSegments,userWind){
   const windDir=(userWind!=null?Number(userWind)%360:(crossCounts[0]>=crossCounts[1]?cand1:cand2));
   const tackAngle=Math.abs(adiff(meanStarboardCOG,meanPortCOG));
   for(const m of manoeuvres){
-    const side=crossingSide(m.preCOG,m.postCOG,windDir);
-    m.type=side==="upwind"?"tack":"gybe";
+    const crossing=classifyCrossingFromPoints(pts,m,windDir);
+    m.type=crossing.kind;
     m.windAtMan=windDir;
-    const preSide=((m.preRefCOG??m.preCOG)-windDir+360)%360;
-    const postSide=((m.postCOG)-windDir+360)%360;
-    m.crossing=preSide<=180&&postSide>180?"P→S":preSide>180&&postSide<=180?"S→P":"—";
-    m.sideAft=m.crossing==="P→S"?"S":m.crossing==="S→P"?"P":null;
-    if(!m.sideBef)m.sideBef=preSide>180?"S":"P";
+    m.crossing=crossing.crossing;
+    m.sideBef=crossing.sideBef;
+    m.sideAft=crossing.sideAft;
+    m.turnIdx=crossing.turnIdx;
+    if(pts?.[crossing.turnIdx]){
+      m.time=pts[crossing.turnIdx].time;
+      m.lat=pts[crossing.turnIdx].lat;
+      m.lon=pts[crossing.turnIdx].lon;
+    }
   }
   const conf=Math.min(0.98,Math.max(0.25,pool.length/Math.max(3,manoeuvres.length)));
   return{
@@ -956,7 +1004,7 @@ function classifyTackIntent(group,windTrace){
 /** Auto wind (meteorological ° FROM), now from stable segment geometry. */
 function estWind(pts){
   const{stableSegments,manoeuvres}=detectMans(pts);
-  const out=deriveWindAndClassify(manoeuvres,stableSegments,null);
+  const out=deriveWindAndClassify(manoeuvres,stableSegments,null,pts);
   return out.windEst;
 }
 
@@ -1191,10 +1239,11 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const duration=en[en.length-1].time-en[0].time;
 
   const{stableSegments,manoeuvres}=detectMans(en);
-  const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind);
+  const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind,en);
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
-  const tackGroups=buildTackGroups(manoeuvres);
+  const manoeuvreEvents=manoeuvres.filter(m=>m.type==="tack"||m.type==="gybe");
+  const tackGroups=buildTackGroups(manoeuvreEvents);
   const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
   const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
   const windTrace=windBuild.windTrace;
@@ -1215,7 +1264,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
       q:null,rt:null,minS:null,prof:speedProfile(en,m.idx),exitBias:null,exitBiasAmount:null,
       vmgCost:null,headingConvergence:null,classification:g.classification,classificationConfidence:g.classificationConfidence,windShiftBefore:g.windShiftBefore,
     };
-    const pt=en[m.idx];
+    const pt=en[m.turnIdx??m.idx];
     return{
       ...m,
       preS:m.preRefSpeed??m.preSpeed??0,
@@ -1223,8 +1272,8 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
       ...groupPerf,
     };
   }));
-  const gybes=manoeuvres.filter(m=>m.type==="gybe").map(m=>{
-    const pt=en[m.idx];
+  const gybes=manoeuvreEvents.filter(m=>m.type==="gybe").map(m=>{
+    const pt=en[m.turnIdx??m.idx];
     return{
       ...m,
       q:Math.max(0,Math.round(100-Math.max(0,m.gapDuration-4)*4)),
@@ -1436,18 +1485,24 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres}){
     manMarkersRef.current=[];
     if(!manoeuvres)return;
     const add=(m,title,color)=>{
-      const lat=m.lat!=null?m.lat:trackPoints?.[m.idx]?.lat;
-      const lon=m.lon!=null?m.lon:trackPoints?.[m.idx]?.lon;
+      const pointIdx=m.turnIdx??m.idx;
+      const lat=m.lat!=null?m.lat:trackPoints?.[pointIdx]?.lat;
+      const lon=m.lon!=null?m.lon:trackPoints?.[pointIdx]?.lon;
       if(lat==null||lon==null)return;
       const el=document.createElement("div");
       el.style.cssText=`display:flex;flex-direction:column;align-items:center;padding:4px 8px 5px;border-radius:8px;font-size:11px;font-weight:800;font-family:'JetBrains Mono',monospace;border:2px solid ${color};background:#0a101fcc;color:${color};box-shadow:0 2px 8px rgba(0,0,0,.45);pointer-events:none;line-height:1.15;`;
       const t1=document.createElement("div");t1.textContent=title;t1.style.whiteSpace="nowrap";
       el.appendChild(t1);
-      if(m.crossing){const t2=document.createElement("div");t2.textContent=m.crossing;t2.style.fontSize=9;t2.style.fontWeight=700;t2.style.opacity="0.95";t2.style.marginTop="2px";el.appendChild(t2);}
       manMarkersRef.current.push(new mapboxgl.Marker({element:el,anchor:"bottom"}).setLngLat([lon,lat]).addTo(map));
     };
-    manoeuvres.tacks.forEach((m,i)=>add(m,`Tack ${i+1}`,C.tack));
-    manoeuvres.gybes.forEach((m,i)=>add(m,`Gybe ${i+1}`,C.gybe));
+    manoeuvres.tacks.forEach((m,i)=>{
+      const col=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.tack;
+      add(m,`T${i+1}`,col);
+    });
+    manoeuvres.gybes.forEach((m,i)=>{
+      const col=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.gybe;
+      add(m,`G${i+1}`,col);
+    });
   },[manoeuvres,trackPoints,mapLoaded]);
 
   useEffect(()=>{
@@ -2263,6 +2318,7 @@ function App(){
                   time:w.time-(a.points?.[0]?.time||0),
                   windDir:w.windDir,
                   std:w.std||8,
+                  confidence:w.confidence||"low",
                   interpolated:w.interpolated,
                 }));
                 const windMid=circularMode(wtRaw.map(w=>w.windDir).filter(Number.isFinite),5)??a.windDir;
@@ -2277,26 +2333,33 @@ function App(){
                 if(yMin===yMax){yMin-=1;yMax+=1;}
                 const wt=wtRaw.map(w=>{
                   const plot=adiff(windMid,w.windDir);
+                  const isHigh=!w.interpolated&&w.confidence==="high";
+                  const dotted=!isHigh;
                   return{
                     ...w,
                     windPlot:plot,
-                    windKnown:w.interpolated?null:plot,
-                    windEst:w.interpolated?plot:null,
+                    windKnownRed:isHigh&&plot<=0?plot:null,
+                    windKnownGreen:isHigh&&plot>0?plot:null,
+                    windEstRed:dotted&&plot<=0?plot:null,
+                    windEstGreen:dotted&&plot>0?plot:null,
                   };
                 });
                 const deco=buildTimelineDecorations(a);
                 return(
                   <LineChart data={wt} margin={{top:2,right:8,left:0,bottom:0}}>
                     {deco.legBands.map((b,i)=><ReferenceArea key={`lb-wd-${i}`} x1={b.x1} x2={b.x2} fill={b.fill} ifOverflow="extendDomain"/>)}
+                    <ReferenceArea y1={yMin} y2={0} fill={`${C.port}22`} ifOverflow="extendDomain"/>
+                    <ReferenceArea y1={0} y2={yMax} fill={`${C.stbd}22`} ifOverflow="extendDomain"/>
                     <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                     <XAxis dataKey="time" type="number" tick={{fill:C.txD,fontSize:9}} tickFormatter={v=>fT(v)} stroke={C.bdr} domain={["dataMin","dataMax"]}/>
-                    <YAxis tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
+                    <YAxis reversed tick={{fill:C.txD,fontSize:9}} stroke={C.bdr} domain={[yMin,yMax]} tickFormatter={v=>`${v>0?"+":""}${Math.round(v)}°`}/>
                     <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} labelFormatter={v=>fT(v)} formatter={(v,n,p)=>{if(n==="std")return[`±${Number(v).toFixed(1)}°`,"Spread"];const raw=p?.payload?.windDir;return[`${Math.round(raw??(windMid+Number(v)))}°`,"Wind"];}}/>
                     <ReferenceLine y={0} stroke={C.txD} strokeDasharray="4 4" label={{value:`Mode ${Math.round(windMid)}°`,position:"right",fill:C.txD,fontSize:9}}/>
-                    <Line type="monotone" dataKey="windKnown" connectNulls stroke={C.gld} strokeWidth={2} dot={false} isAnimationActive={false}/>
-                    <Line type="monotone" dataKey="windEst" connectNulls stroke={C.gld} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windKnownRed" stroke={C.port} strokeWidth={2} dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windKnownGreen" stroke={C.stbd} strokeWidth={2} dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windEstRed" stroke={C.port} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="windEstGreen" stroke={C.stbd} strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false}/>
                     {deco.markers.map((m,i)=><ReferenceLine key={`mk-wd-${i}`} x={m.x} stroke={m.color} strokeWidth={1.2} strokeDasharray="3 3" ifOverflow="extendDomain"/>)}
-                    {deco.markers.filter(m=>m.kind==="tack").map((m,i)=><ReferenceDot key={`arr-wd-${i}`} x={m.x} y={0} r={0} isFront label={{value:m.shiftLabel,position:"top",fill:C.gld,fontSize:9,fontWeight:700}}/>)}
                   </LineChart>
                 );
               })()}
