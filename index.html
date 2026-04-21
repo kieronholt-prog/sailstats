@@ -560,6 +560,32 @@ async function loadAnalysisRow(stravaId, activityId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+/** Update display name only (row must already exist in `analyses`). */
+async function renameActivityName(stravaId, activityId, newName) {
+  const sid = Number(stravaId);
+  const aid = String(activityId);
+  const filter = `strava_id=eq.${sid}&activity_id=eq.${encodeURIComponent(aid)}`;
+  const t = newName == null ? "" : String(newName).trim();
+  return supabase.patch("analyses", filter, {
+    activity_name: t === "" ? null : t,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+function meanNumeric(arr){
+  const v=(arr||[]).filter(x=>Number.isFinite(x));
+  return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
+}
+
+function formatCompareRowSubtitle(row,stravaAct){
+  if(stravaAct?.start_date_local)return new Date(stravaAct.start_date_local).toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
+  if(row?.activity_date){
+    const d=new Date(row.activity_date);
+    if(Number.isFinite(d.getTime()))return d.toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
+  }
+  return "—";
+}
+
 function unknownCourseSetupColumn(err) {
   const s = JSON.stringify(err || {}).toLowerCase();
   return s.includes("course_setup") && (s.includes("column") || s.includes("schema") || s.includes("could not find"));
@@ -2152,6 +2178,15 @@ function App(){
   const [sAth,setSAth]=useState(null);
   const [acts,setActs]=useState([]);
   const [loadingActs,setLoadingActs]=useState(false);
+  /** activity_id string → full Supabase analyses row (for labels + rename). */
+  const [savedByActId,setSavedByActId]=useState({});
+  const [compareMode,setCompareMode]=useState(false);
+  const [comparePick,setComparePick]=useState([]);
+  const [compareIds,setCompareIds]=useState(null);
+  const [compareRows,setCompareRows]=useState([null,null]);
+  const [renameActId,setRenameActId]=useState(null);
+  const [renameDraft,setRenameDraft]=useState("");
+  const [renameBusy,setRenameBusy]=useState(false);
   const [rawPoints,setRawPoints]=useState(null);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
@@ -2279,13 +2314,101 @@ function App(){
     setLoadingActs(false);
   },[session]);
 
+  const refreshSavedAnalyses=useCallback(async()=>{
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    if(sid==null)return;
+    try{
+      const sess=await apiGetSession();
+      if(sess?.ok&&sess.supabase_access_token)supabaseUserJwt=sess.supabase_access_token;
+    }catch(_){}
+    try{
+      const rows=await loadAnalyses(sid);
+      const m={};
+      if(Array.isArray(rows)){
+        for(const r of rows){
+          if(r&&r.activity_id!=null)m[String(r.activity_id)]=r;
+        }
+      }
+      setSavedByActId(m);
+    }catch(e){console.warn("loadAnalyses:",e)}
+  },[session,sAth]);
+
   useEffect(()=>{
     if(session?.strava?.linked&&view==="activities"&&acts.length===0)loadActs();
   },[session,view,loadActs,acts.length]);
 
+  useEffect(()=>{
+    if(view==="activities"&&session?.strava?.linked)refreshSavedAnalyses();
+  },[view,session?.strava?.linked,refreshSavedAnalyses]);
+
+  useEffect(()=>{
+    if(!compareMode)setComparePick([]);
+  },[compareMode]);
+
+  useEffect(()=>{
+    if(view!=="compare"||!compareIds||compareIds.length!==2){
+      setCompareRows([null,null]);
+      return;
+    }
+    let cancelled=false;
+    (async()=>{
+      try{
+        const sess=await apiGetSession();
+        if(sess?.ok&&sess.supabase_access_token)supabaseUserJwt=sess.supabase_access_token;
+      }catch(_){}
+      const sid=session?.strava?.athlete?.id ?? sAth?.id;
+      if(sid==null){if(!cancelled)setCompareRows([null,null]);return;}
+      const [a,b]=compareIds;
+      const [r0,r1]=await Promise.all([loadAnalysisRow(sid,a),loadAnalysisRow(sid,b)]);
+      if(!cancelled)setCompareRows([r0,r1]);
+    })();
+    return()=>{cancelled=true};
+  },[view,compareIds,session,sAth]);
+
+  const toggleComparePick=useCallback((id)=>{
+    const s=String(id);
+    setComparePick(p=>{
+      if(p.includes(s))return p.filter(x=>x!==s);
+      if(p.length<2)return[...p,s];
+      return[p[0],s];
+    });
+  },[]);
+
+  const openCompareSelected=useCallback(()=>{
+    if(comparePick.length!==2)return;
+    setCompareIds([comparePick[0],comparePick[1]]);
+    setView("compare");
+    setCompareMode(false);
+    setComparePick([]);
+  },[comparePick]);
+
+  const submitRename=useCallback(async(act)=>{
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    if(sid==null)return;
+    setRenameBusy(true);
+    try{
+      const sess=await apiGetSession();
+      if(sess?.ok&&sess.supabase_access_token)supabaseUserJwt=sess.supabase_access_token;
+      const res=await renameActivityName(sid,act.id,renameDraft);
+      if(res.ok){
+        const trimmed=renameDraft.trim();
+        setSavedByActId(prev=>{
+          const k=String(act.id);
+          const base=prev[k]||{activity_id:k,strava_id:Number(sid)};
+          return{...prev,[k]:{...base,activity_name:trimmed||null}};
+        });
+        setRenameActId(null);
+      }else alert("Could not rename. Save an analysis for this activity first (run analysis from course setup).");
+    }catch(e){console.error(e);alert("Rename failed.");}
+    setRenameBusy(false);
+  },[session,sAth,renameDraft]);
+
   const analyseStrava=useCallback(async(act)=>{
     if(!session?.strava?.linked)return;
-    setProcessing(true);setSetupSaveMsg(null);setActName(act.name);setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    setProcessing(true);setSetupSaveMsg(null);
+    const preSaved=savedByActId[String(act.id)];
+    setActName((preSaved?.activity_name&&String(preSaved.activity_name).trim())||act.name);
+    setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
     try{
       const streams=await fetchStreams(act.id);
       if(streams.latlng&&streams.time){
@@ -2300,6 +2423,7 @@ function App(){
         if(sid!=null){
           const row=await loadAnalysisRow(sid,String(act.id));
           if(row){
+            if(row.activity_name&&String(row.activity_name).trim())setActName(String(row.activity_name).trim());
             if(row.course_letter)setCourseLetter(String(row.course_letter));
             if(row.laps!=null)setLaps(Math.max(1,parseInt(row.laps,10)||1));
             if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
@@ -2312,7 +2436,7 @@ function App(){
       }
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
-  },[session,sAth]);
+  },[session,sAth,savedByActId]);
 
   // Handle file upload
   const handleFile=useCallback(async(file)=>{
@@ -2506,6 +2630,7 @@ function App(){
           sfLineEndBText,
         });
       } catch (e) { console.warn("Save failed:", e); }
+      refreshSavedAnalyses();
     }
     setProcessing(false);
   },[
@@ -2530,6 +2655,7 @@ function App(){
     sfLineEndBText,
     detSettings,
     sfLineEnds,
+    refreshSavedAnalyses,
   ]);
 
   const saveCourseSetupOnly = useCallback(async () => {
@@ -2728,32 +2854,137 @@ function App(){
 
   /* ─── ACTIVITIES ─── */
   if(view==="activities"){
-    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+    return(<div style={{background:C.bg,minHeight:"100vh",paddingBottom:compareMode?72:0}}>
       <div style={hdr}>
         <button onClick={signOutAll} style={{background:"none",border:"none",color:C.txM,fontSize:12}}>Sign Out</button>
         <div style={{fontSize:15,fontWeight:700,color:C.acc}}>SailStats</div>
         <div style={{fontSize:11,color:C.txM}}>{sAth?.firstname||session?.user?.email||""}</div>
       </div>
       <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
           <div style={{fontSize:18,fontWeight:700}}>Your Activities</div>
-          <button onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:11}}>+ Upload File</button>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <button type="button" onClick={()=>setCompareMode(c=>!c)} style={{...btn(compareMode?`${C.acc}25`:"transparent",compareMode?C.acc:C.txM,C.bdr),padding:"7px 12px",fontSize:11}}>{compareMode?"Cancel compare":"Compare"}</button>
+            <button type="button" onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:11}}>+ Upload File</button>
+          </div>
           <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
+        {compareMode&&<div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
         {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center"}}>Loading...</div>}
         {processing&&<div style={{color:C.acc,padding:30,textAlign:"center"}}>Processing...</div>}
-        {acts.map(act=>(
-          <button key={act.id} onClick={()=>analyseStrava(act)} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:C.card,borderRadius:10,padding:"12px 16px",marginBottom:5,border:`1px solid ${C.bdr}`,textAlign:"left",transition:"border-color 0.15s"}} onMouseOver={e=>e.currentTarget.style.borderColor=C.acc} onMouseOut={e=>e.currentTarget.style.borderColor=C.bdr}>
-            <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`}}>
-              {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
+        {acts.map(act=>{
+          const sidStr=String(act.id);
+          const saved=savedByActId[sidStr];
+          const displayName=(saved?.activity_name&&String(saved.activity_name).trim())||act.name;
+          const hasSaved=!!saved;
+          const picked=comparePick.includes(sidStr);
+          return(
+            <div key={act.id} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
+              {compareMode&&<label style={{display:"flex",alignItems:"center",paddingLeft:4,cursor:"pointer"}}>
+                <input type="checkbox" checked={picked} onChange={()=>toggleComparePick(act.id)} style={{width:16,height:16,accentColor:C.acc}}/>
+              </label>}
+              <div style={{flex:1,minWidth:0,background:C.card,borderRadius:10,border:`1px solid ${picked?C.acc:C.bdr}`,overflow:"hidden",transition:"border-color 0.15s"}}>
+                {renameActId===act.id?(
+                  <div style={{padding:"10px 12px",display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
+                    <input value={renameDraft} onChange={e=>setRenameDraft(e.target.value)} placeholder="Display name" autoFocus style={{flex:1,minWidth:140,padding:"8px 10px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:13}}/>
+                    <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:11}}>{renameBusy?"…":"Save"}</button>
+                    <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:11}}>Cancel</button>
+                  </div>
+                ):(
+                  <button type="button" onClick={()=>compareMode?toggleComparePick(act.id):analyseStrava(act)} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
+                    <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
+                      {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
+                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act)} · {fT(act.elapsed_time)}{act.distance?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}</div>
+                    </div>
+                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>›</div>
+                  </button>
+                )}
+              </div>
+              {!compareMode&&hasSaved&&renameActId!==act.id&&(
+                <button type="button" title="Rename in list" onClick={e=>{e.stopPropagation();setRenameActId(act.id);setRenameDraft(displayName);}} style={{...btn("transparent",C.txM,C.bdr),padding:"0 12px",fontSize:14,borderRadius:10,alignSelf:"stretch"}}>✎</button>
+              )}
             </div>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{act.name}</div>
-              <div style={{fontSize:10,color:C.txM,marginTop:2}}>{new Date(act.start_date_local).toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"})} · {fT(act.elapsed_time)}{act.distance?` · ${m2nm(act.distance).toFixed(1)}nm`:""}</div>
-            </div>
-            <div style={{color:C.txD,fontSize:16}}>›</div>
-          </button>
-        ))}
+          );
+        })}
+      </div>
+      {compareMode&&comparePick.length===2&&(
+        <div style={{position:"fixed",left:0,right:0,bottom:0,padding:"12px 16px",background:`${C.card}f2`,borderTop:`1px solid ${C.bdr}`,backdropFilter:"blur(8px)",zIndex:200,display:"flex",justifyContent:"center",gap:12}}>
+          <button type="button" onClick={openCompareSelected} style={{...btn(C.acc,"#0a1628"),padding:"12px 24px",fontSize:13,fontWeight:700}}>Compare selected</button>
+          <button type="button" onClick={()=>setComparePick([])} style={{...btn("transparent",C.txM,C.bdr),padding:"12px 16px",fontSize:12}}>Clear</button>
+        </div>
+      )}
+    </div>);
+  }
+
+  /* ─── COMPARE (saved analyses) ─── */
+  if(view==="compare"){
+    const [r0,r1]=compareRows;
+    const id0=compareIds?.[0],id1=compareIds?.[1];
+    const strava0=acts.find(a=>String(a.id)===id0);
+    const strava1=acts.find(a=>String(a.id)===id1);
+    const title0=(r0?.activity_name&&String(r0.activity_name).trim())||strava0?.name||`#${id0}`;
+    const title1=(r1?.activity_name&&String(r1.activity_name).trim())||strava1?.name||`#${id1}`;
+    const s0=r0?.stats,s1=r1?.stats;
+    const leg0=r0?.leg_summary,leg1=r1?.leg_summary;
+    const mv0=meanNumeric((leg0||[]).map(l=>l.avgVMG));
+    const mv1=meanNumeric((leg1||[]).map(l=>l.avgVMG));
+    const tack0=r0?.tack_scores,tack1=r1?.tack_scores;
+    const gyb0=r0?.gybe_scores,gyb1=r1?.gybe_scores;
+    const avgTk=(arr)=>{const q=(arr||[]).filter(t=>!t.excluded&&Number.isFinite(t.q));return q.length?Math.round(q.reduce((a,t)=>a+t.q,0)/q.length):null;};
+    const avgGy=(arr)=>{const q=(arr||[]).filter(g=>!g.excluded&&Number.isFinite(g.q));return q.length?Math.round(q.reduce((a,g)=>a+g.q,0)/q.length):null;};
+    const atk0=avgTk(tack0),atk1=avgTk(tack1),agy0=avgGy(gyb0),agy1=avgGy(gyb1);
+    const dispAtk0=atk0??(s0?.avgTackQuality!=null?Math.round(s0.avgTackQuality):null);
+    const dispAtk1=atk1??(s1?.avgTackQuality!=null?Math.round(s1.avgTackQuality):null);
+    const dispGy0=agy0??(s0?.avgGybeQuality!=null?Math.round(s0.avgGybeQuality):null);
+    const dispGy1=agy1??(s1?.avgGybeQuality!=null?Math.round(s1.avgGybeQuality):null);
+    const fmt=(v,fn)=>v==null||!Number.isFinite(v)?"—":fn(v);
+    const cRow=(k,a,b)=>(
+      <tr key={k} style={{borderBottom:`1px solid ${C.bdr}`}}>
+        <td style={{padding:"10px 10px",color:C.txM,fontSize:12}}>{k}</td>
+        <td style={{padding:"10px 8px",color:C.txt,fontSize:12,fontFamily:"'JetBrains Mono',monospace",verticalAlign:"top"}}>{a}</td>
+        <td style={{padding:"10px 8px",color:C.txt,fontSize:12,fontFamily:"'JetBrains Mono',monospace",verticalAlign:"top"}}>{b}</td>
+      </tr>
+    );
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button type="button" onClick={()=>{setView("activities");setCompareIds(null);}} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Activities</button>
+        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>Compare</div>
+        <div style={{width:72}}/>
+      </div>
+      <div style={{maxWidth:720,margin:"0 auto",padding:"20px 14px 40px"}}>
+        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Side-by-side fields come from the last analysis saved to Supabase (course setup, wind, and computed stats). Open an activity and run analysis to refresh its row.</div>
+        <div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
+            <thead>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <th style={{textAlign:"left",padding:"12px 10px",fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1}}>Metric</th>
+                <th style={{textAlign:"left",padding:"12px 8px",fontSize:11,color:C.acc,maxWidth:180}}>{title0}</th>
+                <th style={{textAlign:"left",padding:"12px 8px",fontSize:11,color:C.gld,maxWidth:180}}>{title1}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cRow("Date",formatCompareRowSubtitle(r0,strava0),formatCompareRowSubtitle(r1,strava1))}
+              {cRow("Course",r0?.course_letter||"—",r1?.course_letter||"—")}
+              {cRow("Laps",r0?.laps!=null?String(r0.laps):"—",r1?.laps!=null?String(r1.laps):"—")}
+              {cRow("Wind °",r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?`${Math.round(Number(r0.wind_direction))}`:"—",r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?`${Math.round(Number(r1.wind_direction))}`:"—")}
+              {cRow("Distance (nm)",s0?m2nm(s0.totalDist).toFixed(2):"—",s1?m2nm(s1.totalDist).toFixed(2):"—")}
+              {cRow("Duration",s0?fT(s0.duration):"—",s1?fT(s1.duration):"—")}
+              {cRow("Max speed (kts)",fmt(s0?.maxSpeed,v=>v.toFixed(1)),fmt(s1?.maxSpeed,v=>v.toFixed(1)))}
+              {cRow("Avg speed (kts)",fmt(s0?.avgSpeed,v=>v.toFixed(1)),fmt(s1?.avgSpeed,v=>v.toFixed(1)))}
+              {cRow("Tacks (racing)",s0!=null?`${s0.tackCount}`:"—",s1!=null?`${s1.tackCount}`:"—")}
+              {cRow("Gybes (racing)",s0!=null?`${s0.gybeCount}`:"—",s1!=null?`${s1.gybeCount}`:"—")}
+              {cRow("Avg tack %",dispAtk0!=null?`${dispAtk0}`:"—",dispAtk1!=null?`${dispAtk1}`:"—")}
+              {cRow("Avg gybe %",dispGy0!=null?`${dispGy0}`:"—",dispGy1!=null?`${dispGy1}`:"—")}
+              {cRow("Legs (n)",leg0?.length!=null?`${leg0.length}`:"—",leg1?.length!=null?`${leg1.length}`:"—")}
+              {cRow("Mean leg VMG",mv0!=null?mv0.toFixed(2):"—",mv1!=null?mv1.toFixed(2):"—")}
+              {cRow("Wind shift (°)",fmt(s0?.windShiftRange,v=>v.toFixed(1)),fmt(s1?.windShiftRange,v=>v.toFixed(1)))}
+            </tbody>
+          </table>
+        </div>
+        {(!r0||!r1)&&<div style={{marginTop:14,fontSize:12,color:C.wrn}}>One or both activities have no saved analysis yet. Open each, set course, and run analysis.</div>}
       </div>
     </div>);
   }
