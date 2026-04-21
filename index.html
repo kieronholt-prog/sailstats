@@ -154,7 +154,7 @@ const C={
   port:"#ff4a6a",stbd:"#4aff8a",
   up:"#4a9eff",dn:"#ffb84a",
   tack:"#ff6b4a",gybe:"#4adfff",
-  trk:"#00d4aa",course:"#ffb84a",
+  trk:"#00d4aa",trkRound:"#ff9500",course:"#ffb84a",
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -539,8 +539,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     mark_overrides: courseSetup.markOverrides || {},
     course_setup,
     stats: results.stats,
-    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing, mark: t.markRounding?.mark ?? null, markSplit: t.markRounding?.splitRole ?? null })),
-    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null })),
+    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing, mark: t.markRounding?.mark ?? null, markSplit: t.markRounding?.splitRole ?? null, excluded: !!t.excludeFromStatsAndVMG, nearestMark: t.nearestMarkName ?? null })),
+    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null, excluded: !!g.excludeFromStatsAndVMG, nearestMark: g.nearestMarkName ?? null })),
     leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
     updated_at: new Date().toISOString(),
   }, "strava_id,activity_id");
@@ -1223,6 +1223,82 @@ const LEG_ROUNDING_HIT_M=80;
 const MARK_ROUND_ZONE_M=10;
 /** Seconds — total time window centered on closest approach (± half each side). */
 const MARK_ROUND_MAX_SPAN_SEC=5;
+/** If further than this from mark and COG ≈ port/stbd baseline → normal track (not orange rounding). */
+const MARK_ROUND_NORMAL_MIN_DIST_M=3;
+const MARK_ROUND_SAILING_COG_TOL_DEG=10;
+/** Tack/gybe turn within this distance (m) of any course mark → mark manoeuvre (excluded from stats & leg VMG mode). */
+const MARK_MANOEUVRE_AT_MARK_M=5;
+
+function allCourseMarkLocations(markPositions,preamble,laps){
+  const seq=expandCourseMarks(preamble,markPositions||[],Math.max(1,Number(laps)||1));
+  const by=new Map();
+  for(const x of seq){
+    if(x?.name&&x.lat!=null&&x.lon!=null)by.set(x.name,{name:x.name,lat:x.lat,lon:x.lon});
+  }
+  return[...by.values()];
+}
+function nearestCourseMarkM(lat,lon,locList){
+  if(lat==null||lon==null||!locList?.length)return{dist:Infinity,name:null};
+  let best=Infinity,bestN=null;
+  for(const x of locList){
+    const d=hav(lat,lon,x.lat,x.lon);
+    if(d<best){best=d;bestN=x.name;}
+  }
+  return{dist:best,name:bestN};
+}
+function isNearBaselineCOG(cog,portCOG,stbdCOG,tolDeg){
+  if(!Number.isFinite(cog)||!Number.isFinite(portCOG)||!Number.isFinite(stbdCOG)||!Number.isFinite(tolDeg))return false;
+  return Math.abs(adiff(cog,portCOG))<=tolDeg||Math.abs(adiff(cog,stbdCOG))<=tolDeg;
+}
+
+/** Multi-part LineString for map: kind "rounding" (orange) vs "normal" (teal). */
+function buildTrackSegmentFeatureCollection(pts,mask){
+  if(!pts||pts.length<2)return{type:"FeatureCollection",features:[]};
+  const n=pts.length;
+  const m=mask&&mask.length===n?mask:new Array(n).fill(false);
+  const feats=[];
+  let segStart=0;
+  let kind=m[0]?"rounding":"normal";
+  const pushSeg=(a,b,k)=>{
+    if(b<a)return;
+    const coords=[];
+    for(let j=a;j<=b;j++)coords.push([pts[j].lon,pts[j].lat]);
+    if(coords.length>=2)feats.push({type:"Feature",properties:{kind:k},geometry:{type:"LineString",coordinates:coords}});
+  };
+  for(let i=1;i<n;i++){
+    const rk=m[i]?"rounding":"normal";
+    if(rk!==kind){
+      pushSeg(segStart,i-1,kind);
+      segStart=i;
+      kind=rk;
+    }
+  }
+  pushSeg(segStart,n-1,kind);
+  if(!feats.length){
+    return{type:"FeatureCollection",features:[{type:"Feature",properties:{kind:"normal"},geometry:{type:"LineString",coordinates:pts.map(p=>[p.lon,p.lat])}}]};
+  }
+  return{type:"FeatureCollection",features:feats};
+}
+
+function computeRoundingPointMask(pts,details,baselines){
+  const n=pts?.length||0;
+  const mask=new Array(n).fill(false);
+  if(!n||!details?.length)return mask;
+  const pCOG=baselines?.portCOG,sCOG=baselines?.stbdCOG;
+  const tol=MARK_ROUND_SAILING_COG_TOL_DEG,exclM=MARK_ROUND_NORMAL_MIN_DIST_M;
+  for(const d of details){
+    if(d.skipped||d.zoneStartIdx==null||d.markLat==null||d.markLon==null)continue;
+    const mlat=d.markLat,mlon=d.markLon;
+    const z0=d.zoneStartIdx,z1=d.zoneEndIdx;
+    for(let i=z0;i<=z1&&i<n;i++){
+      const pt=pts[i];
+      const dist=hav(pt.lat,pt.lon,mlat,mlon);
+      if(dist>exclM&&isNearBaselineCOG(pt.cog,pCOG,sCOG,tol))continue;
+      mask[i]=true;
+    }
+  }
+  return mask;
+}
 
 function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null){
   const legs=[];
@@ -1359,6 +1435,7 @@ function analyzeMarkRoundingDetails(pts,roundings,manoeuvreEvents){
     }
     return{
       mark:r.mark,lap:r.lap,roundTack:r.tack??null,
+      markLat:r.lat,markLon:r.lon,
       closestIdx:peak,closestDistM:r.dist,
       zoneStartIdx:z0,zoneEndIdx:z1,
       totalTurnInZoneDeg,netBearingChangeDeg,durationSec,
@@ -1442,11 +1519,13 @@ function sampleStdDev(arr){
 }
 
 /** Speed / COG / VMG stats for samples on upwind legs, split by tack (vs wind FROM). */
-function computeUpwindTackLegStats(en,legs,wd){
+function computeUpwindTackLegStats(en,legs,wd,roundingMask=null){
   const port=[],stbd=[];
+  const skip=i=>roundingMask&&roundingMask.length>i&&roundingMask[i];
   for(const l of legs||[]){
     if(l.type!=="upwind"||l.startIdx==null||l.endIdx==null)continue;
     for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
+      if(skip(i))continue;
       const p=en[i],s=ms2k(p.ss||0);
       if(s<0.3)continue;
       const r=((p.cog-wd+360)%360);
@@ -1539,11 +1618,15 @@ function buildTimelineDecorations(analysis){
     const delta=adiff(before,now);
     const shiftArrow=delta>1?"▲":delta<-1?"▼":"•";
     const shiftLabel=Math.abs(delta)>=1?`${shiftArrow}${Math.round(Math.abs(delta))}°`:shiftArrow;
-    return{x:mt-t0,color:C.tack,label:`T${i+1}`,kind:"tack",shiftLabel};
+    const atMark=m.excludeFromStatsAndVMG;
+    return{x:mt-t0,color:atMark?C.trkRound:C.tack,label:`T${i+1}${atMark?"*":""}`,kind:"tack",shiftLabel};
   };
   const markers=[
     ...(analysis?.tacks||[]).map((m,i)=>markerForTack(m,i)),
-    ...(analysis?.gybes||[]).map((m,i)=>({x:(m.time??t0)-t0,color:C.gybe,label:`G${i+1}`,kind:"gybe"})),
+    ...(analysis?.gybes||[]).map((g,i)=>{
+      const atMark=g.excludeFromStatsAndVMG;
+      return{x:(g.time??t0)-t0,color:atMark?C.trkRound:C.gybe,label:`G${i+1}${atMark?"*":""}`,kind:"gybe"};
+    }),
   ].filter(m=>Number.isFinite(m.x)).sort((a,b)=>a.x-b.x);
   return{legBands,markers};
 }
@@ -1580,6 +1663,15 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
   const manoeuvreEvents=applyDetectionSettings(manoeuvres,en,detSettings);
+  const markLocList=allCourseMarkLocations(markPositions,preamble,laps);
+  for(const m of manoeuvreEvents){
+    const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
+    const p=en[ti];
+    const nm=nearestCourseMarkM(p.lat,p.lon,markLocList);
+    m.nearestMarkDistM=nm.dist;
+    m.nearestMarkName=nm.name;
+    m.excludeFromStatsAndVMG=Number.isFinite(nm.dist)&&nm.dist<=MARK_MANOEUVRE_AT_MARK_M;
+  }
   const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
   const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
   const windTrace=windBuild.windTrace;
@@ -1633,18 +1725,28 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     }
   }
 
-  const hasMans=manoeuvreEvents.length>0;
-  const vmgMode=hasMans?"magnitude":"targeted";
+  const markDetForMask=markRoundingDetailsAll.filter(d=>!d.skipped);
+  const roundingPointMask=computeRoundingPointMask(en,markDetForMask,baselines);
+  const trackSegmentFC=buildTrackSegmentFeatureCollection(en,roundingPointMask);
 
-  // Compute VMG for each leg
+  const hasMansForVMG=manoeuvreEvents.some(m=>!m.excludeFromStatsAndVMG);
+  const vmgMode=hasMansForVMG?"magnitude":"targeted";
+
   legs=legs.map(l=>{
-    const legPts=en.slice(l.startIdx,l.endIdx+1);
     const targetBearing=l.type==="upwind"?wd:l.type==="downwind"?((wd+180)%360):l.legBearing;
-    const vmgs=legPts.map(p=>{
-      const r=((p.cog-targetBearing+360)%360),va=r>180?360-r:r;
-      const signed=ms2k(p.ss||0)*Math.cos(va*D);
-      return vmgMode==="magnitude"?Math.abs(signed):signed;
-    });
+    const sampleLegVmgs=(skipRounding)=>{
+      const vmgs=[];
+      for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
+        if(skipRounding&&roundingPointMask[i])continue;
+        const p=en[i];
+        const r=((p.cog-targetBearing+360)%360),va=r>180?360-r:r;
+        const signed=ms2k(p.ss||0)*Math.cos(va*D);
+        vmgs.push(vmgMode==="magnitude"?Math.abs(signed):signed);
+      }
+      return vmgs;
+    };
+    let vmgs=sampleLegVmgs(true);
+    if(!vmgs.length)vmgs=sampleLegVmgs(false);
     const avgVMG=vmgs.length?vmgs.reduce((a,b)=>a+b,0)/vmgs.length:0;
     return{...l,avgVMG,vmgTarget:Math.round(targetBearing)};
   });
@@ -1658,10 +1760,12 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   let portS=0,stbdS=0;
   en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
 
-  const upwindByTack=computeUpwindTackLegStats(en,legs,wd);
-  const soloTackScores=tacks.filter(t=>t.q!=null).map(t=>t.q);
+  const upwindByTack=computeUpwindTackLegStats(en,legs,wd,roundingPointMask);
+  const tacksStats=tacks.filter(t=>!t.excludeFromStatsAndVMG);
+  const gybesStats=gybes.filter(g=>!g.excludeFromStatsAndVMG);
+  const soloTackScores=tacksStats.filter(t=>t.q!=null).map(t=>t.q);
   const avgTackQuality=soloTackScores.length?soloTackScores.reduce((a,b)=>a+b,0)/soloTackScores.length:null;
-  const avgGybeQuality=gybes.length?gybes.reduce((a,b)=>a+(Number(b.q)||0),0)/gybes.length:null;
+  const avgGybeQuality=gybesStats.length?gybesStats.reduce((a,b)=>a+(Number(b.q)||0),0)/gybesStats.length:null;
 
   return{
     points:en,
@@ -1675,13 +1779,17 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     baselines,
     stats:{
       totalDist,duration,maxSpeed,avgSpeed,
-      tackCount:tacks.length,gybeCount:gybes.length,
+      tackCount:tacksStats.length,gybeCount:gybesStats.length,
+      tackCountAll:tacks.length,gybeCountAll:gybes.length,
+      tackCountMarkAdjacent:tacks.length-tacksStats.length,
+      gybeCountMarkAdjacent:gybes.length-gybesStats.length,
       avgTackQuality,avgGybeQuality,
       windShiftRange:windStats.range,
       portStbdSplit:{port:portS,stbd:stbdS},
     },
     tacks,gybes,legs,
     markRoundingDetails:markRoundingDetailsAll.filter(d=>!d.skipped),
+    trackSegmentFC,
     streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark,
   };
 }
@@ -1726,13 +1834,16 @@ function ManCard({m,index}){
   const exitHint=m.type==="tack"&&m.exitBias&&(m.exitBias==="neutral"||(Number.isFinite(m.exitBiasAmount)&&m.exitBias!=="neutral"))
     ?(m.exitBias!=="neutral"&&Number.isFinite(m.exitBiasAmount)?`Exit: ${Math.abs(m.exitBiasAmount).toFixed(1)}° ${m.exitBias}`:"Exit: neutral")
     :"";
-  return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
+  const markMan=m.excludeFromStatsAndVMG;
+  return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${markMan?C.trkRound:C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
     <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}22`,color:qc,fontWeight:800,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}>{scoreLabel}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:12,fontWeight:600,color:C.txt,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}</span>
+        {markMan&&<span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:6,background:`${C.trkRound}22`,color:C.trkRound,border:`1px solid ${C.trkRound}66`}}>Mark ≤5m</span>}
         {cx&&<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",padding:"2px 8px",borderRadius:6,background:cxSt.bg,color:cxSt.fg,border:`1px solid ${cxSt.br}55`}}>{cx}</span>}
       </div>
+      {markMan&&<div style={{fontSize:10,color:C.txD,lineHeight:1.45}}>Rounding manoeuvre at <strong style={{color:C.trkRound}}>{m.nearestMarkName||"mark"}</strong> (~{m.nearestMarkDistM!=null?`${m.nearestMarkDistM.toFixed(1)} m`:"—"}) — excluded from racing tack/gybe stats, leg VMG averages, and magnitude VMG mode.</div>}
       <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
       <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"—"}</div>
       {exitHint&&<div style={{fontSize:10,color:C.txM,marginTop:2}}>{exitHint}</div>}
@@ -1769,7 +1880,7 @@ function WindRose({wd,onChange,compact,hint}){
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
-function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine}){
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const markersRef=useRef([]);
@@ -1793,8 +1904,9 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
 
     map.on("load",()=>{
       if(trackPoints&&trackPoints.length>1){
-        map.addSource("track",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}}});
-        map.addLayer({id:"track-line",type:"line",source:"track",paint:{"line-color":C.trk,"line-width":3,"line-opacity":0.8}});
+        const fc=trackSegmentFC&&trackSegmentFC.features?.length>=1?trackSegmentFC:buildTrackSegmentFeatureCollection(trackPoints,new Array(trackPoints.length).fill(false));
+        map.addSource("track-segments",{type:"geojson",data:fc});
+        map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":["match",["get","kind"],"rounding",C.trkRound,C.trk],"line-width":3,"line-opacity":0.88}});
         map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
         map.addLayer({id:"track-points",type:"circle",source:"track-points",paint:{"circle-radius":1.8,"circle-color":"#d9fff7","circle-opacity":0.72}});
         const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
@@ -1856,12 +1968,14 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
       manMarkersRef.current.push(new mapboxgl.Marker({element:el,anchor:"bottom"}).setLngLat([lon,lat]).addTo(map));
     };
     manoeuvres.tacks.forEach((m,i)=>{
-      const col=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.tack;
-      add(m,`T${i+1}`,col);
+      const base=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.tack;
+      const col=m.excludeFromStatsAndVMG?C.trkRound:base;
+      add(m,m.excludeFromStatsAndVMG?`T${i+1}*`:`T${i+1}`,col);
     });
     manoeuvres.gybes.forEach((m,i)=>{
-      const col=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.gybe;
-      add(m,`G${i+1}`,col);
+      const base=m.crossing==="P→S"?C.port:m.crossing==="S→P"?C.stbd:C.gybe;
+      const col=m.excludeFromStatsAndVMG?C.trkRound:base;
+      add(m,m.excludeFromStatsAndVMG?`G${i+1}*`:`G${i+1}`,col);
     });
   },[manoeuvres,trackPoints,mapLoaded]);
 
@@ -1920,8 +2034,13 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
   useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     if(trackPoints&&trackPoints.length>1){
-      const src=map.getSource("track");
-      if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}});
+      const fc=trackSegmentFC&&trackSegmentFC.features?.length>=1?trackSegmentFC:buildTrackSegmentFeatureCollection(trackPoints,new Array(trackPoints.length).fill(false));
+      let tsrc=map.getSource("track-segments");
+      if(tsrc)tsrc.setData(fc);
+      else{
+        map.addSource("track-segments",{type:"geojson",data:fc});
+        if(!map.getLayer("track-line"))map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":["match",["get","kind"],"rounding",C.trkRound,C.trk],"line-width":3,"line-opacity":0.88}});
+      }
       const psrc=map.getSource("track-points");
       if(psrc)psrc.setData({type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))});
     }
@@ -1929,7 +2048,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
       const src=map.getSource("course");
       if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:courseMarks.map(m=>[m.lon,m.lat])}});
     }
-  },[trackPoints,courseMarks]);
+  },[trackPoints,courseMarks,trackSegmentFC]);
 
   const roseSz=84;
   return(
@@ -2166,7 +2285,7 @@ function App(){
       marks[name]={
         lat:ovr?ovr.lat:base.lat,
         lon:ovr?ovr.lon:base.lon,
-        fixed:base.fixed,
+        fixed:false,
         desc:base.desc||"",
         name,
         roundTack:tackFirst[name]||null,
@@ -2637,7 +2756,9 @@ function App(){
               onMarkDrag={onMarkDrag}
               manoeuvres={setupMapAnalysis?{tacks:setupMapAnalysis.tacks,gybes:setupMapAnalysis.gybes}:null}
               startFinishLine={courseMapStartFinish}
+              trackSegmentFC={setupMapAnalysis?.trackSegmentFC||null}
             />
+            <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}><span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Mark rounding (see Manoeuvres for rules) · All course marks draggable on map</div>
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
             <WindRose
@@ -2718,13 +2839,13 @@ function App(){
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Marks on map</div>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
             {Object.entries(effectiveMarks).map(([name,mk])=>{
-              const st=mk.roundTack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:mk.roundTack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${mk.fixed?C.blu:C.gld}15`,br:mk.fixed?C.blu:C.gld,fg:mk.fixed?C.blu:C.gld};
+              const st=mk.roundTack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:mk.roundTack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${C.gld}15`,br:C.gld,fg:C.gld};
               return(
               <div key={name} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}44`}}>
                 <div style={{width:6,height:6,borderRadius:3,background:st.br}}/>
                 <span style={{fontSize:11,color:st.fg,fontWeight:600}}>{name}</span>
                 {mk.roundTack&&<span style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:st.fg}}>{mk.roundTack}</span>}
-                {!mk.fixed&&<span style={{fontSize:9,color:C.txD}}>drag</span>}
+                <span style={{fontSize:9,color:C.txD}}>drag</span>
               </div>);
             })}
           </div>
@@ -2806,9 +2927,12 @@ function App(){
           </div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
             <Stat label="Avg Speed" value={a.stats.avgSpeed.toFixed(1)} unit="kts" color={C.blu} icon="〰"/>
-            <Stat label="Tacks" value={a.stats.tackCount} color={C.tack} icon="↗"/>
-            <Stat label="Gybes" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
+            <Stat label="Tacks (racing)" value={a.stats.tackCount} color={C.tack} icon="↗"/>
+            <Stat label="Gybes (racing)" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
           </div>
+          {(a.stats.tackCountMarkAdjacent>0||a.stats.gybeCountMarkAdjacent>0)&&<div style={{fontSize:10,color:C.txD,marginTop:-8,marginBottom:12,lineHeight:1.5}}>
+            Mark rounding manoeuvres (turn within {MARK_MANOEUVRE_AT_MARK_M} m of a course mark): <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.tackCountMarkAdjacent||0}</span> tack{(a.stats.tackCountMarkAdjacent||0)!==1?"s":""}, <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.gybeCountMarkAdjacent||0}</span> gybe{(a.stats.gybeCountMarkAdjacent||0)!==1?"s":""} — excluded from these counts, quality charts, leg VMG averages, and magnitude VMG mode.
+          </div>}
           <div style={{fontSize:11,color:C.txM,marginBottom:12}}>
             {a.windStats?.range!=null&&<>Wind range {a.windStats.range.toFixed(1)}° ({a.windStats.trend})</>}
           </div>
@@ -2943,7 +3067,7 @@ function App(){
               Auto estimate: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)
             </div>}
             <div style={{marginTop:8,fontSize:10,color:C.txD,lineHeight:1.6}}>
-              Leg VMG mode: <span style={{color:C.txt}}>{a.vmgMode==="magnitude"?"Magnitude (manoeuvres present)":"Targeted signed (no manoeuvres found)"}</span>
+              Leg VMG mode: <span style={{color:C.txt}}>{a.vmgMode==="magnitude"?"Magnitude (racing manoeuvres present)":"Targeted signed (no racing manoeuvres)"}</span> · per-leg VMG excludes mark-rounding track (orange on map). Timeline: <span style={{color:C.trkRound}}>*</span> = at-mark manoeuvre.
             </div>
           </div>
 
@@ -2971,7 +3095,7 @@ function App(){
             };
             return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
               <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Upwind · port vs starboard</div>
-              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>GPS samples on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>. VMG = |speed×cos(TWA)| vs wind. Angle line: mean COG with signed offset from wind (±°) and acute TWA. COG σ = circular spread (°).</div>
+              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>GPS samples on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>. Samples in <strong style={{color:C.trkRound}}>mark-rounding</strong> segments (same mask as orange track) are excluded. VMG = |speed×cos(TWA)| vs wind. Angle line: mean COG with signed offset from wind (±°) and acute TWA. COG σ = circular spread (°).</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                 {row("Upwind · port tack",C.port,uw.port)}
                 {row("Upwind · starboard tack",C.stbd,uw.stbd)}
@@ -2982,13 +3106,14 @@ function App(){
 
         {/* MANOEUVRES */}
         {tab==="manoeuvres"&&<>
+          <div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}>Quality averages and charts use <strong>racing</strong> manoeuvres only (turn centre <strong>&gt; {MARK_MANOEUVRE_AT_MARK_M} m</strong> from any course mark). Mark manoeuvres still appear in the list below with an orange border.</div>
           <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
-            <Stat label="Avg Tack" color={C.tack} value={a.tacks.filter(t=>Number.isFinite(t.q)).length?Math.round(a.tacks.filter(t=>Number.isFinite(t.q)).reduce((s,t)=>s+t.q,0)/a.tacks.filter(t=>Number.isFinite(t.q)).length):"—"} unit="%"/>
-            <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="% vs ref"/>
+            <Stat label="Avg Tack" color={C.tack} value={(()=>{const tr=a.tacks.filter(t=>!t.excludeFromStatsAndVMG&&Number.isFinite(t.q));return tr.length?Math.round(tr.reduce((s,t)=>s+t.q,0)/tr.length):"—";})()} unit="%"/>
+            <Stat label="Avg Gybe" color={C.gybe} value={(()=>{const gr=a.gybes.filter(g=>!g.excludeFromStatsAndVMG);return gr.length?Math.round(gr.reduce((s,g)=>s+g.q,0)/gr.length):"—";})()} unit="% vs ref"/>
           </div>
           {a.markRoundingDetails?.length>0&&<div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Mark roundings</div>
-            <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.5}}>Zones: track within {MARK_ROUND_ZONE_M} m of the mark and {MARK_ROUND_MAX_SPAN_SEC} s centered on closest approach. Σ|ΔCOG| sums bearing steps in the zone. <strong>Residual</strong> on each manoeuvre card ≈ zone turn not covered by the tack/gybe detection window (mark arc and extra turning).</div>
+            <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.5}}>Zones: track within {MARK_ROUND_ZONE_M} m of the mark and {MARK_ROUND_MAX_SPAN_SEC} s centered on closest approach. Points <strong>&gt;{MARK_ROUND_NORMAL_MIN_DIST_M} m</strong> from the mark with COG within <strong>{MARK_ROUND_SAILING_COG_TOL_DEG}°</strong> of mean port or starboard baseline count as <strong>normal</strong> track (teal), not rounding (orange). Σ|ΔCOG| sums bearing steps in rounding segments. Tack/gybe within <strong>{MARK_MANOEUVRE_AT_MARK_M} m</strong> of any course mark are mark-rounding manoeuvres (excluded from racing stats).</div>
             {a.markRoundingDetails.map((d,i)=><div key={`mr-${i}`} style={{fontSize:11,padding:"8px 10px",borderRadius:8,background:`${C.bg}99`,border:`1px solid ${C.bdr}`,marginBottom:6,lineHeight:1.5}}>
               <strong style={{color:C.gld}}>{d.mark}</strong> · lap {d.lap}{d.roundTack?` · ${d.roundTack} rounding`:""} · closest {d.closestDistM!=null?`${Math.round(d.closestDistM)} m`:"—"} · zone {d.durationSec!=null?`${d.durationSec.toFixed(0)} s`:"—"}<br/>
               <span style={{color:C.txM}}>Σ|ΔCOG| {d.totalTurnInZoneDeg}° · net bearing Δ {d.netBearingChangeDeg}° · manoeuvres in zone: {d.linkedManoeuvres?.length||0}{d.linkedManoeuvres?.length?` (${d.linkedManoeuvres.map(l=>`${l.type} @${l.splitRole?.replace(/_/g," ")||""}`).join("; ")})`:""}</span>
@@ -2996,8 +3121,10 @@ function App(){
           </div>}
 
           {(()=>{
-            const tPS=a.tacks.filter(t=>t.crossing==="P→S"),tSP=a.tacks.filter(t=>t.crossing==="S→P");
-            const gPS=a.gybes.filter(g=>g.crossing==="P→S"),gSP=a.gybes.filter(g=>g.crossing==="S→P");
+            const tR=a.tacks.filter(t=>!t.excludeFromStatsAndVMG);
+            const gR=a.gybes.filter(g=>!g.excludeFromStatsAndVMG);
+            const tPS=tR.filter(t=>t.crossing==="P→S"),tSP=tR.filter(t=>t.crossing==="S→P");
+            const gPS=gR.filter(g=>g.crossing==="P→S"),gSP=gR.filter(g=>g.crossing==="S→P");
             const cell=(label,val,col)=>(
               <div key={label} style={{background:`${col}10`,border:`1px solid ${col}44`,borderRadius:8,padding:"8px 10px",minWidth:0}}>
                 <div style={{fontSize:9,color:C.txM,textTransform:"uppercase",letterSpacing:0.6,marginBottom:3}}>{label}</div>
@@ -3006,13 +3133,13 @@ function App(){
             );
             return(
               <div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Average turn angle (COG change)</div>
+                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Average turn angle (COG change) — racing only</div>
                 <div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.45}}>Mean heading change across the detection window. P→S = port tack → starboard tack; S→P = starboard → port.</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(108px, 1fr))",gap:8}}>
-                  {cell("All tacks",avgManAngle(a.tacks),C.tack)}
+                  {cell("All tacks",avgManAngle(tR),C.tack)}
                   {cell("Tacks P→S",avgManAngle(tPS),C.port)}
                   {cell("Tacks S→P",avgManAngle(tSP),C.stbd)}
-                  {cell("All gybes",avgManAngle(a.gybes),C.gybe)}
+                  {cell("All gybes",avgManAngle(gR),C.gybe)}
                   {cell("Gybes P→S",avgManAngle(gPS),C.port)}
                   {cell("Gybes S→P",avgManAngle(gSP),C.stbd)}
                 </div>
@@ -3020,8 +3147,8 @@ function App(){
             );
           })()}
 
-          {a.tacks.length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Tack quality</div>
+          {a.tacks.filter(t=>!t.excludeFromStatsAndVMG).length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Tack quality (racing)</div>
             <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.55}}>
               Score = <strong style={{color:C.txt}}>reference |VMG| ÷ mean |VMG| during the turn × 100%</strong> (reference = average of mean |VMG| in the <strong>10 s before</strong> the turn and <strong>10 s after</strong>; during = mean |VMG| over the detected turn length). <strong>&gt;100%</strong> means you held more |VMG| through the tack than that reference. Bars: <span style={{color:C.port,fontWeight:700}}>red</span> = started on port tack, <span style={{color:C.stbd,fontWeight:700}}>green</span> = started on starboard.
             </div>
@@ -3030,17 +3157,17 @@ function App(){
               <span style={{color:C.stbd,fontWeight:700}}>■</span> S→P (starboard → port)
             </div>
             <ResponsiveContainer width="100%" height={110}>
-              <BarChart data={a.tacks.map((t,i)=>({n:`T${i+1}`,q:t.q,crossing:t.crossing||"—",ch:Math.round(Number(t.ch)||0),sideBef:t.sideBef}))}>
+              <BarChart data={a.tacks.filter(t=>!t.excludeFromStatsAndVMG).map((t,i)=>({n:`T${i+1}`,q:t.q,crossing:t.crossing||"—",ch:Math.round(Number(t.ch)||0),sideBef:t.sideBef}))}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
                 <YAxis domain={[0,"auto"]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
                 <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v}% vs ref`,"Score"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing} · tack angle ${p.ch}°`:lab;}}/>
-                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.tacks.map((t,i)=><Cell key={`tk${i}`} fill={manBarFillByStartTack(t.sideBef)}/>)}</Bar>
+                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.tacks.filter(t=>!t.excludeFromStatsAndVMG).map((t,i)=><Cell key={`tk${i}`} fill={manBarFillByStartTack(t.sideBef)}/>)}</Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>}
-          {a.gybes.length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Gybe quality</div>
+          {a.gybes.filter(g=>!g.excludeFromStatsAndVMG).length>0&&<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Gybe quality (racing)</div>
             <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.55}}>
               Same score as tacks (|VMG| vs wind, 10 s before / after, mean during gybe). Bars: <span style={{color:C.port,fontWeight:700}}>red</span> = port tack before gybe, <span style={{color:C.stbd,fontWeight:700}}>green</span> = starboard tack before gybe.
             </div>
@@ -3049,12 +3176,12 @@ function App(){
               <span style={{color:C.stbd,fontWeight:700}}>■</span> S→P
             </div>
             <ResponsiveContainer width="100%" height={110}>
-              <BarChart data={a.gybes.map((g,i)=>({n:`G${i+1}`,q:g.q,crossing:g.crossing||"—",ch:Math.round(Number(g.ch)||0),sideBef:g.sideBef}))}>
+              <BarChart data={a.gybes.filter(g=>!g.excludeFromStatsAndVMG).map((g,i)=>({n:`G${i+1}`,q:g.q,crossing:g.crossing||"—",ch:Math.round(Number(g.ch)||0),sideBef:g.sideBef}))}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="n" tick={{fill:C.txM,fontSize:9}} stroke={C.bdr}/>
                 <YAxis domain={[0,"auto"]} tick={{fill:C.txD,fontSize:9}} stroke={C.bdr}/>
                 <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11}} formatter={(v)=>[`${v}% vs ref`,"Score"]} labelFormatter={(lab,pl)=>{const p=pl&&pl[0]&&pl[0].payload;return p?`${p.n} · ${p.crossing} · gybe angle ${p.ch}°`:lab;}}/>
-                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.gybes.map((g,i)=><Cell key={`gy${i}`} fill={manBarFillByStartTack(g.sideBef)}/>)}</Bar>
+                <Bar dataKey="q" name="quality" radius={[4,4,0,0]}>{a.gybes.filter(g=>!g.excludeFromStatsAndVMG).map((g,i)=><Cell key={`gy${i}`} fill={manBarFillByStartTack(g.sideBef)}/>)}</Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>}
