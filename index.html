@@ -2999,23 +2999,34 @@ function App(){
                     <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:11}}>{renameBusy?"…":"Save"}</button>
                     <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:11}}>Cancel</button>
                   </div>
+                ):act.__fromSupabaseOnly?(
+                  <div style={{display:"flex",width:"100%",alignItems:"stretch"}}>
+                    <button type="button" onClick={()=>{
+                      if(compareMode){toggleComparePick(act.id);return;}
+                      if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;
+                      setSavedSummaryId(String(act.id));setView("saved-summary");
+                    }} title="Open or select for compare" style={{display:"flex",flex:1,alignItems:"center",gap:12,background:"transparent",padding:"12px 8px 12px 14px",border:"none",textAlign:"left",cursor:"pointer",minWidth:0}}>
+                      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>📁</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
+                        <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,null)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span></div>
+                      </div>
+                    </button>
+                    {!compareMode&&<button type="button" onClick={(e)=>{e.stopPropagation();if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;setSavedSummaryId(String(act.id));setView("saved-summary");}} title={act.__savedRow?.analysis_snapshot?"Open full analysis (charts & map)":"View saved summary"} style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,background:"transparent",border:"none",borderLeft:`1px solid ${C.bdr}`,padding:"8px 12px 8px 14px",cursor:"pointer",color:C.acc,fontSize:12,fontWeight:700,fontFamily:"'Outfit',sans-serif",whiteSpace:"nowrap"}}>Analysis <span style={{color:C.txD,fontSize:16,fontWeight:400}} aria-hidden>›</span></button>}
+                  </div>
                 ):(
                   <button type="button" onClick={()=>{
                     if(compareMode){toggleComparePick(act.id);return;}
-                    if(act.__fromSupabaseOnly){
-                      if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;
-                      setSavedSummaryId(String(act.id));setView("saved-summary");return;
-                    }
                     analyseStrava(act);
-                  }} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
+                  }} title="Open activity" style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
                     <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
-                      {act.__fromSupabaseOnly?"📁":act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
+                      {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
                     </div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
-                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act.__fromSupabaseOnly?null:act)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}{act.__fromSupabaseOnly?<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span>:""}</div>
+                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}</div>
                     </div>
-                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>{act.__fromSupabaseOnly?"📊":"›"}</div>
+                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>›</div>
                   </button>
                 )}
               </div>
