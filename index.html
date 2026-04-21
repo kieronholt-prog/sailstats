@@ -1224,7 +1224,7 @@ const MARK_ROUND_ZONE_M=10;
 /** Seconds — total time window centered on closest approach (± half each side). */
 const MARK_ROUND_MAX_SPAN_SEC=5;
 /** If further than this from mark and COG ≈ port/stbd baseline → normal track (not orange rounding). */
-const MARK_ROUND_NORMAL_MIN_DIST_M=3;
+const MARK_ROUND_NORMAL_MIN_DIST_M=5;
 const MARK_ROUND_SAILING_COG_TOL_DEG=10;
 /** Tack/gybe turn within this distance (m) of any course mark → mark manoeuvre (excluded from stats & leg VMG mode). */
 const MARK_MANOEUVRE_AT_MARK_M=5;
@@ -1251,7 +1251,7 @@ function isNearBaselineCOG(cog,portCOG,stbdCOG,tolDeg){
   return Math.abs(adiff(cog,portCOG))<=tolDeg||Math.abs(adiff(cog,stbdCOG))<=tolDeg;
 }
 
-/** Multi-part LineString for map: kind "rounding" (orange) vs "normal" (teal). */
+/** Multi-part LineString for map: kind "rounding" (orange) vs "normal" (teal). Segments share a vertex at colour boundaries so no edges are missing. */
 function buildTrackSegmentFeatureCollection(pts,mask){
   if(!pts||pts.length<2)return{type:"FeatureCollection",features:[]};
   const n=pts.length;
@@ -1263,13 +1263,14 @@ function buildTrackSegmentFeatureCollection(pts,mask){
     if(b<a)return;
     const coords=[];
     for(let j=a;j<=b;j++)coords.push([pts[j].lon,pts[j].lat]);
+    if(coords.length===1)coords.push(coords[0]);
     if(coords.length>=2)feats.push({type:"Feature",properties:{kind:k},geometry:{type:"LineString",coordinates:coords}});
   };
   for(let i=1;i<n;i++){
     const rk=m[i]?"rounding":"normal";
     if(rk!==kind){
       pushSeg(segStart,i-1,kind);
-      segStart=i;
+      segStart=i-1;
       kind=rk;
     }
   }

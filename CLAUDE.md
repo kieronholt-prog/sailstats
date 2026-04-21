@@ -135,7 +135,7 @@ All analysis logic lives in `index.html` (Babel/React bundle). Important pieces:
 
 **Not implemented:** tack grouping (`buildTackGroups`) and intent labels (reactive / proactive / tactical). Each tack is scored on its own. See `TACK_ALGORITHM_SPEC.md` for the original spec and “deferred” sections.
 
-**Mark roundings:** Sequential mark hits from `detectLegsFromMarks`; `analyzeMarkRoundingDetails` builds a zone around each closest approach. Track is coloured **orange** where counted as rounding; points **>3 m** from the mark with COG within **10°** of mean port or starboard baseline stay **teal** (normal). `trackSegmentFC` feeds the map line layers. Tacks/gybes with turn within **5 m** of any course mark get `excludeFromStatsAndVMG` — omitted from tack/gybe stats, quality charts, upwind sample stats, per-leg VMG averages, and magnitude VMG mode; still listed with an orange border. All WSC marks are draggable (defaults unchanged; overrides in `mark_overrides`).
+**Mark roundings:** Sequential mark hits from `detectLegsFromMarks`; `analyzeMarkRoundingDetails` builds a zone around each closest approach. Track is coloured **orange** where counted as rounding; points **>5 m** from the mark with COG within **10°** of mean port or starboard baseline stay **teal** (normal). `trackSegmentFC` feeds the map line layers. Tacks/gybes with turn within **5 m** of any course mark get `excludeFromStatsAndVMG` — omitted from tack/gybe stats, quality charts, upwind sample stats, per-leg VMG averages, and magnitude VMG mode; still listed with an orange border. All WSC marks are draggable (defaults unchanged; overrides in `mark_overrides`).
 
 - `detectLegsFromMarks(points, markPositions, laps, ...)` — Legs including START/FINISH when line defined
 
