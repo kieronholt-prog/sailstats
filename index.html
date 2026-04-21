@@ -1946,32 +1946,9 @@ function App(){
     return{durSec:s[s.length-1].time-s[0].time,n:s.length};
   },[croppedPoints]);
 
-  /** Max duration (seconds) from current start to end of recording. */
-  const cropDurMaxSec=useMemo(()=>{
-    if(!trackMeta)return 0;
-    return Math.max(0,trackMeta.spanSec-cropStartSecParsed);
-  },[trackMeta,cropStartSecParsed]);
-
-  /** Effective duration for − / +: empty field = full remaining (to end). */
-  const cropDurStepSec=useMemo(()=>{
-    const maxD=cropDurMaxSec;
-    if(maxD<=0)return 0;
-    const t=cropDurationText.trim();
-    if(t==="")return maxD;
-    const p=parseHMS(t);
-    if(p==null||p<=0)return maxD;
-    return Math.max(1,Math.min(maxD,p));
-  },[cropDurationText,cropDurMaxSec]);
-
   useEffect(()=>{
     setCropStartText("00:00:00");
-    if(!rawPoints||rawPoints.length<2){
-      setCropDurationText("");
-      return;
-    }
-    const s=[...rawPoints].sort((a,b)=>a.time-b.time);
-    const span=s[s.length-1].time-s[0].time;
-    setCropDurationText(formatHMS(span));
+    setCropDurationText("");
   },[rawPoints]);
 
   // Restore session from HttpOnly cookie; if Strava returned ?code=, exchange only after /session succeeds
@@ -2169,14 +2146,14 @@ function App(){
 
   /** Live tack/gybe positions for course-setup map (same engine as full analysis). */
   const setupMapAnalysis=useMemo(()=>{
-    if(!croppedPoints||croppedPoints.length<20)return null;
+    if(!rawPoints||rawPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
+    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
+  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
 
   const startFinishStats=useMemo(()=>{
-    if(!croppedPoints||croppedPoints.length<2||!sfLineEnds||!setupMapAnalysis)return null;
-    const pts=setupMapAnalysis.points||croppedPoints;
+    if(!rawPoints||rawPoints.length<2||!sfLineEnds||!setupMapAnalysis)return null;
+    const pts=setupMapAnalysis.points||rawPoints;
     const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
     const startPt=startIdx>=0?pts[startIdx]:null;
     const startDist=startPt?distPointToSegmentM(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
@@ -2203,7 +2180,22 @@ function App(){
       if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
     return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
-  },[croppedPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,setupMapAnalysis]);
+  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,setupMapAnalysis]);
+
+  useEffect(()=>{
+    if(!rawPoints||rawPoints.length<2||!startFinishStats)return;
+    const t0=rawPoints[0].time;
+    const startRef=startFinishStats.startPointTime;
+    if(!Number.isFinite(startRef))return;
+    const cropStartAbs=Math.max(t0,startRef-15);
+    const cropStartSec=Math.max(0,Math.round(cropStartAbs-t0));
+    const finishT=startFinishStats.finishCross?.time;
+    const cropDurSec=Number.isFinite(finishT)&&finishT>cropStartAbs?Math.round(finishT-cropStartAbs):null;
+    const nextStart=formatHMS(cropStartSec);
+    const nextDur=cropDurSec!=null?formatHMS(cropDurSec):"";
+    if(cropStartText!==nextStart)setCropStartText(nextStart);
+    if(cropDurationText!==nextDur)setCropDurationText(nextDur);
+  },[rawPoints,startFinishStats,cropStartText,cropDurationText]);
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
@@ -2493,76 +2485,15 @@ function App(){
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
         <div style={{fontSize:18,fontWeight:700,marginBottom:16}}>Course Setup</div>
 
-        {/* Track crop — times relative to first GPS point in this activity */}
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop</div>
-          <div style={{fontSize:12,color:C.txM,marginBottom:10,lineHeight:1.5}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop (auto)</div>
+          <div style={{fontSize:12,color:C.txM,lineHeight:1.5}}>
             Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
-            {croppedMeta&&<span> · Cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
+            {croppedMeta&&<span> · Auto-cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
           </div>
-          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{flex:1,minWidth:200}}>
-              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Start after first point (HH:MM:SS)</label>
-              <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
-                <button type="button" aria-label="Decrease start offset"
-                  disabled={cropStartSecParsed<=0}
-                  onClick={()=>{
-                    const n=Math.max(0,cropStartSecParsed-CROP_TIME_STEP_SEC);
-                    setCropStartText(formatHMS(n));
-                  }}
-                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropStartSecParsed<=0?C.txD:C.txt,flexShrink:0,cursor:cropStartSecParsed<=0?"not-allowed":"pointer",opacity:cropStartSecParsed<=0?0.45:1}}>−</button>
-                <input type="text" inputMode="numeric" placeholder="00:00:00" value={cropStartText}
-                  onChange={e=>setCropStartText(e.target.value)}
-                  onBlur={()=>{
-                    const p=parseHMS(cropStartText);
-                    if(p==null)setCropStartText("00:00:00");
-                    else setCropStartText(formatHMS(Math.min(p,trackMeta.spanSec)));
-                  }}
-                  style={{flex:1,minWidth:0,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
-                <button type="button" aria-label="Increase start offset"
-                  disabled={cropStartSecParsed>=trackMeta.spanSec}
-                  onClick={()=>{
-                    const n=Math.min(trackMeta.spanSec,cropStartSecParsed+CROP_TIME_STEP_SEC);
-                    setCropStartText(formatHMS(n));
-                  }}
-                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropStartSecParsed>=trackMeta.spanSec?C.txD:C.txt,flexShrink:0,cursor:cropStartSecParsed>=trackMeta.spanSec?"not-allowed":"pointer",opacity:cropStartSecParsed>=trackMeta.spanSec?0.45:1}}>+</button>
-              </div>
-            </div>
-            <div style={{flex:1,minWidth:200}}>
-              <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Duration (HH:MM:SS)</label>
-              <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
-                <button type="button" aria-label="Decrease duration"
-                  disabled={cropDurMaxSec<=0||cropDurStepSec<=1}
-                  onClick={()=>{
-                    if(cropDurMaxSec<=0)return;
-                    const n=Math.max(1,cropDurStepSec-CROP_TIME_STEP_SEC);
-                    setCropDurationText(formatHMS(n));
-                  }}
-                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropDurMaxSec<=0||cropDurStepSec<=1?C.txD:C.txt,flexShrink:0,cursor:cropDurMaxSec<=0||cropDurStepSec<=1?"not-allowed":"pointer",opacity:cropDurMaxSec<=0||cropDurStepSec<=1?0.45:1}}>−</button>
-                <input type="text" inputMode="numeric" placeholder="empty = to end"
-                  value={cropDurationText}
-                  onChange={e=>setCropDurationText(e.target.value)}
-                  onBlur={()=>{
-                    const t=cropDurationText.trim();
-                    if(t==="")return;
-                    const p=parseHMS(t);
-                    if(p==null||p<=0)setCropDurationText("");
-                    else setCropDurationText(formatHMS(p));
-                  }}
-                  style={{flex:1,minWidth:0,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}/>
-                <button type="button" aria-label="Increase duration"
-                  disabled={cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec}
-                  onClick={()=>{
-                    if(cropDurMaxSec<=0)return;
-                    const n=Math.min(cropDurMaxSec,cropDurStepSec+CROP_TIME_STEP_SEC);
-                    setCropDurationText(formatHMS(n));
-                  }}
-                  style={{minWidth:52,minHeight:50,fontSize:26,fontWeight:700,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center",touchAction:"manipulation",WebkitTapHighlightColor:"transparent",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.card,color:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?C.txD:C.txt,flexShrink:0,cursor:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?"not-allowed":"pointer",opacity:cropDurMaxSec<=0||cropDurStepSec>=cropDurMaxSec?0.45:1}}>+</button>
-              </div>
-            </div>
-            <button type="button" onClick={()=>{setCropStartText("00:00:00");setCropDurationText(formatHMS(trackMeta.spanSec));}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 14px",fontSize:12}}>Reset crop</button>
+          <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
+            Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
           </div>
-          <div style={{fontSize:10,color:C.txD,marginTop:8}}>Times are relative to the first GPS point. Use <strong style={{color:C.txM}}>HH:MM:SS</strong> (e.g. <code style={{color:C.acc}}>00:05:30</code> = 5 min 30 s). <strong style={{color:C.txM}}>− / +</strong> step by {CROP_TIME_STEP_SEC}s. Leave duration empty to run to the end of the file. Each point stores <strong style={{color:C.txM}}>Unix time</strong> (seconds); local clock for the first point is shown under the map when available.</div>
         </div>}
 
         {/* Course & Laps selector */}
