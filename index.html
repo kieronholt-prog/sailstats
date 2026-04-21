@@ -539,8 +539,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     mark_overrides: courseSetup.markOverrides || {},
     course_setup,
     stats: results.stats,
-    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing })),
-    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing })),
+    tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing, mark: t.markRounding?.mark ?? null, markSplit: t.markRounding?.splitRole ?? null })),
+    gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null })),
     leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
     updated_at: new Date().toISOString(),
   }, "strava_id,activity_id");
@@ -1217,27 +1217,33 @@ function closestIndexToLine(pts,endA,endB,fromIdx,toIdx){
   return{idx:bestIdx,dist:bestDist};
 }
 
+/** Metres — track must pass within this distance for a sequential mark hit (leg split). */
+const LEG_ROUNDING_HIT_M=80;
+/** Metres — expand “rounding zone” around closest approach for turn geometry. */
+const MARK_ROUND_ZONE_M=10;
+/** Seconds — total time window centered on closest approach (± half each side). */
+const MARK_ROUND_MAX_SPAN_SEC=5;
+
 function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null){
-  // Detect when the track passes close to each mark in sequence
   const legs=[];
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
-  if(fullSeq.length<2)return legs;
+  if(fullSeq.length<2)return{legs,roundings:[]};
 
-  // Find closest approach to each mark in sequence
   const roundings=[];
   let searchFrom=0;
-  const ROUNDING_DIST=80; // metres — consider rounded if within this distance
 
   for(const mark of fullSeq){
     let bestDist=Infinity,bestIdx=-1;
     for(let i=searchFrom;i<pts.length;i++){
       const d=hav(pts[i].lat,pts[i].lon,mark.lat,mark.lon);
       if(d<bestDist){bestDist=d;bestIdx=i;}
-      // If we've passed through and are moving away, stop searching
-      if(d>bestDist+50&&bestDist<ROUNDING_DIST)break;
+      if(d>bestDist+50&&bestDist<LEG_ROUNDING_HIT_M)break;
     }
-    if(bestDist<ROUNDING_DIST*3&&bestIdx>searchFrom){
-      roundings.push({mark:mark.name,idx:bestIdx,dist:bestDist,lap:mark.lap});
+    if(bestDist<LEG_ROUNDING_HIT_M*3&&bestIdx>searchFrom){
+      roundings.push({
+        mark:mark.name,idx:bestIdx,dist:bestDist,lap:mark.lap,
+        lat:mark.lat,lon:mark.lon,tack:mark.tack??null,
+      });
       searchFrom=bestIdx+5;
     }
   }
@@ -1245,16 +1251,15 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
   if(startFinishLine?.endA&&startFinishLine?.endB&&roundings.length){
     const startPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,0,roundings[0].idx);
     if(startPick.idx>=0&&startPick.idx<roundings[0].idx){
-      roundings.unshift({mark:"START",idx:startPick.idx,dist:startPick.dist,lap:0});
+      roundings.unshift({mark:"START",idx:startPick.idx,dist:startPick.dist,lap:0,lat:null,lon:null,tack:null});
     }
     const lastIdx=roundings[roundings.length-1].idx;
     const finishPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,lastIdx,pts.length-1);
     if(finishPick.idx>lastIdx){
-      roundings.push({mark:"FINISH",idx:finishPick.idx,dist:finishPick.dist,lap:roundings[roundings.length-1].lap});
+      roundings.push({mark:"FINISH",idx:finishPick.idx,dist:finishPick.dist,lap:roundings[roundings.length-1].lap,lat:null,lon:null,tack:null});
     }
   }
 
-  // Create legs between roundings
   for(let i=0;i<roundings.length-1;i++){
     const si=roundings[i].idx,ei=roundings[i+1].idx;
     const legPts=pts.slice(si,ei+1);
@@ -1266,8 +1271,6 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     const maxSpd=speeds.length?Math.max(...speeds):0;
     const dur=legPts[legPts.length-1].time-legPts[0].time;
     const eff=dist>0?(straightDist/dist*100):100;
-
-    // Determine leg bearing to classify as upwind/downwind/reach
     const legBearing=bear(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
 
     legs.push({
@@ -1277,10 +1280,125 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       distance:dist,straightDistance:straightDist,
       duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
       efficiency:eff,legBearing,
-      type:"leg", // Will be classified with wind data
+      type:"leg",
     });
   }
-  return legs;
+  return{legs,roundings};
+}
+
+/** Sum of |ΔCOG| between consecutive points (integrated turn magnitude, °). */
+function cumulativeTurnDeg(pts,i0,i1){
+  if(!pts||i1<=i0)return 0;
+  let s=0;
+  for(let i=i0;i<i1;i++){
+    const c0=pts[i].cog,c1=pts[i+1].cog;
+    if(Number.isFinite(c0)&&Number.isFinite(c1))s+=Math.abs(adiff(c0,c1));
+  }
+  return Math.round(s*10)/10;
+}
+
+function expandMarkRoundingZone(pts,peakIdx,mLat,mLon){
+  if(!pts?.length||peakIdx<0||peakIdx>=pts.length||mLat==null||mLon==null)return{z0:peakIdx,z1:peakIdx};
+  let z0=peakIdx,z1=peakIdx;
+  const tMid=pts[peakIdx].time;
+  const tMin=tMid-MARK_ROUND_MAX_SPAN_SEC/2;
+  const tMax=tMid+MARK_ROUND_MAX_SPAN_SEC/2;
+  while(z0>0&&pts[z0-1].time>=tMin&&hav(pts[z0-1].lat,pts[z0-1].lon,mLat,mLon)<=MARK_ROUND_ZONE_M)z0--;
+  while(z1<pts.length-1&&pts[z1+1].time<=tMax&&hav(pts[z1+1].lat,pts[z1+1].lon,mLat,mLon)<=MARK_ROUND_ZONE_M)z1++;
+  return{z0,z1};
+}
+
+function manoeuvreOverlapsZone(m,z0,z1){
+  if(!m?.preSegment||!m.postSegment)return false;
+  const a=m.preSegment.startIdx,b=m.postSegment.endIdx;
+  return b>=z0&&a<=z1;
+}
+
+function manoeuvreIntervalInZone(m,z0,z1){
+  const a=m.preSegment.startIdx,b=m.postSegment.endIdx;
+  return{lo:Math.max(z0,a),hi:Math.min(z1,b)};
+}
+
+function splitRoleAtMark(tIdx,peakIdx){
+  if(tIdx<peakIdx-2)return"before_closest";
+  if(tIdx>peakIdx+2)return"after_closest";
+  return"at_closest";
+}
+
+/**
+ * Per-mark rounding geometry + links to manoeuvres whose detection window overlaps the zone.
+ * START/FINISH rows are skipped (no mark lat/lon).
+ */
+function analyzeMarkRoundingDetails(pts,roundings,manoeuvreEvents){
+  if(!roundings?.length)return[];
+  const mans=Array.isArray(manoeuvreEvents)?manoeuvreEvents:[];
+  return roundings.map(r=>{
+    const isSF=r.mark==="START"||r.mark==="FINISH";
+    if(isSF||r.lat==null||r.lon==null||!Number.isFinite(r.lat)||!Number.isFinite(r.lon)){
+      return{raw:r,skipped:true};
+    }
+    const peak=r.idx;
+    const{z0,z1}=expandMarkRoundingZone(pts,peak,r.lat,r.lon);
+    const totalTurnInZoneDeg=cumulativeTurnDeg(pts,z0,z1);
+    const c0=pts[z0].cog,c1=pts[z1].cog;
+    const netBearingChangeDeg=Number.isFinite(c0)&&Number.isFinite(c1)?Math.round(Math.abs(adiff(c0,c1))*10)/10:0;
+    const durationSec=pts[z1].time-pts[z0].time;
+    const linkedManoeuvres=[];
+    for(const m of mans){
+      if(!manoeuvreOverlapsZone(m,z0,z1))continue;
+      const iv=manoeuvreIntervalInZone(m,z0,z1);
+      const manoeuvrePortionDeg=iv.hi>iv.lo?cumulativeTurnDeg(pts,iv.lo,iv.hi):0;
+      const tIdx=m.turnIdx??m.idx;
+      const markArcResidualDeg=Math.max(0,Math.round((totalTurnInZoneDeg-manoeuvrePortionDeg)*10)/10);
+      linkedManoeuvres.push({
+        type:m.type,turnIdx:tIdx,detectionIdx:m.idx,
+        manoeuvrePortionDeg,markArcResidualDeg,
+        splitRole:splitRoleAtMark(tIdx,peak),
+        detectionAngleDeg:Math.round(Number(m.ch)||0),
+      });
+    }
+    return{
+      mark:r.mark,lap:r.lap,roundTack:r.tack??null,
+      closestIdx:peak,closestDistM:r.dist,
+      zoneStartIdx:z0,zoneEndIdx:z1,
+      totalTurnInZoneDeg,netBearingChangeDeg,durationSec,
+      linkedManoeuvres,skipped:false,
+    };
+  });
+}
+
+function findBestMarkRoundingDetail(m,details){
+  if(!details?.length||!m?.preSegment)return null;
+  const tIdx=m.turnIdx??m.idx;
+  let best=null,bestScore=Infinity;
+  for(const d of details){
+    if(d.skipped||d.zoneStartIdx==null)continue;
+    const z0=d.zoneStartIdx,z1=d.zoneEndIdx;
+    if(tIdx<z0||tIdx>z1)continue;
+    if(!manoeuvreOverlapsZone(m,z0,z1))continue;
+    const sc=Math.abs(tIdx-d.closestIdx);
+    if(sc<bestScore){bestScore=sc;best=d;}
+  }
+  return best;
+}
+
+function buildMarkRoundingContext(pts,m,detail){
+  if(!detail||detail.skipped)return null;
+  const z0=detail.zoneStartIdx,z1=detail.zoneEndIdx;
+  const iv=manoeuvreIntervalInZone(m,z0,z1);
+  const manoeuvrePortionDeg=iv.hi>iv.lo?cumulativeTurnDeg(pts,iv.lo,iv.hi):0;
+  const tIdx=m.turnIdx??m.idx;
+  const markArcResidualDeg=Math.max(0,Math.round((detail.totalTurnInZoneDeg-manoeuvrePortionDeg)*10)/10);
+  return{
+    mark:detail.mark,lap:detail.lap,roundTack:detail.roundTack,
+    closestIdx:detail.closestIdx,zoneStartIdx:z0,zoneEndIdx:z1,
+    totalTurnInZoneDeg:detail.totalTurnInZoneDeg,
+    netBearingChangeDeg:detail.netBearingChangeDeg,
+    manoeuvrePortionDeg:Math.round(manoeuvrePortionDeg*10)/10,
+    markArcResidualDeg,
+    splitRole:splitRoleAtMark(tIdx,detail.closestIdx),
+    detectionAngleDeg:Math.round(Number(m.ch)||0),
+  };
 }
 
 function classifyLegs(legs,wd){
@@ -1497,11 +1615,22 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     };
   });
 
-  // Legs — use mark positions if available, otherwise detect from manoeuvres
-  let legs=[];
+  let legs=[],markRoundingDetailsAll=[];
   if(expandCourseMarks(preamble,markPositions||[],laps).length>=2){
-    legs=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine);
-    legs=classifyLegs(legs,wd);
+    const{legs:rawLegs,roundings}=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine);
+    legs=classifyLegs(rawLegs,wd);
+    markRoundingDetailsAll=analyzeMarkRoundingDetails(en,roundings,manoeuvreEvents);
+    const detailList=markRoundingDetailsAll.filter(d=>!d.skipped);
+    for(const tk of tacks){
+      const d=findBestMarkRoundingDetail(tk,detailList);
+      const ctx=buildMarkRoundingContext(en,tk,d);
+      if(ctx)tk.markRounding=ctx;
+    }
+    for(const g of gybes){
+      const d=findBestMarkRoundingDetail(g,detailList);
+      const ctx=buildMarkRoundingContext(en,g,d);
+      if(ctx)g.markRounding=ctx;
+    }
   }
 
   const hasMans=manoeuvreEvents.length>0;
@@ -1551,7 +1680,9 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
       windShiftRange:windStats.range,
       portStbdSplit:{port:portS,stbd:stbdS},
     },
-    tacks,gybes,legs,streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark,
+    tacks,gybes,legs,
+    markRoundingDetails:markRoundingDetailsAll.filter(d=>!d.skipped),
+    streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark,
   };
 }
 
@@ -1578,6 +1709,13 @@ function avgManAngle(arr){
   return Math.round(arr.reduce((s,m)=>s+Number(m.ch||0),0)/arr.length);
 }
 
+function formatMarkSplitRole(role){
+  if(role==="before_closest")return"Manoeuvre centre before closest approach to mark";
+  if(role==="after_closest")return"Manoeuvre centre after closest approach";
+  if(role==="at_closest")return"Manoeuvre overlaps closest approach (mark arc + sailing turn combined)";
+  return role||"";
+}
+
 function ManCard({m,index}){
   const qc=m.sideBef==="P"?C.port:m.sideBef==="S"?C.stbd:C.txM;
   const cx=m.crossing;
@@ -1598,6 +1736,12 @@ function ManCard({m,index}){
       <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
       <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"—"}</div>
       {exitHint&&<div style={{fontSize:10,color:C.txM,marginTop:2}}>{exitHint}</div>}
+      {m.markRounding&&<div style={{fontSize:10,color:C.gld,marginTop:6,lineHeight:1.5,borderTop:`1px solid ${C.bdr}`,paddingTop:6}}>
+        <span style={{fontWeight:700}}>Mark rounding</span> · {m.markRounding.mark}{m.markRounding.roundTack?` (${m.markRounding.roundTack})`:""} · lap {m.markRounding.lap}<br/>
+        <span style={{color:C.txD}}>{formatMarkSplitRole(m.markRounding.splitRole)}</span><br/>
+        <span style={{color:C.txM}}>Σ|ΔCOG| in zone {m.markRounding.totalTurnInZoneDeg}° · net bearing change {m.markRounding.netBearingChangeDeg}°</span><br/>
+        <span style={{color:C.txM}}>Turn in manoeuvre window {m.markRounding.manoeuvrePortionDeg}° · residual (mark arc est.) {m.markRounding.markArcResidualDeg}° · detected {m.type} Δ {m.markRounding.detectionAngleDeg}°</span>
+      </div>}
     </div>
     <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
   </div>);
@@ -2842,6 +2986,15 @@ function App(){
             <Stat label="Avg Tack" color={C.tack} value={a.tacks.filter(t=>Number.isFinite(t.q)).length?Math.round(a.tacks.filter(t=>Number.isFinite(t.q)).reduce((s,t)=>s+t.q,0)/a.tacks.filter(t=>Number.isFinite(t.q)).length):"—"} unit="%"/>
             <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="% vs ref"/>
           </div>
+          {a.markRoundingDetails?.length>0&&<div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Mark roundings</div>
+            <div style={{fontSize:9,color:C.txD,marginBottom:10,lineHeight:1.5}}>Zones: track within {MARK_ROUND_ZONE_M} m of the mark and {MARK_ROUND_MAX_SPAN_SEC} s centered on closest approach. Σ|ΔCOG| sums bearing steps in the zone. <strong>Residual</strong> on each manoeuvre card ≈ zone turn not covered by the tack/gybe detection window (mark arc and extra turning).</div>
+            {a.markRoundingDetails.map((d,i)=><div key={`mr-${i}`} style={{fontSize:11,padding:"8px 10px",borderRadius:8,background:`${C.bg}99`,border:`1px solid ${C.bdr}`,marginBottom:6,lineHeight:1.5}}>
+              <strong style={{color:C.gld}}>{d.mark}</strong> · lap {d.lap}{d.roundTack?` · ${d.roundTack} rounding`:""} · closest {d.closestDistM!=null?`${Math.round(d.closestDistM)} m`:"—"} · zone {d.durationSec!=null?`${d.durationSec.toFixed(0)} s`:"—"}<br/>
+              <span style={{color:C.txM}}>Σ|ΔCOG| {d.totalTurnInZoneDeg}° · net bearing Δ {d.netBearingChangeDeg}° · manoeuvres in zone: {d.linkedManoeuvres?.length||0}{d.linkedManoeuvres?.length?` (${d.linkedManoeuvres.map(l=>`${l.type} @${l.splitRole?.replace(/_/g," ")||""}`).join("; ")})`:""}</span>
+            </div>)}
+          </div>}
+
           {(()=>{
             const tPS=a.tacks.filter(t=>t.crossing==="P→S"),tSP=a.tacks.filter(t=>t.crossing==="S→P");
             const gPS=a.gybes.filter(g=>g.crossing==="P→S"),gSP=a.gybes.filter(g=>g.crossing==="S→P");

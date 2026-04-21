@@ -135,6 +135,8 @@ All analysis logic lives in `index.html` (Babel/React bundle). Important pieces:
 
 **Not implemented:** tack grouping (`buildTackGroups`) and intent labels (reactive / proactive / tactical). Each tack is scored on its own. See `TACK_ALGORITHM_SPEC.md` for the original spec and “deferred” sections.
 
+**Mark roundings:** `detectLegsFromMarks` returns sequential mark hits plus `analyzeMarkRoundingDetails` builds a time/distance zone around each closest approach. Integrated |ΔCOG| in the zone is split vs each overlapping tack/gybe detection window (`manoeuvrePortionDeg` vs `markArcResidualDeg`) and timing vs closest approach (`splitRole`: before / at / after). Exposed as `analysis.markRoundingDetails` and per-manoeuvre `markRounding`.
+
 - `detectLegsFromMarks(points, markPositions, laps, ...)` — Legs including START/FINISH when line defined
 
 ## WSC Data
