@@ -56,8 +56,8 @@ const CONFIG = {
   SUPABASE_ANON_KEY: "sb_publishable_Vwrc03E--KoLL5vujZJXvg_nW6ZRyhN",
 };
 const DETECTION_DEFAULTS={
-  tack:{minTurn:60,maxTurn:170,minSpeed:1.0,cooldownSec:4},
-  gybe:{minTurn:45,maxTurn:230,minSpeed:1.8,cooldownSec:7},
+  tack:{minTurn:60,maxTurn:170,minSpeed:1.0,cooldownSec:4,beforePts:4,afterPts:5},
+  gybe:{minTurn:45,maxTurn:230,minSpeed:1.8,cooldownSec:7,beforePts:6,afterPts:8},
 };
 const DEFAULT_SF_LINE_ENDS={
   endA:{lat:50.851722,lon:-1.309129},
@@ -331,9 +331,6 @@ function detectLineCrossings(pts,endA,endB){
   }
   return out;
 }
-
-/** Step for Track crop − / + buttons (seconds). */
-const CROP_TIME_STEP_SEC=5;
 
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
 function parseMarkSpec(row){
@@ -942,15 +939,19 @@ function applyDetectionSettings(manoeuvres,pts,det){
     if(m.type!=="tack"&&m.type!=="gybe")continue;
     const cfg=det[m.type];
     if(!cfg)continue;
-    const turn=Math.abs(Number(m.ch)||0);
-    if(turn<cfg.minTurn||turn>cfg.maxTurn)continue;
     const idx=Math.max(0,Math.min((pts?.length||1)-1,m.turnIdx??m.idx??0));
+    const bPts=Math.max(1,parseInt(cfg.beforePts??4,10));
+    const aPts=Math.max(1,parseInt(cfg.afterPts??5,10));
+    const bIdx=Math.max(0,idx-bPts),aIdx=Math.min((pts?.length||1)-1,idx+aPts);
+    const turnRef=(pts?.[bIdx]&&pts?.[aIdx])?Math.abs(adiff(pts[bIdx].cog,pts[aIdx].cog)):Math.abs(Number(m.ch)||0);
+    const turn=turnRef;
+    if(turn<cfg.minTurn||turn>cfg.maxTurn)continue;
     const speed=ms2k(pts?.[idx]?.ss ?? m.preRefSpeed ?? m.preSpeed ?? 0);
     if(speed<cfg.minSpeed)continue;
     const t=Number(m.time ?? pts?.[idx]?.time ?? 0);
     if(!Number.isFinite(t))continue;
     if(t-lastByType[m.type]<cfg.cooldownSec)continue;
-    out.push(m);
+    out.push({...m,ch:turn,cogB:pts?.[bIdx]?.cog??m.cogB,cogA:pts?.[aIdx]?.cog??m.cogA});
     lastByType[m.type]=t;
   }
   return out;
@@ -1706,6 +1707,8 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
       if(trackPoints&&trackPoints.length>1){
         map.addSource("track",{type:"geojson",data:{type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}}});
         map.addLayer({id:"track-line",type:"line",source:"track",paint:{"line-color":C.trk,"line-width":3,"line-opacity":0.8}});
+        map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
+        map.addLayer({id:"track-points",type:"circle",source:"track-points",paint:{"circle-radius":1.8,"circle-color":"#d9fff7","circle-opacity":0.72}});
         const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
         map.fitBounds([[Math.min(...lons)-0.005,Math.min(...lats)-0.003],[Math.max(...lons)+0.005,Math.max(...lats)+0.003]],{padding:40});
       }
@@ -1831,6 +1834,8 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
     if(trackPoints&&trackPoints.length>1){
       const src=map.getSource("track");
       if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:trackPoints.map(p=>[p.lon,p.lat])}});
+      const psrc=map.getSource("track-points");
+      if(psrc)psrc.setData({type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))});
     }
     if(courseMarks&&courseMarks.length>1){
       const src=map.getSource("course");
@@ -2144,16 +2149,23 @@ function App(){
 
   const markOrderLap1=useMemo(()=>expandCourseMarks(coursePreambleSeq,courseMarkSeq,1),[coursePreambleSeq,courseMarkSeq]);
 
-  /** Live tack/gybe positions for course-setup map (same engine as full analysis). */
-  const setupMapAnalysis=useMemo(()=>{
+  /** Full-track analysis used for start/finish and auto-crop detection. */
+  const fullTrackAnalysis=useMemo(()=>{
     if(!rawPoints||rawPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
     return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
   },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
 
+  /** Cropped analysis used for displayed manoeuvres/statistics. */
+  const setupMapAnalysis=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<20)return null;
+    const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
+
   const startFinishStats=useMemo(()=>{
-    if(!rawPoints||rawPoints.length<2||!sfLineEnds||!setupMapAnalysis)return null;
-    const pts=setupMapAnalysis.points||rawPoints;
+    if(!rawPoints||rawPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
+    const pts=fullTrackAnalysis.points||rawPoints;
     const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
     const startPt=startIdx>=0?pts[startIdx]:null;
     const startDist=startPt?distPointToSegmentM(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
@@ -2167,7 +2179,7 @@ function App(){
       startOnCourseSide=markSide===0?false:(markSide*boatSide>=0);
       signedStartDist=startOnCourseSide?-startDist:startDist;
     }
-    const legs=setupMapAnalysis.legs||[];
+    const legs=fullTrackAnalysis.legs||[];
     const startLeg=legs.find(l=>l.from==="START")||null;
     const finishLeg=[...legs].reverse().find(l=>l.to==="FINISH")||null;
     let startCross=null,finishCross=null;
@@ -2180,7 +2192,7 @@ function App(){
       if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
     return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
-  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,setupMapAnalysis]);
+  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis]);
 
   useEffect(()=>{
     if(!rawPoints||rawPoints.length<2||!startFinishStats)return;
@@ -2567,7 +2579,7 @@ function App(){
               const col=type==="tack"?C.tack:C.gybe;
               return(<div key={type} style={{border:`1px solid ${C.bdr}`,borderRadius:8,padding:10}}>
                 <div style={{fontSize:12,fontWeight:700,color:col,textTransform:"capitalize",marginBottom:8}}>{type}</div>
-                {[["Min turn (deg)","minTurn",20,240,1],["Max turn (deg)","maxTurn",40,280,1],["Min speed (kts)","minSpeed",0.2,8,0.1],["Spacing (sec)","cooldownSec",1,20,1]].map(([label,key,min,max,step])=>(
+                {[["Min turn (deg)","minTurn",20,240,1],["Max turn (deg)","maxTurn",40,280,1],["Min speed (kts)","minSpeed",0.2,8,0.1],["Spacing (sec)","cooldownSec",1,20,1],["Before pts","beforePts",1,20,1],["After pts","afterPts",1,24,1]].map(([label,key,min,max,step])=>(
                   <div key={key} style={{marginBottom:6}}>
                     <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.txM,marginBottom:2}}><span>{label}</span><span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{cfg[key]}</span></div>
                     <input
