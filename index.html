@@ -297,6 +297,23 @@ function interpolatePointByTime(pts,targetTime){
   return null;
 }
 
+function clockSecondsFromUnix(unixSec){
+  const d=new Date(unixSec*1000);
+  return d.getHours()*3600+d.getMinutes()*60+d.getSeconds();
+}
+
+function nearestPointIndexByClockTime(pts,targetClockSec){
+  if(!pts?.length)return-1;
+  let bestIdx=0,bestDiff=Infinity;
+  for(let i=0;i<pts.length;i++){
+    const s=clockSecondsFromUnix(pts[i].time);
+    const d=Math.abs(s-targetClockSec);
+    const diff=Math.min(d,86400-d);
+    if(diff<bestDiff){bestDiff=diff;bestIdx=i;}
+  }
+  return bestIdx;
+}
+
 function detectLineCrossings(pts,endA,endB){
   const out=[];
   if(!pts||pts.length<2||!endA||!endB)return out;
@@ -2122,10 +2139,10 @@ function App(){
   },[raceStartText]);
 
   const startFinishStats=useMemo(()=>{
-    if(!croppedPoints||croppedPoints.length<2||!sfLineEnds)return null;
-    const t0=croppedPoints[0].time;
-    const startAbs=t0+raceStartSecParsed;
-    const startPt=interpolatePointByTime(croppedPoints,startAbs);
+    if(!croppedPoints||croppedPoints.length<2||!sfLineEnds||!setupMapAnalysis)return null;
+    const pts=setupMapAnalysis.points||croppedPoints;
+    const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
+    const startPt=startIdx>=0?pts[startIdx]:null;
     const startDist=startPt?distPointToSegmentM(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
     let signedStartDist=null,startOnCourseSide=null;
     const firstMarkSpec=WSC_COURSES[courseLetter]?.marks?.[0];
@@ -2137,11 +2154,20 @@ function App(){
       startOnCourseSide=markSide===0?false:(markSide*boatSide>=0);
       signedStartDist=startOnCourseSide?-startDist:startDist;
     }
-    const crosses=detectLineCrossings(croppedPoints,sfLineEnds.endA,sfLineEnds.endB);
-    const startCross=crosses.find(c=>c.time>=startAbs)||null;
-    const finishCross=startCross?crosses.find(c=>c.time>=startCross.time+600&&c.direction!==startCross.direction)||null:null;
-    return{startAbs,startDist,signedStartDist,startOnCourseSide,startCross,finishCross};
-  },[croppedPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks]);
+    const legs=setupMapAnalysis.legs||[];
+    const startLeg=legs.find(l=>l.from==="START")||null;
+    const finishLeg=[...legs].reverse().find(l=>l.to==="FINISH")||null;
+    let startCross=null,finishCross=null;
+    if(startLeg&&startLeg.startIdx!=null&&startLeg.endIdx!=null){
+      const pick=closestIndexToLine(pts,sfLineEnds.endA,sfLineEnds.endB,startLeg.startIdx,startLeg.endIdx);
+      if(pick.idx>=0&&pts[pick.idx])startCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
+    }
+    if(finishLeg&&finishLeg.startIdx!=null&&finishLeg.endIdx!=null){
+      const pick=closestIndexToLine(pts,sfLineEnds.endA,sfLineEnds.endB,finishLeg.startIdx,finishLeg.endIdx);
+      if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
+    }
+    return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
+  },[croppedPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,setupMapAnalysis]);
 
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
@@ -2594,12 +2620,11 @@ function App(){
         <div style={{background:C.card,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Start / Finish line (drag SFA/SFB on map)</div>
           {sfLineEnds&&<div style={{fontSize:10,color:C.txD,lineHeight:1.55}}>
-            SFA: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endA.lat.toFixed(6)}, {sfLineEnds.endA.lon.toFixed(6)}</span><br/>
-            SFB: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endB.lat.toFixed(6)}, {sfLineEnds.endB.lon.toFixed(6)}</span><br/>
             Start reference: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{formatHMS(raceStartSecParsed)}</span> after first GPS point<br/>
+            Track point time nearest start time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{startFinishStats?.startPointTime?formatWallClock(startFinishStats.startPointTime):"—"}</span><br/>
             Distance from line at start time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:(startFinishStats?.startOnCourseSide===true?C.port:startFinishStats?.startOnCourseSide===false?C.stbd:C.acc)}}>{Number.isFinite(startFinishStats?.signedStartDist)?`${Math.round(startFinishStats.signedStartDist)} m`:(Number.isFinite(startFinishStats?.startDist)?`${Math.round(startFinishStats.startDist)} m`:"—")}</span><br/>
-            Start crossing: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.startCross?`${formatWallClock(startFinishStats.startCross.time)||"—"} (${startFinishStats.startCross.direction})`:"Not found after start time"}</span><br/>
-            Finish time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.finishCross?`${formatWallClock(startFinishStats.finishCross.time)||"—"} (${startFinishStats.finishCross.direction})`:"No opposite crossing >10 min after start"}</span>
+            Start crossing (closest point on START → Mark 1 leg): <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.startCross?`${formatWallClock(startFinishStats.startCross.time)||"—"}`:"Start leg not found"}</span><br/>
+            Finish time (closest point on final Mark → FINISH leg): <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.finishCross?`${formatWallClock(startFinishStats.finishCross.time)||"—"}`:"Finish leg not found"}</span>
           </div>}
         </div>
 
