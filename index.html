@@ -55,6 +55,10 @@ const CONFIG = {
   SUPABASE_URL: "https://kqabecigvwvlnuyvpokc.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_Vwrc03E--KoLL5vujZJXvg_nW6ZRyhN",
 };
+const DETECTION_DEFAULTS={
+  tack:{minTurn:60,maxTurn:170,minSpeed:1.0,cooldownSec:4},
+  gybe:{minTurn:45,maxTurn:230,minSpeed:1.8,cooldownSec:7},
+};
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
 /** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
@@ -868,6 +872,28 @@ function mergeManoeuvresByTime(segMans,early){
   return merged.sort((a,b)=>a.time-b.time);
 }
 
+function applyDetectionSettings(manoeuvres,pts,det){
+  if(!Array.isArray(manoeuvres)||!manoeuvres.length)return[];
+  const out=[];
+  const lastByType={tack:-Infinity,gybe:-Infinity};
+  for(const m of manoeuvres){
+    if(m.type!=="tack"&&m.type!=="gybe")continue;
+    const cfg=det[m.type];
+    if(!cfg)continue;
+    const turn=Math.abs(Number(m.ch)||0);
+    if(turn<cfg.minTurn||turn>cfg.maxTurn)continue;
+    const idx=Math.max(0,Math.min((pts?.length||1)-1,m.turnIdx??m.idx??0));
+    const speed=ms2k(pts?.[idx]?.ss ?? m.preRefSpeed ?? m.preSpeed ?? 0);
+    if(speed<cfg.minSpeed)continue;
+    const t=Number(m.time ?? pts?.[idx]?.time ?? 0);
+    if(!Number.isFinite(t))continue;
+    if(t-lastByType[m.type]<cfg.cooldownSec)continue;
+    out.push(m);
+    lastByType[m.type]=t;
+  }
+  return out;
+}
+
 function buildTackGroups(manoeuvres){
   if(!manoeuvres?.length)return[];
   const groups=[];
@@ -1374,7 +1400,7 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
-function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null){
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
   const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
@@ -1394,7 +1420,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind,en);
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
-  const manoeuvreEvents=manoeuvres.filter(m=>m.type==="tack"||m.type==="gybe");
+  const manoeuvreEvents=applyDetectionSettings(manoeuvres,en,detSettings);
   const tackGroups=buildTackGroups(manoeuvreEvents);
   const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
   const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
@@ -1444,15 +1470,20 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     legs=classifyLegs(legs,wd);
   }
 
+  const hasMans=manoeuvreEvents.length>0;
+  const vmgMode=hasMans?"magnitude":"targeted";
+
   // Compute VMG for each leg
   legs=legs.map(l=>{
     const legPts=en.slice(l.startIdx,l.endIdx+1);
+    const targetBearing=l.type==="upwind"?wd:l.type==="downwind"?((wd+180)%360):l.legBearing;
     const vmgs=legPts.map(p=>{
-      const r=((p.cog-wd+360)%360),va=r>180?360-r:r;
-      return ms2k(p.ss||0)*Math.cos(va*D);
+      const r=((p.cog-targetBearing+360)%360),va=r>180?360-r:r;
+      const signed=ms2k(p.ss||0)*Math.cos(va*D);
+      return vmgMode==="magnitude"?Math.abs(signed):signed;
     });
-    const avgVMG=vmgs.length?Math.abs(vmgs.reduce((a,b)=>a+b,0)/vmgs.length):0;
-    return{...l,avgVMG};
+    const avgVMG=vmgs.length?vmgs.reduce((a,b)=>a+b,0)/vmgs.length:0;
+    return{...l,avgVMG,vmgTarget:Math.round(targetBearing)};
   });
 
   const streaks={};
@@ -1478,6 +1509,8 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     windEst,
     windTrace,
     windStats,
+    vmgMode,
+    detSettings,
     stableSegments,
     baselines,
     tackGroups,
@@ -1775,6 +1808,7 @@ function App(){
   const [cropDurationText,setCropDurationText]=useState("");
   const [sfLineEndAText,setSfLineEndAText]=useState("");
   const [sfLineEndBText,setSfLineEndBText]=useState("");
+  const [detSettings,setDetSettings]=useState(DETECTION_DEFAULTS);
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
@@ -2048,15 +2082,15 @@ function App(){
   const setupMapAnalysis=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps]);
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings]);
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
     if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
     setAnalysis(result);
     if(result&&windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
@@ -2098,6 +2132,7 @@ function App(){
     cropDurationSecParsed,
     sfLineEndAText,
     sfLineEndBText,
+    detSettings,
   ]);
 
   const saveCourseSetupOnly = useCallback(async () => {
@@ -2156,10 +2191,10 @@ function App(){
     if(!analysis||!croppedPoints)return analysis;
     if(windOvr!==null&&windOvr!==analysis.windDir){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq);
+      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -2456,6 +2491,42 @@ function App(){
           {(sfLineEndAText.trim()||sfLineEndBText.trim())&&!customSfEnds&&<div style={{fontSize:10,color:"#ff8a65",marginTop:8}}>Could not parse both ends — check format (two numbers per field).</div>}
         </div>
 
+        <div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack / Gybe detection</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10}}>
+            {["tack","gybe"].map(type=>{
+              const cfg=detSettings[type];
+              const col=type==="tack"?C.tack:C.gybe;
+              return(<div key={type} style={{border:`1px solid ${C.bdr}`,borderRadius:8,padding:10}}>
+                <div style={{fontSize:12,fontWeight:700,color:col,textTransform:"capitalize",marginBottom:8}}>{type}</div>
+                {[["Min turn (deg)","minTurn",20,240,1],["Max turn (deg)","maxTurn",40,280,1],["Min speed (kts)","minSpeed",0.2,8,0.1],["Spacing (sec)","cooldownSec",1,20,1]].map(([label,key,min,max,step])=>(
+                  <div key={key} style={{marginBottom:6}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.txM,marginBottom:2}}><span>{label}</span><span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{cfg[key]}</span></div>
+                    <input
+                      type="range"
+                      min={min}
+                      max={max}
+                      step={step}
+                      value={cfg[key]}
+                      onChange={e=>{
+                        const value=step===1?parseInt(e.target.value,10):parseFloat(e.target.value);
+                        setDetSettings(prev=>({...prev,[type]:{...prev[type],[key]:value}}));
+                      }}
+                      style={{width:"100%"}}
+                    />
+                  </div>
+                ))}
+              </div>);
+            })}
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
+            <button onClick={()=>setDetSettings(DETECTION_DEFAULTS)} style={{...btn("transparent",C.txM,C.bdr),padding:"7px 10px",fontSize:11}}>
+              Reset defaults
+            </button>
+          </div>
+          <div style={{fontSize:10,color:C.txD,marginTop:6}}>Defaults: Tack min turn 60°, Gybe min turn 45°. Tack spacing default is 4s to capture close tacks.</div>
+        </div>
+
         {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:11,color:C.txM,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <strong style={{color:C.txt}}>START/FINISH</strong>{customSfEnds?" (custom ends)":" (WSC)"}: {customSfEnds?"white dashed line = your A–B.":"white dashed + teal glow (perpendicular to wind FROM)."} Shortest gap from track to line ~<strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track to closest approach <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong> · first GPS <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{formatWallClock(croppedPoints[0].time)||"—"}</strong> local (Unix seconds in file; crop times are still elapsed from first point).
         </div>}
@@ -2704,6 +2775,9 @@ function App(){
             {a.windEst&&<div style={{marginTop:8,fontSize:10,color:C.txD,lineHeight:1.6}}>
               Auto estimate: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)
             </div>}
+            <div style={{marginTop:8,fontSize:10,color:C.txD,lineHeight:1.6}}>
+              Leg VMG mode: <span style={{color:C.txt}}>{a.vmgMode==="magnitude"?"Magnitude (manoeuvres present)":"Targeted signed (no manoeuvres found)"}</span>
+            </div>
           </div>
 
           {(()=>{
