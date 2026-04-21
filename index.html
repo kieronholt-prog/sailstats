@@ -1228,8 +1228,8 @@ const MARK_ROUND_MAX_SPAN_SEC=5;
 /** If further than this from mark and COG ≈ port/stbd baseline → normal track (not orange rounding). */
 const MARK_ROUND_NORMAL_MIN_DIST_M=5;
 const MARK_ROUND_SAILING_COG_TOL_DEG=10;
-/** Tack/gybe turn within this distance (m) of any course mark → mark manoeuvre (excluded from stats & leg VMG mode). */
-const MARK_MANOEUVRE_AT_MARK_M=5;
+/** Closest point on manoeuvre window (GPS samples) within this distance (m) of any course mark → mark manoeuvre (excluded from stats & leg VMG mode). */
+const MARK_MANOEUVRE_AT_MARK_M=10;
 /** Tack/gybe turn centre within this many GPS indices of a detected mark-rounding hit → excluded from racing stats (orange badge). */
 const MARK_MANOEUVRE_NEAR_ROUNDING_PTS=4;
 
@@ -1249,6 +1249,28 @@ function nearestCourseMarkM(lat,lon,locList){
     if(d<best){best=d;bestN=x.name;}
   }
   return{dist:best,name:bestN};
+}
+
+/** Minimum distance from any GPS sample in the manoeuvre detection window to the nearest course mark. */
+function minDistManoeuvreWindowToCourseMarksM(pts,m,det,locList){
+  if(!pts?.length||!locList?.length||!m?.type||!det?.[m.type]){
+    const idx=Math.max(0,Math.min((pts?.length||1)-1,m?.turnIdx??m?.idx??0));
+    const p=pts?.[idx];
+    return p?nearestCourseMarkM(p.lat,p.lon,locList):{dist:Infinity,name:null};
+  }
+  const cfg=det[m.type];
+  const idx=Math.max(0,Math.min(pts.length-1,m.turnIdx??m.idx??0));
+  const bPts=Math.max(1,parseInt(cfg.beforePts??4,10));
+  const aPts=Math.max(1,parseInt(cfg.afterPts??5,10));
+  const bIdx=Math.max(0,idx-bPts),aIdx=Math.min(pts.length-1,idx+aPts);
+  let bestD=Infinity,bestN=null;
+  for(let i=bIdx;i<=aIdx;i++){
+    const pt=pts[i];
+    if(!pt)continue;
+    const nm=nearestCourseMarkM(pt.lat,pt.lon,locList);
+    if(nm.dist<bestD){bestD=nm.dist;bestN=nm.name;}
+  }
+  return{dist:bestD,name:bestN};
 }
 function isNearBaselineCOG(cog,portCOG,stbdCOG,tolDeg){
   if(!Number.isFinite(cog)||!Number.isFinite(portCOG)||!Number.isFinite(stbdCOG)||!Number.isFinite(tolDeg))return false;
@@ -1483,15 +1505,26 @@ function buildMarkRoundingContext(pts,m,detail){
   };
 }
 
-function classifyLegs(legs,wd){
+/** True if a racing (non–mark-manoeuvre) gybe’s turn lies on this leg. */
+function racingGybeIntersectsLeg(leg,g){
+  if(!g||g.type!=="gybe"||g.excludeFromStatsAndVMG)return false;
+  const ti=g.turnIdx??g.idx;
+  if(!Number.isFinite(ti)||!Number.isFinite(leg.startIdx)||!Number.isFinite(leg.endIdx))return false;
+  return ti>=leg.startIdx&&ti<=leg.endIdx;
+}
+
+function classifyLegs(legs,wd,gybeEvents=null){
   return legs.map(l=>{
     const rel=((l.legBearing-wd+360)%360);
     let type;
     if(rel<60||rel>300)type="upwind";
-    else if(rel>120&&rel<240)type="downwind";
+    else if(rel>120&&rel<240){
+      type="downwind";
+      const hasRacingGybe=(gybeEvents||[]).some(g=>racingGybeIntersectsLeg(l,g));
+      if(!hasRacingGybe)type="reach";
+    }
     else type="reach";
 
-    // Calculate VMG for classified legs using stored indices
     return{...l,type};
   });
 }
@@ -1677,8 +1710,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const roundingIdxs=legDetection?.roundings?.map(r=>r.idx).filter(i=>Number.isFinite(i)&&i>=0)??[];
   for(const m of manoeuvreEvents){
     const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
-    const p=en[ti];
-    const nm=nearestCourseMarkM(p.lat,p.lon,markLocList);
+    const nm=minDistManoeuvreWindowToCourseMarksM(en,m,detSettings,markLocList);
     m.nearestMarkDistM=nm.dist;
     m.nearestMarkName=nm.name;
     const excludeMarkRadius=Number.isFinite(nm.dist)&&nm.dist<=MARK_MANOEUVRE_AT_MARK_M;
@@ -1725,7 +1757,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   let legs=[],markRoundingDetailsAll=[];
   if(legDetection){
     const{legs:rawLegs,roundings}=legDetection;
-    legs=classifyLegs(rawLegs,wd);
+    legs=classifyLegs(rawLegs,wd,manoeuvreEvents.filter(m=>m.type==="gybe"));
     markRoundingDetailsAll=analyzeMarkRoundingDetails(en,roundings,manoeuvreEvents);
     const detailList=markRoundingDetailsAll.filter(d=>!d.skipped);
     for(const tk of tacks){
