@@ -519,6 +519,18 @@ async function fetchStreams(activityId){
   return r.json();
 }
 
+/** Deep clone for JSONB (full analysis for file uploads). */
+function serializableAnalysisSnapshot(results){
+  if(!results||typeof results!=="object")return null;
+  try{return JSON.parse(JSON.stringify(results));}
+  catch(_){return null;}
+}
+
+function unknownAnalysisSnapshotColumn(err){
+  const s=JSON.stringify(err||{}).toLowerCase();
+  return s.includes("analysis_snapshot")&&(s.includes("column")||s.includes("schema")||s.includes("could not find")||s.includes("does not exist"));
+}
+
 async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
   const prev = await loadAnalysisRow(stravaId, activityId);
   const csPrev = prev?.course_setup && typeof prev.course_setup === "object" ? prev.course_setup : {};
@@ -530,7 +542,9 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     sfLineEndAText: courseSetup.sfLineEndAText,
     sfLineEndBText: courseSetup.sfLineEndBText,
   });
-  return supabase.upsert("analyses", {
+  const isFile=String(activityId).startsWith("file-");
+  const snap=isFile?serializableAnalysisSnapshot(results):null;
+  const baseRow={
     strava_id: stravaId,
     activity_id: String(activityId),
     activity_name: activityName,
@@ -545,7 +559,15 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null, excluded: !!g.excludeFromStatsAndVMG, nearestMark: g.nearestMarkName ?? null })),
     leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
     updated_at: new Date().toISOString(),
-  }, "strava_id,activity_id");
+  };
+  if(snap)baseRow.analysis_snapshot=snap;
+  const tryUpsert=async(row)=>supabase.upsert("analyses",row,"strava_id,activity_id");
+  let data=await tryUpsert(baseRow);
+  if(snap&&supabaseFailed(data)&&unknownAnalysisSnapshotColumn(data)){
+    const{analysis_snapshot:_drop,...fallback}=baseRow;
+    data=await tryUpsert(fallback);
+  }
+  return data;
 }
 
 async function loadAnalyses(stravaId) {
@@ -2241,6 +2263,7 @@ function App(){
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
+  const fileRefSavedSummary=useRef(null);
 
   const applyWorkerSession=useCallback((d)=>{
     if(!d||!d.ok||!d.supabase_access_token)return false;
@@ -2762,6 +2785,37 @@ function App(){
     sfLineEndBText,
   ]);
 
+  const openAnalysisFromSavedRow=useCallback((row)=>{
+    if(!row?.analysis_snapshot||typeof row.analysis_snapshot!=="object"){
+      alert("Full analysis is not stored for this activity yet. Run Supabase migration (analysis_snapshot column) if needed, then open the GPX/FIT from Upload and run analysis once more to save charts and map.");
+      return false;
+    }
+    const snap=row.analysis_snapshot;
+    const pts=snap.points;
+    if(!Array.isArray(pts)||pts.length<2){
+      alert("Saved analysis is missing track points. Upload the file again and run analysis.");
+      return false;
+    }
+    setActId(String(row.activity_id));
+    setActName(row.activity_name&&String(row.activity_name).trim()||"Uploaded track");
+    setActDate(row.activity_date||row.updated_at||"");
+    setCourseLetter(row.course_letter?String(row.course_letter):"");
+    setLaps(row.laps!=null?Math.max(1,parseInt(row.laps,10)||1):1);
+    setMarkOverrides(row.mark_overrides&&typeof row.mark_overrides==="object"?row.mark_overrides:{});
+    if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
+    else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
+    applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
+    applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
+    if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
+    setRawPoints(pts);
+    setCroppedPoints(pts);
+    setAnalysis(snap);
+    setTab("overview");
+    setView("analysis");
+    setSavedSummaryId(null);
+    return true;
+  },[]);
+
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
     if(!analysis||!croppedPoints)return analysis;
@@ -2948,7 +3002,10 @@ function App(){
                 ):(
                   <button type="button" onClick={()=>{
                     if(compareMode){toggleComparePick(act.id);return;}
-                    if(act.__fromSupabaseOnly){setSavedSummaryId(String(act.id));setView("saved-summary");return;}
+                    if(act.__fromSupabaseOnly){
+                      if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;
+                      setSavedSummaryId(String(act.id));setView("saved-summary");return;
+                    }
                     analyseStrava(act);
                   }} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
                     <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
@@ -3001,7 +3058,12 @@ function App(){
       </div>
       <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px 40px"}}>
         <div style={{fontSize:16,fontWeight:700,color:C.txt,marginBottom:8}}>{title}</div>
-        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>GPS files are not stored in the cloud. To change course setup or re-run analysis, use <strong>Upload</strong> on the home screen with the same GPX/FIT file. This page shows the last stats saved to your account.</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:14,alignItems:"center"}}>
+          {r?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r)} style={{...btn(C.acc,"#0a1628"),padding:"10px 18px",fontSize:13}}>Open full analysis</button>}
+          <button type="button" onClick={()=>fileRefSavedSummary.current?.click()} style={{...btn("transparent",C.acc,C.acc),padding:"10px 18px",fontSize:12,border:`1px solid ${C.acc}`}}>Upload GPX/FIT again</button>
+          <input ref={fileRefSavedSummary} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
+        </div>
+        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Re-opening charts and map needs a stored analysis snapshot (saved automatically for file uploads after you run analysis). To change course setup from scratch, upload the same file from the home screen.</div>
         {!r&&<div style={{color:C.txM,padding:20}}>Loading…</div>}
         {r&&<div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
           <table style={{width:"100%",borderCollapse:"collapse"}}>
@@ -3065,7 +3127,11 @@ function App(){
         <div style={{width:72}}/>
       </div>
       <div style={{maxWidth:720,margin:"0 auto",padding:"20px 14px 40px"}}>
-        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Side-by-side fields come from the last analysis saved to Supabase (course setup, wind, and computed stats). Open an activity and run analysis to refresh its row.</div>
+        <div style={{fontSize:11,color:C.txD,marginBottom:12,lineHeight:1.55}}>Side-by-side fields come from the last analysis saved to Supabase (course setup, wind, and computed stats). Open an activity and run analysis to refresh its row.</div>
+        {(r0?.analysis_snapshot||r1?.analysis_snapshot)&&<div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:16}}>
+          {r0?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r0)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:12}}>Open full analysis · left</button>}
+          {r1?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r1)} style={{...btn(`${C.gld}22`,C.gld,C.gld),padding:"8px 14px",fontSize:12}}>Open full analysis · right</button>}
+        </div>}
         <div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
             <thead>

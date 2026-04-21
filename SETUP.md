@@ -53,6 +53,9 @@ CREATE TABLE analyses (
 -- If `analyses` already existed without this column, run once (safe if column exists):
 ALTER TABLE analyses ADD COLUMN IF NOT EXISTS course_setup JSONB DEFAULT '{}'::jsonb;
 
+-- Full analysis payload for GPX/FIT uploads (so charts/map reopen from the cloud). Safe if already present:
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS analysis_snapshot JSONB;
+
 -- Enable Row Level Security
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE analyses ENABLE ROW LEVEL SECURITY;
