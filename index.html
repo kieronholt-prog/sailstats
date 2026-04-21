@@ -2022,32 +2022,33 @@ function App(){
     return{endA:a,endB:b};
   },[sfLineEndAText,sfLineEndBText]);
 
+  const sfLineEnds=useMemo(()=>{
+    if(customSfEnds)return customSfEnds;
+    const sf=WSC_MARKS["START/FINISH"];
+    if(!sf)return null;
+    const windFrom=windOvr!==null?windOvr:(analysis?.windDir??0);
+    const half=150;
+    const endA=destinationPoint(sf.lat,sf.lon,windFrom+90,half);
+    const endB=destinationPoint(sf.lat,sf.lon,windFrom-90,half);
+    return{endA,endB};
+  },[customSfEnds,windOvr,analysis]);
+
   /** WSC committee line: custom A–B, else mark + perpendicular line on map. */
   const mapMarksWithStart=useMemo(()=>{
-    if(customSfEnds){
-      return{
-        ...effectiveMarks,
-        SFA:{lat:customSfEnds.endA.lat,lon:customSfEnds.endA.lon,fixed:true,desc:"Committee line end A",name:"SFA"},
-        SFB:{lat:customSfEnds.endB.lat,lon:customSfEnds.endB.lon,fixed:true,desc:"Committee line end B",name:"SFB"},
-      };
-    }
-    const sf=WSC_MARKS["START/FINISH"];
-    if(!sf)return effectiveMarks;
+    if(!sfLineEnds)return effectiveMarks;
     return{
       ...effectiveMarks,
-      "START/FINISH":{lat:sf.lat,lon:sf.lon,fixed:true,desc:sf.desc||"Committee line",name:"START/FINISH"},
+      SFA:{lat:sfLineEnds.endA.lat,lon:sfLineEnds.endA.lon,fixed:false,desc:"Committee line end A (drag)",name:"SFA"},
+      SFB:{lat:sfLineEnds.endB.lat,lon:sfLineEnds.endB.lon,fixed:false,desc:"Committee line end B (drag)",name:"SFB"},
     };
-  },[effectiveMarks,customSfEnds]);
+  },[effectiveMarks,sfLineEnds]);
 
   /** Distance from track to committee line (segment if custom, else mark point). */
   const distToStartLine=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<2)return null;
-    if(customSfEnds)
-      return distanceAlongTrackToSegment(croppedPoints,customSfEnds.endA.lat,customSfEnds.endA.lon,customSfEnds.endB.lat,customSfEnds.endB.lon);
-    const sf=WSC_MARKS["START/FINISH"];
-    if(!sf)return null;
-    return distanceAlongTrackToNearest(croppedPoints,sf.lat,sf.lon);
-  },[croppedPoints,customSfEnds]);
+    if(!sfLineEnds)return null;
+    return distanceAlongTrackToSegment(croppedPoints,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
+  },[croppedPoints,sfLineEnds]);
 
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
@@ -2218,14 +2219,20 @@ function App(){
   const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
 
   const courseMapStartFinish=useMemo(()=>{
-    if(customSfEnds)return{mode:"ends",endA:customSfEnds.endA,endB:customSfEnds.endB};
-    const sf=WSC_MARKS["START/FINISH"];
-    if(!sf)return null;
-    return{mode:"perp",lat:sf.lat,lon:sf.lon,windFromDeg:effWind,halfLengthM:150};
-  },[customSfEnds,effWind]);
+    if(!sfLineEnds)return null;
+    return{mode:"ends",endA:sfLineEnds.endA,endB:sfLineEnds.endB};
+  },[sfLineEnds]);
 
   // Handle mark drag
   const onMarkDrag=useCallback((name,lat,lng)=>{
+    if(name==="SFA"){
+      setSfLineEndAText(`${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+      return;
+    }
+    if(name==="SFB"){
+      setSfLineEndBText(`${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+      return;
+    }
     setMarkOverrides(prev=>({...prev,[name]:{lat,lon:lng}}));
   },[]);
 
@@ -2489,6 +2496,10 @@ function App(){
           </div>
           {customSfEnds&&<div style={{fontSize:10,color:C.acc,marginTop:8}}>Using custom line (SFA → SFB on map).</div>}
           {(sfLineEndAText.trim()||sfLineEndBText.trim())&&!customSfEnds&&<div style={{fontSize:10,color:"#ff8a65",marginTop:8}}>Could not parse both ends — check format (two numbers per field).</div>}
+          {sfLineEnds&&<div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
+            SFA: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endA.lat.toFixed(6)}, {sfLineEnds.endA.lon.toFixed(6)}</span><br/>
+            SFB: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endB.lat.toFixed(6)}, {sfLineEnds.endB.lon.toFixed(6)}</span>
+          </div>}
         </div>
 
         <div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
