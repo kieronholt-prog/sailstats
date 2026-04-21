@@ -2,7 +2,9 @@
 
 ## Overview
 
-Rewrite the SailStats analysis engine with a fundamentally improved approach to tack/gybe detection, wind direction estimation, and manoeuvre quality scoring. The current algorithm uses a fixed wind direction and simple COG threshold crossing. The new algorithm derives wind direction continuously from the sailing data itself, detects manoeuvres from track geometry without needing a wind input, scores tack quality based on exit performance rather than simple speed loss, and handles rapid tack sequences (tack groups) properly.
+Rewrite the SailStats analysis engine with a fundamentally improved approach to tack/gybe detection, wind direction estimation, and manoeuvre quality scoring. The current algorithm uses a fixed wind direction and simple COG threshold crossing. The new algorithm derives wind direction continuously from the sailing data itself, detects manoeuvres from track geometry without needing a wind input, and scores tack quality based on exit performance rather than simple speed loss.
+
+**Current build (as implemented in `index.html`):** Every detected tack is scored individually via `scoreTackManoeuvre` (speed recovery, COG convergence to baseline, VMG cost, exit bias). **Tack grouping** (rapid sequences) and **intent classification** (reactive / proactive / tactical) described in this document are **not shipped** — they were removed as unreliable on COG-only data. Reintroducing them likely needs **heading** (and/or richer tracks), not just COG.
 
 ## Important Context
 
@@ -102,12 +104,15 @@ For each pair of adjacent stable segments (segBefore, segAfter):
 
 ---
 
-## PHASE 3: Tack Group Detection
+## PHASE 3: Tack Group Detection — **not in current app**
 
-### Purpose
+### Purpose (spec / future)
 Handle rapid tack sequences where there isn't enough stable sailing between tacks to establish independent references.
 
-### Algorithm
+### Status
+**Deferred.** The former `buildTackGroups` logic is removed from `index.html`. Close-together tacks each get their own **individual** quality score; there is no merged “group score” and no group UI.
+
+### Original algorithm (retained for future reference)
 
 ```
 1. Walk through the detected manoeuvres in chronological order
@@ -133,7 +138,7 @@ Handle rapid tack sequences where there isn't enough stable sailing between tack
    for uniform handling downstream
 ```
 
-### Output
+### Output (if reimplemented)
 Array of tack groups: `[{manoeuvres: [...], preSegment, postSegment, interSegments: [...], isSolo: bool}, ...]`
 
 ---
@@ -280,7 +285,7 @@ Establish the sailor's own performance targets from their data in this session. 
 ## PHASE 7: Tack Exit Quality Scoring
 
 ### Purpose
-Score each tack (and tack group) based on how quickly and effectively the sailor exits onto the new tack at target speed and heading.
+Score each tack based on how quickly and effectively the sailor exits onto the new tack at target speed and heading (COG vs port/starboard baselines). In code: **`scoreTackManoeuvre(m, ...)`** per manoeuvre.
 
 ### Algorithm for solo tacks
 
@@ -343,7 +348,11 @@ Score each tack (and tack group) based on how quickly and effectively the sailor
    - quality = round(speedScore * 0.3 + headingScore * 0.35 + vmgScore * 0.35)
 ```
 
-### Algorithm for tack groups
+### Algorithm for tack groups — **not in current app**
+
+**Not implemented.** The former group-level scoring and “solo vs grouped” split are removed. The **solo-tack algorithm above** is applied to **each** tack event independently.
+
+If tack groups return in a future version, the spec below remains a reference:
 
 ```
 1. Pre-group reference: from preGroupSegment 
@@ -379,12 +388,15 @@ Score each tack (and tack group) based on how quickly and effectively the sailor
 
 ---
 
-## PHASE 8: Tack Classification
+## PHASE 8: Tack intent classification — **not in current app**
 
-### Purpose
-Classify each tack as reactive (tacked on a header), proactive (tacked in anticipation of a shift), or tactical (tacked for strategic/traffic reasons).
+### Purpose (spec / future)
+Classify each tack as reactive (tacked on a header), proactive (tacked in anticipation of a shift), or tactical (strategic/traffic). Formerly `classifyTackIntent` + wind trace.
 
-### Algorithm
+### Status
+**Removed from `index.html`.** The heuristic did not prove reliable on **COG-only** GPS. A credible version will likely need **true heading** (HDG) vs COG, and possibly other channels. The **wind trace** is still computed for scoring and charts; it is no longer used for reactive/proactive/tactical labels.
+
+### Original algorithm (retained for future reference)
 
 ```
 1. Get the smoothed wind trace value at the tack time
@@ -534,29 +546,26 @@ function runAnalysis(rawPts, userWind = null, markPos = null, laps = 1)
     upwindVMG
   },
   
-  // Manoeuvres
-  tackGroups: [{
-    manoeuvres: [...],
-    preSegment, postSegment, interSegments,
-    isSolo: bool,
-    quality: number,
-    speedRecovery: number,
-    headingConvergence: number,
-    vmgCost: number,
+  // Manoeuvres (flat lists — no tackGroups)
+  tacks: [{
+    // ...manoeuvre fields from detection + wind crossing (type, time, lat, lon, ch, crossing, sideBef, sideAft, ...)
+    q: number,                  // quality 0–100
+    rt: number,                 // speed recovery seconds
+    minS: number,
+    preS: number,
+    prof: [{t, speed}, ...],
     exitBias: string,
-    classification: string,    // "reactive" | "proactive" | "tactical"
-    classificationConfidence: string,
-    speedProfile: [{t, speed}, ...],
-    windAtTack: number,
-    windShiftBefore: number,
+    exitBiasAmount: number,
+    vmgCost: number,
+    headingConvergence: number,
   }, ...],
+  gybes: [...],
   
-  // Summary stats (kept for backward compatibility)
+  // Summary stats
   stats: {
     totalDist, duration, maxSpeed, avgSpeed,
     tackCount, gybeCount,
     avgTackQuality, avgGybeQuality,
-    reactiveTacks, proactiveTacks, tacticalTacks,
     windShiftRange, portStbdSplit
   },
   
@@ -575,21 +584,14 @@ function runAnalysis(rawPts, userWind = null, markPos = null, laps = 1)
 ## PHASE 11: UI Updates
 
 ### Overview tab
-- Replace the existing speed timeline chart with the new stacked 
-  speed + wind chart
-- Add wind shift summary stats (range, trend)
-- Update tack/gybe counts to include classification breakdown
-  (e.g. "12 tacks: 7 reactive, 3 proactive, 2 tactical")
+- Speed timeline chart (and wind-derived stats as implemented)
+- Wind shift summary where available (range, trend) — **no** reactive/proactive/tactical tack counts
 
 ### Manoeuvres tab
-- Group display: show tack groups with their overall score
-- Solo tack display: show individual score with exit bias indicator
-  ("exited 6° high" or "exited 3° low")
-- Classification badge on each tack ("header", "anticipated", "tactical")
-- The speed profile sparkline for each tack should now also show 
-  target speed as a thin horizontal reference line
-- For tack groups: show expanded view with the inter-tack data,
-  wind estimates during the group, and individual tack markers
+- **No tack groups panel** — list is per manoeuvre only
+- Each tack: quality %, crossing (P→S / S→P / —), speed profile sparkline, optional exit hint (high/low/neutral)
+- **No** classification badge (reactive / proactive / tactical)
+- Target speed reference line on sparklines remains a possible enhancement
 
 ### Speed tab
 - No changes needed — existing speed distribution and polar 
@@ -608,8 +610,7 @@ Implement in this order, testing each phase works before moving on:
    checking they make sense against a known GPS track
 2. **Manoeuvre detection** — verify tack count matches what you'd 
    expect from a known race
-3. **Tack group detection** — verify rapid tack sequences are 
-   grouped correctly
+3. **Tack group detection** — deferred; verify close tacks still appear as separate events with plausible scores
 4. **Wind direction derivation** — verify the computed wind direction 
    is reasonable for a known race where you remember the conditions
 5. **Continuous wind trace** — verify the trace shows sensible 
@@ -617,8 +618,7 @@ Implement in this order, testing each phase works before moving on:
 6. **Performance baselines** — verify port/starboard targets look right
 7. **Tack exit scoring** — verify scores correlate with what 
    you'd subjectively call good and bad tacks
-8. **Tack classification** — verify reactive tacks actually had 
-   headers before them
+8. **Tack intent classification** — deferred until heading-rich data exists
 9. **Stacked charts** — build the aligned speed + wind charts 
    with leg segmentation
 10. **UI integration** — wire everything into the existing tabs
@@ -632,7 +632,7 @@ remember the conditions. Check:
 - Are the "good" tacks (the ones you remember going well) scoring 
   higher than the "bad" ones?
 - Does the wind trace show shifts you remember experiencing?
-- Are tack groups detected where you know you did rapid tacks?
+- For rapid tacks: each should still appear as its own manoeuvre with a score (no grouping)
 
 If any of these don't match, adjust the thresholds (stable segment 
 minimum duration, COG rate threshold, tack angle clustering range) 

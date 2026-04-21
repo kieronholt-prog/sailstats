@@ -958,29 +958,6 @@ function applyDetectionSettings(manoeuvres,pts,det){
   return out;
 }
 
-function buildTackGroups(manoeuvres){
-  if(!manoeuvres?.length)return[];
-  const groups=[];
-  let cur={manoeuvres:[manoeuvres[0]],preSegment:manoeuvres[0].preSegment,postSegment:manoeuvres[0].postSegment,interSegments:[],isSolo:true};
-  for(let i=1;i<manoeuvres.length;i++){
-    const prev=manoeuvres[i-1];
-    const m=manoeuvres[i];
-    const sameBridge=m.preSegment&&prev.postSegment&&m.preSegment.startIdx===prev.postSegment.startIdx&&m.preSegment.endIdx===prev.postSegment.endIdx;
-    const shouldGroup=sameBridge&&m.preSegment.duration<8;
-    if(shouldGroup){
-      cur.manoeuvres.push(m);
-      cur.interSegments.push(m.preSegment);
-      cur.postSegment=m.postSegment;
-      cur.isSolo=false;
-    }else{
-      groups.push(cur);
-      cur={manoeuvres:[m],preSegment:m.preSegment,postSegment:m.postSegment,interSegments:[],isSolo:true};
-    }
-  }
-  groups.push(cur);
-  return groups;
-}
-
 function initialWindFromStableSegments(stableSegments){
   const bins=new Array(36).fill(0);
   for(const seg of stableSegments||[]){
@@ -1171,24 +1148,24 @@ function speedProfile(pts,idx){
   return out;
 }
 
-function scoreGroup(group,pts,baselines,windTrace,windDir){
-  const first=group.manoeuvres[0],last=group.manoeuvres[group.manoeuvres.length-1];
-  const startIdx=first.idx;
+/** Per-tack quality (speed recovery, heading to baseline, VMG cost). Grouping / intent classification removed pending better sensors (e.g. heading vs COG). */
+function scoreTackManoeuvre(m,pts,baselines,windTrace,windDir){
+  const startIdx=m.idx;
   const endSearch=Math.min(pts.length-1,secondsIndexFrom(pts,startIdx,30));
-  const target=tackTarget(last.sideAft||last.sideBef,baselines);
+  const target=tackTarget(m.sideAft||m.sideBef,baselines);
   const speedThreshold=(target.targetSpeed||0)*0.9;
   let speedRecovery=30;
   for(let i=startIdx;i<=endSearch;i++){
     if(ms2k(pts[i].ss||0)>=speedThreshold){speedRecovery=Math.round(Math.max(0,pts[i].time-pts[startIdx].time));break;}
   }
   let headingConvergence=30;
-  for(let i=last.idx;i<=endSearch;i++){
+  for(let i=m.idx;i<=endSearch;i++){
     const ok=Math.abs(adiff(pts[i].cog,target.targetCOG))<=5&&i+2<=endSearch&&Math.abs(adiff(pts[i+1].cog,target.targetCOG))<=5&&Math.abs(adiff(pts[i+2].cog,target.targetCOG))<=5;
-    if(ok){headingConvergence=Math.round(Math.max(0,pts[i].time-pts[last.idx].time));break;}
+    if(ok){headingConvergence=Math.round(Math.max(0,pts[i].time-pts[m.idx].time));break;}
   }
   const sampleEnd=Math.min(pts.length-1,secondsIndexFrom(pts,startIdx,speedRecovery));
   const localWind=windAtTime(windTrace,pts[startIdx].time,windDir);
-  const preVmg=Math.max(0,(first.preRefSpeed??first.preSpeed??0)*Math.cos(Math.abs(adiff(first.preRefCOG??first.preCOG,localWind))*D));
+  const preVmg=Math.max(0,(m.preRefSpeed??m.preSpeed??0)*Math.cos(Math.abs(adiff(m.preRefCOG??m.preCOG,localWind))*D));
   let vmgCost=0;
   for(let i=startIdx;i<=sampleEnd;i++){
     const w=windAtTime(windTrace,pts[i].time,localWind);
@@ -1207,28 +1184,6 @@ function scoreGroup(group,pts,baselines,windTrace,windDir){
     quality,speedRecovery,headingConvergence,vmgCost,exitBias,exitBiasAmount,
     speedProfile:speedProfile(pts,startIdx),windAtTack:localWind,
   };
-}
-
-function classifyTackIntent(group,windTrace){
-  if(!windTrace?.length)return{classification:"tactical",classificationConfidence:"low",windShiftBefore:0};
-  const t=group.manoeuvres[0].time;
-  const now=windAtTime(windTrace,t,windTrace[0].windDir);
-  const before=windAtTime(windTrace,t-30,now);
-  const windShiftBefore=adiff(before,now);
-  const side=group.manoeuvres[0].sideBef;
-  const header=(side==="S"&&windShiftBefore<-3)||(side==="P"&&windShiftBefore>3);
-  const lift=(side==="S"&&windShiftBefore>3)||(side==="P"&&windShiftBefore<-3);
-  if(header){
-    return{classification:"reactive",classificationConfidence:Math.abs(windShiftBefore)>5?"high":"medium",windShiftBefore};
-  }
-  if(!header&&Math.abs(windShiftBefore)<3){
-    const after=windAtTime(windTrace,t+25,now);
-    const deltaAfter=adiff(now,after);
-    if((side==="S"&&deltaAfter<-5)||(side==="P"&&deltaAfter>5)){
-      return{classification:"proactive",classificationConfidence:Math.abs(deltaAfter)>7?"high":"medium",windShiftBefore};
-    }
-  }
-  return{classification:lift?"tactical":"tactical",classificationConfidence:Math.abs(windShiftBefore)>3?"medium":"low",windShiftBefore};
 }
 
 /** Auto wind (meteorological ° FROM), now from stable segment geometry. */
@@ -1507,35 +1462,28 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
   const manoeuvreEvents=applyDetectionSettings(manoeuvres,en,detSettings);
-  const tackGroups=buildTackGroups(manoeuvreEvents);
   const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
   const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
   const windTrace=windBuild.windTrace;
   const windStats=windBuild.windStats;
 
-  for(const g of tackGroups){
-    const perf=scoreGroup(g,en,baselines,windTrace,wd);
-    const intent=classifyTackIntent(g,windTrace);
-    Object.assign(g,perf,intent);
-  }
-
-  const tacks=tackGroups.flatMap(g=>g.manoeuvres.filter(m=>m.type==="tack").map((m,idx)=>{
-    const groupPerf=g.isSolo?{
-      q:g.quality,rt:g.speedRecovery,minS:Math.min(...g.speedProfile.filter(p=>p.t>=0&&p.t<=10).map(p=>p.speed),m.preRefSpeed||m.preSpeed||0),
-      prof:g.speedProfile,exitBias:g.exitBias,exitBiasAmount:g.exitBiasAmount,
-      vmgCost:g.vmgCost,headingConvergence:g.headingConvergence,classification:g.classification,classificationConfidence:g.classificationConfidence,windShiftBefore:g.windShiftBefore,
-    }:{
-      q:null,rt:null,minS:null,prof:speedProfile(en,m.idx),exitBias:null,exitBiasAmount:null,
-      vmgCost:null,headingConvergence:null,classification:g.classification,classificationConfidence:g.classificationConfidence,windShiftBefore:g.windShiftBefore,
-    };
+  const tacks=manoeuvreEvents.filter(m=>m.type==="tack").map(m=>{
+    const perf=scoreTackManoeuvre(m,en,baselines,windTrace,wd);
     const pt=en[m.turnIdx??m.idx];
     return{
       ...m,
       preS:m.preRefSpeed??m.preSpeed??0,
       lat:pt.lat,lon:pt.lon,
-      ...groupPerf,
+      q:perf.quality,
+      rt:perf.speedRecovery,
+      minS:Math.min(...perf.speedProfile.filter(p=>p.t>=0&&p.t<=10).map(p=>p.speed),m.preRefSpeed||m.preSpeed||0),
+      prof:perf.speedProfile,
+      exitBias:perf.exitBias,
+      exitBiasAmount:perf.exitBiasAmount,
+      vmgCost:perf.vmgCost,
+      headingConvergence:perf.headingConvergence,
     };
-  }));
+  });
   const gybes=manoeuvreEvents.filter(m=>m.type==="gybe").map(m=>{
     const pt=en[m.turnIdx??m.idx];
     return{
@@ -1585,9 +1533,6 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const soloTackScores=tacks.filter(t=>t.q!=null).map(t=>t.q);
   const avgTackQuality=soloTackScores.length?soloTackScores.reduce((a,b)=>a+b,0)/soloTackScores.length:null;
   const avgGybeQuality=gybes.length?gybes.reduce((a,b)=>a+(Number(b.q)||0),0)/gybes.length:null;
-  const reactiveTacks=tackGroups.filter(g=>g.classification==="reactive").length;
-  const proactiveTacks=tackGroups.filter(g=>g.classification==="proactive").length;
-  const tacticalTacks=tackGroups.filter(g=>g.classification==="tactical").length;
 
   return{
     points:en,
@@ -1599,12 +1544,10 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     detSettings,
     stableSegments,
     baselines,
-    tackGroups,
     stats:{
       totalDist,duration,maxSpeed,avgSpeed,
       tackCount:tacks.length,gybeCount:gybes.length,
       avgTackQuality,avgGybeQuality,
-      reactiveTacks,proactiveTacks,tacticalTacks,
       windShiftRange:windStats.range,
       portStbdSplit:{port:portS,stbd:stbdS},
     },
@@ -1642,19 +1585,19 @@ function ManCard({m,index}){
   const angNm=m.type==="tack"?"Tack angle":"Gybe angle";
   const ang=Math.round(Number(m.ch)||0);
   const scoreLabel=Number.isFinite(m.q)?`${m.q}%`:"—";
-  const biasText=m.exitBias&&m.exitBias!=="neutral"&&Number.isFinite(m.exitBiasAmount)?` · exited ${Math.abs(m.exitBiasAmount).toFixed(1)}° ${m.exitBias}`:m.exitBias==="neutral"?" · neutral exit":"";
-  const clsBadge=m.classification==="reactive"?"header":m.classification==="proactive"?"anticipated":m.classification==="tactical"?"tactical":"";
+  const exitHint=m.type==="tack"&&m.exitBias&&(m.exitBias==="neutral"||(Number.isFinite(m.exitBiasAmount)&&m.exitBias!=="neutral"))
+    ?(m.exitBias!=="neutral"&&Number.isFinite(m.exitBiasAmount)?`Exit: ${Math.abs(m.exitBiasAmount).toFixed(1)}° ${m.exitBias}`:"Exit: neutral")
+    :"";
   return(<div style={{background:C.card,borderRadius:10,padding:12,marginBottom:6,border:`1px solid ${C.bdr}`,display:"flex",gap:12,alignItems:"center"}}>
     <div style={{width:40,height:40,borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center",background:`${qc}22`,color:qc,fontWeight:800,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}>{scoreLabel}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:12,fontWeight:600,color:C.txt,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span>{m.type==="tack"?"⬆ Tack":"⬇ Gybe"} #{index+1}</span>
         {cx&&<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",padding:"2px 8px",borderRadius:6,background:cxSt.bg,color:cxSt.fg,border:`1px solid ${cxSt.br}55`}}>{cx}</span>}
-        {clsBadge&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:6,background:`${C.acc}18`,border:`1px solid ${C.acc}55`,color:C.acc,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5}}>{clsBadge}</span>}
       </div>
       <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
-      <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"group-scored"}</div>
-      {m.classification&&<div style={{fontSize:10,color:C.txM,marginTop:2}}>{m.classification} ({m.classificationConfidence||"low"}){biasText}</div>}
+      <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"—"}</div>
+      {exitHint&&<div style={{fontSize:10,color:C.txM,marginTop:2}}>{exitHint}</div>}
     </div>
     <div style={{width:100,height:36}}><ResponsiveContainer width="100%" height="100%"><LineChart data={m.prof}><Line type="monotone" dataKey="speed" stroke={qc} strokeWidth={2} dot={false}/></LineChart></ResponsiveContainer></div>
   </div>);
@@ -2723,8 +2666,7 @@ function App(){
             <Stat label="Gybes" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
           </div>
           <div style={{fontSize:11,color:C.txM,marginBottom:12}}>
-            {a.stats.reactiveTacks||0} reactive · {a.stats.proactiveTacks||0} proactive · {a.stats.tacticalTacks||0} tactical
-            {a.windStats?.range!=null&&<span style={{marginLeft:10}}>· wind range {a.windStats.range.toFixed(1)}° ({a.windStats.trend})</span>}
+            {a.windStats?.range!=null&&<>Wind range {a.windStats.range.toFixed(1)}° ({a.windStats.trend})</>}
           </div>
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:16}}>
@@ -2900,13 +2842,6 @@ function App(){
             <Stat label="Avg Tack" color={C.tack} value={a.tacks.filter(t=>Number.isFinite(t.q)).length?Math.round(a.tacks.filter(t=>Number.isFinite(t.q)).reduce((s,t)=>s+t.q,0)/a.tacks.filter(t=>Number.isFinite(t.q)).length):"—"} unit="%"/>
             <Stat label="Avg Gybe" color={C.gybe} value={a.gybes.length?Math.round(a.gybes.reduce((s,g)=>s+g.q,0)/a.gybes.length):"—"} unit="% vs ref"/>
           </div>
-          {a.tackGroups?.length>0&&<div style={{background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack groups</div>
-            {a.tackGroups.map((g,i)=><div key={`tg-${i}`} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 10px",borderRadius:8,background:`${C.bg}99`,border:`1px solid ${C.bdr}`,marginBottom:6,fontSize:11}}>
-              <span>Group {i+1} · {g.manoeuvres.length} manoeuvre{g.manoeuvres.length===1?"":"s"} · {g.classification||"tactical"}</span>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Number.isFinite(g.quality)?`${g.quality}%`:"—"}</span>
-            </div>)}
-          </div>}
           {(()=>{
             const tPS=a.tacks.filter(t=>t.crossing==="P→S"),tSP=a.tacks.filter(t=>t.crossing==="S→P");
             const gPS=a.gybes.filter(g=>g.crossing==="P→S"),gSP=a.gybes.filter(g=>g.crossing==="S→P");

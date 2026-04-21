@@ -123,13 +123,19 @@ Environment variables (set in Cloudflare dashboard):
 
 ## Analysis Engine — Key Functions
 
-- `parseGPX(text)` / `parseFIT(buffer)` — File parsers → [{lat, lon, time}]
-- `enrich(points)` — Adds SOG, COG, distance
-- `estWind(points)` — Wind direction from COG histogram (returns {dir, conf})
-- `detectMans(points, windDir)` — Tack/gybe detection (COG change > 55°)
-- `scoreMan(m, points, windDir)` — Quality 0-100 (speed 30%, VMG 40%, recovery 30%)
-- `detectLegsFromMarks(points, markPositions, laps)` — Split track at mark roundings
-- `runAnalysis(rawPts, userWind, markPos, laps)` — Master orchestrator
+All analysis logic lives in `index.html` (Babel/React bundle). Important pieces:
+
+- `parseGPX(text)` / `parseFIT(buffer)` — File parsers → track points
+- `enrich(points)` — SOG, COG, distance; optional smoothing
+- `detectMans(points)` — Stable segments + coarse manoeuvres from segment COG changes
+- `deriveWindAndClassify(manoeuvres, stableSegments, userWind, pts)` — Wind direction, tack vs gybe, crossing (P→S / S→P)
+- `applyDetectionSettings(manoeuvres, pts, detSettings)` — Per-type thresholds (tack vs gybe), before/after point windows
+- `scoreTackManoeuvre(m, pts, baselines, windTrace, windDir)` — Per-tack quality (speed recovery, COG to baseline, VMG cost, exit bias)
+- `runAnalysis(...)` — Full pipeline: wind trace, legs/VMG, tacks/gybes arrays, stats
+
+**Not implemented:** tack grouping (`buildTackGroups`) and intent labels (reactive / proactive / tactical). Each tack is scored on its own. See `TACK_ALGORITHM_SPEC.md` for the original spec and “deferred” sections.
+
+- `detectLegsFromMarks(points, markPositions, laps, ...)` — Legs including START/FINISH when line defined
 
 ## WSC Data
 
