@@ -440,7 +440,8 @@ function parseFIT(buf){
         defs[lt]={gm,flds,size:ts,arch};
       }else{
         const def=defs[lt];if(!def)break;
-        if(def.gm===0){
+        // FIT "record" messages are global message number 20.
+        if(def.gm===20){
           let lat=null,lon=null,ts=null;let fo=offset;
           for(const f of def.flds){
             if(f.d){fo+=f.s;continue;}
