@@ -586,6 +586,36 @@ function formatCompareRowSubtitle(row,stravaAct){
   return "—";
 }
 
+/** Strava feed + Supabase-only rows (e.g. GPX/FIT uploads with id `file-…`). */
+function mergeActivitiesWithSaved(acts,savedByActId){
+  const stravaActs=Array.isArray(acts)?acts:[];
+  const inStrava=new Set(stravaActs.map(a=>String(a.id)));
+  const merged=stravaActs.map(a=>({...a,__src:"strava"}));
+  const bag=savedByActId&&typeof savedByActId==="object"?savedByActId:{};
+  for(const [aid,row] of Object.entries(bag)){
+    if(!row)continue;
+    const id=row.activity_id!=null?String(row.activity_id):String(aid);
+    if(inStrava.has(id))continue;
+    const stats=row.stats&&typeof row.stats==="object"?row.stats:null;
+    merged.push({
+      id,
+      name:row.activity_name&&(String(row.activity_name).trim())?String(row.activity_name).trim():id.startsWith("file-")?"Uploaded track":`Saved #${id}`,
+      start_date_local:row.activity_date||row.updated_at||null,
+      elapsed_time:stats&&Number.isFinite(stats.duration)?stats.duration:null,
+      distance:stats&&Number.isFinite(stats.totalDist)?stats.totalDist:null,
+      type:"Upload",
+      __fromSupabaseOnly:true,
+      __savedRow:row,
+    });
+  }
+  merged.sort((a,b)=>{
+    const ta=new Date(a.start_date_local||0).getTime();
+    const tb=new Date(b.start_date_local||0).getTime();
+    return tb-ta;
+  });
+  return merged;
+}
+
 function unknownCourseSetupColumn(err) {
   const s = JSON.stringify(err || {}).toLowerCase();
   return s.includes("course_setup") && (s.includes("column") || s.includes("schema") || s.includes("could not find"));
@@ -2187,6 +2217,8 @@ function App(){
   const [renameActId,setRenameActId]=useState(null);
   const [renameDraft,setRenameDraft]=useState("");
   const [renameBusy,setRenameBusy]=useState(false);
+  const [savedSummaryId,setSavedSummaryId]=useState(null);
+  const [savedSummaryRow,setSavedSummaryRow]=useState(null);
   const [rawPoints,setRawPoints]=useState(null);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
@@ -2364,6 +2396,27 @@ function App(){
     })();
     return()=>{cancelled=true};
   },[view,compareIds,session,sAth]);
+
+  const activitiesListMerged=useMemo(()=>mergeActivitiesWithSaved(acts,savedByActId),[acts,savedByActId]);
+
+  useEffect(()=>{
+    if(view!=="saved-summary"||!savedSummaryId){
+      setSavedSummaryRow(null);
+      return;
+    }
+    let cancelled=false;
+    (async()=>{
+      try{
+        const sess=await apiGetSession();
+        if(sess?.ok&&sess.supabase_access_token)supabaseUserJwt=sess.supabase_access_token;
+      }catch(_){}
+      const sid=session?.strava?.athlete?.id ?? sAth?.id;
+      if(sid==null){if(!cancelled)setSavedSummaryRow(null);return;}
+      const r=await loadAnalysisRow(sid,savedSummaryId);
+      if(!cancelled)setSavedSummaryRow(r);
+    })();
+    return()=>{cancelled=true};
+  },[view,savedSummaryId,session,sAth]);
 
   const toggleComparePick=useCallback((id)=>{
     const s=String(id);
@@ -2872,39 +2925,45 @@ function App(){
         {compareMode&&<div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
         {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center"}}>Loading...</div>}
         {processing&&<div style={{color:C.acc,padding:30,textAlign:"center"}}>Processing...</div>}
-        {acts.map(act=>{
+        {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; open for saved stats or use <strong>Compare</strong>.</div>}
+        {activitiesListMerged.map(act=>{
           const sidStr=String(act.id);
-          const saved=savedByActId[sidStr];
+          const saved=act.__fromSupabaseOnly?act.__savedRow:savedByActId[sidStr];
           const displayName=(saved?.activity_name&&String(saved.activity_name).trim())||act.name;
           const hasSaved=!!saved;
           const picked=comparePick.includes(sidStr);
+          const rowKey=act.__fromSupabaseOnly?`sb-${sidStr}`:sidStr;
           return(
-            <div key={act.id} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
+            <div key={rowKey} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
               {compareMode&&<label style={{display:"flex",alignItems:"center",paddingLeft:4,cursor:"pointer"}}>
                 <input type="checkbox" checked={picked} onChange={()=>toggleComparePick(act.id)} style={{width:16,height:16,accentColor:C.acc}}/>
               </label>}
               <div style={{flex:1,minWidth:0,background:C.card,borderRadius:10,border:`1px solid ${picked?C.acc:C.bdr}`,overflow:"hidden",transition:"border-color 0.15s"}}>
-                {renameActId===act.id?(
+                {String(renameActId)===String(act.id)?(
                   <div style={{padding:"10px 12px",display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
                     <input value={renameDraft} onChange={e=>setRenameDraft(e.target.value)} placeholder="Display name" autoFocus style={{flex:1,minWidth:140,padding:"8px 10px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:13}}/>
                     <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:11}}>{renameBusy?"…":"Save"}</button>
                     <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:11}}>Cancel</button>
                   </div>
                 ):(
-                  <button type="button" onClick={()=>compareMode?toggleComparePick(act.id):analyseStrava(act)} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
+                  <button type="button" onClick={()=>{
+                    if(compareMode){toggleComparePick(act.id);return;}
+                    if(act.__fromSupabaseOnly){setSavedSummaryId(String(act.id));setView("saved-summary");return;}
+                    analyseStrava(act);
+                  }} style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
                     <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
-                      {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
+                      {act.__fromSupabaseOnly?"📁":act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
                     </div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
-                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act)} · {fT(act.elapsed_time)}{act.distance?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}</div>
+                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act.__fromSupabaseOnly?null:act)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}{act.__fromSupabaseOnly?<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span>:""}</div>
                     </div>
-                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>›</div>
+                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>{act.__fromSupabaseOnly?"📊":"›"}</div>
                   </button>
                 )}
               </div>
-              {!compareMode&&hasSaved&&renameActId!==act.id&&(
-                <button type="button" title="Rename in list" onClick={e=>{e.stopPropagation();setRenameActId(act.id);setRenameDraft(displayName);}} style={{...btn("transparent",C.txM,C.bdr),padding:"0 12px",fontSize:14,borderRadius:10,alignSelf:"stretch"}}>✎</button>
+              {!compareMode&&hasSaved&&String(renameActId)!==String(act.id)&&(
+                <button type="button" title="Rename in list" onClick={e=>{e.stopPropagation();setRenameActId(String(act.id));setRenameDraft(displayName);}} style={{...btn("transparent",C.txM,C.bdr),padding:"0 12px",fontSize:14,borderRadius:10,alignSelf:"stretch"}}>✎</button>
               )}
             </div>
           );
@@ -2916,6 +2975,57 @@ function App(){
           <button type="button" onClick={()=>setComparePick([])} style={{...btn("transparent",C.txM,C.bdr),padding:"12px 16px",fontSize:12}}>Clear</button>
         </div>
       )}
+    </div>);
+  }
+
+  /* ─── SAVED SUMMARY (upload / no Strava stream) ─── */
+  if(view==="saved-summary"){
+    const r=savedSummaryRow;
+    const title=(r?.activity_name&&String(r.activity_name).trim())||(savedSummaryId&&savedSummaryId.startsWith("file-")?"Uploaded track":`#${savedSummaryId}`);
+    const s=r?.stats;
+    const leg=r?.leg_summary;
+    const mv=meanNumeric((leg||[]).map(l=>l.avgVMG));
+    const tack=r?.tack_scores,gyb=r?.gybe_scores;
+    const avgTk=(arr)=>{const q=(arr||[]).filter(t=>!t.excluded&&Number.isFinite(t.q));return q.length?Math.round(q.reduce((a,t)=>a+t.q,0)/q.length):null;};
+    const avgGy=(arr)=>{const q=(arr||[]).filter(g=>!g.excluded&&Number.isFinite(g.q));return q.length?Math.round(q.reduce((a,g)=>a+g.q,0)/q.length):null;};
+    const atk=avgTk(tack),agy=avgGy(gyb);
+    const dispAtk=atk??(s?.avgTackQuality!=null?Math.round(s.avgTackQuality):null);
+    const dispGy=agy??(s?.avgGybeQuality!=null?Math.round(s.avgGybeQuality):null);
+    const fmt=(v,fn)=>v==null||!Number.isFinite(v)?"—":fn(v);
+    const one=(k,v)=>(<tr key={k} style={{borderBottom:`1px solid ${C.bdr}`}}><td style={{padding:"10px 10px",color:C.txM,fontSize:12}}>{k}</td><td style={{padding:"10px 8px",color:C.txt,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}>{v}</td></tr>);
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button type="button" onClick={()=>{setView("activities");setSavedSummaryId(null);}} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Activities</button>
+        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>Saved analysis</div>
+        <div style={{width:72}}/>
+      </div>
+      <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px 40px"}}>
+        <div style={{fontSize:16,fontWeight:700,color:C.txt,marginBottom:8}}>{title}</div>
+        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>GPS files are not stored in the cloud. To change course setup or re-run analysis, use <strong>Upload</strong> on the home screen with the same GPX/FIT file. This page shows the last stats saved to your account.</div>
+        {!r&&<div style={{color:C.txM,padding:20}}>Loading…</div>}
+        {r&&<div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead><tr style={{borderBottom:`1px solid ${C.bdr}`}}><th style={{textAlign:"left",padding:"12px 10px",fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1}}>Metric</th><th style={{textAlign:"left",padding:"12px 8px",fontSize:11,color:C.acc}}>Value</th></tr></thead>
+            <tbody>
+              {one("Date",formatCompareRowSubtitle(r,null))}
+              {one("Course",r.course_letter||"—")}
+              {one("Laps",r.laps!=null?String(r.laps):"—")}
+              {one("Wind °",r.wind_direction!=null&&Number.isFinite(Number(r.wind_direction))?`${Math.round(Number(r.wind_direction))}`:"—")}
+              {one("Distance (nm)",s?m2nm(s.totalDist).toFixed(2):"—")}
+              {one("Duration",s?fT(s.duration):"—")}
+              {one("Max speed (kts)",fmt(s?.maxSpeed,v=>v.toFixed(1)))}
+              {one("Avg speed (kts)",fmt(s?.avgSpeed,v=>v.toFixed(1)))}
+              {one("Tacks (racing)",s!=null?`${s.tackCount}`:"—")}
+              {one("Gybes (racing)",s!=null?`${s.gybeCount}`:"—")}
+              {one("Avg tack %",dispAtk!=null?`${dispAtk}`:"—")}
+              {one("Avg gybe %",dispGy!=null?`${dispGy}`:"—")}
+              {one("Legs (n)",leg?.length!=null?`${leg.length}`:"—")}
+              {one("Mean leg VMG",mv!=null?mv.toFixed(2):"—")}
+              {one("Wind shift (°)",fmt(s?.windShiftRange,v=>v.toFixed(1)))}
+            </tbody>
+          </table>
+        </div>}
+      </div>
     </div>);
   }
 
