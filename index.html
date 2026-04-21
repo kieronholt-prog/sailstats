@@ -59,6 +59,10 @@ const DETECTION_DEFAULTS={
   tack:{minTurn:60,maxTurn:170,minSpeed:1.0,cooldownSec:4},
   gybe:{minTurn:45,maxTurn:230,minSpeed:1.8,cooldownSec:7},
 };
+const DEFAULT_SF_LINE_ENDS={
+  endA:{lat:50.851722,lon:-1.309129},
+  endB:{lat:50.851762,lon:-1.307463},
+};
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
 /** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
@@ -268,6 +272,47 @@ function distanceAlongTrackToSegment(pts,aLat,aLon,bLat,bLon){
     if(d<bestD){bestD=d;bestAlong=cum;}
   }
   return{alongM:bestAlong,distToMarkM:bestD};
+}
+
+function lineSideValue(lat,lon,aLat,aLon,bLat,bLon){
+  const refLat=(aLat+bLat)/2,refLon=(aLon+bLon)/2;
+  const p=latLonToLocalM(lat,lon,refLat,refLon);
+  const a=latLonToLocalM(aLat,aLon,refLat,refLon);
+  const b=latLonToLocalM(bLat,bLon,refLat,refLon);
+  const abx=b.x-a.x,aby=b.y-a.y,apx=p.x-a.x,apy=p.y-a.y;
+  return abx*apy-aby*apx;
+}
+
+function interpolatePointByTime(pts,targetTime){
+  if(!pts?.length)return null;
+  if(targetTime<=pts[0].time)return{lat:pts[0].lat,lon:pts[0].lon,time:pts[0].time};
+  if(targetTime>=pts[pts.length-1].time)return{lat:pts[pts.length-1].lat,lon:pts[pts.length-1].lon,time:pts[pts.length-1].time};
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1],b=pts[i];
+    if(targetTime<b.time){
+      const span=Math.max(1e-6,b.time-a.time),u=(targetTime-a.time)/span;
+      return{lat:a.lat+(b.lat-a.lat)*u,lon:a.lon+(b.lon-a.lon)*u,time:targetTime};
+    }
+  }
+  return null;
+}
+
+function detectLineCrossings(pts,endA,endB){
+  const out=[];
+  if(!pts||pts.length<2||!endA||!endB)return out;
+  for(let i=1;i<pts.length;i++){
+    const p1=pts[i-1],p2=pts[i];
+    const s1=lineSideValue(p1.lat,p1.lon,endA.lat,endA.lon,endB.lat,endB.lon);
+    const s2=lineSideValue(p2.lat,p2.lon,endA.lat,endA.lon,endB.lat,endB.lon);
+    if(!Number.isFinite(s1)||!Number.isFinite(s2))continue;
+    if((s1===0&&s2===0)||s1*s2>0)continue;
+    const den=Math.abs(s1)+Math.abs(s2);
+    const u=den>1e-9?Math.abs(s1)/den:0.5;
+    const t=p1.time+(p2.time-p1.time)*u;
+    const dir=s2>s1?"A→B":"B→A";
+    out.push({time:t,direction:dir,idx:i});
+  }
+  return out;
 }
 
 /** Step for Track crop − / + buttons (seconds). */
@@ -1188,7 +1233,17 @@ function expandCourseMarks(preamble,lapMarks,laps){
   return fullSeq;
 }
 
-function detectLegsFromMarks(pts,markPositions,laps,preamble=null){
+function closestIndexToLine(pts,endA,endB,fromIdx,toIdx){
+  let bestIdx=-1,bestDist=Infinity;
+  const s=Math.max(0,fromIdx||0),e=Math.min(pts.length-1,toIdx==null?pts.length-1:toIdx);
+  for(let i=s;i<=e;i++){
+    const d=distPointToSegmentM(pts[i].lat,pts[i].lon,endA.lat,endA.lon,endB.lat,endB.lon);
+    if(d<bestDist){bestDist=d;bestIdx=i;}
+  }
+  return{idx:bestIdx,dist:bestDist};
+}
+
+function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null){
   // Detect when the track passes close to each mark in sequence
   const legs=[];
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
@@ -1210,6 +1265,18 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null){
     if(bestDist<ROUNDING_DIST*3&&bestIdx>searchFrom){
       roundings.push({mark:mark.name,idx:bestIdx,dist:bestDist,lap:mark.lap});
       searchFrom=bestIdx+5;
+    }
+  }
+
+  if(startFinishLine?.endA&&startFinishLine?.endB&&roundings.length){
+    const startPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,0,roundings[0].idx);
+    if(startPick.idx>=0&&startPick.idx<roundings[0].idx){
+      roundings.unshift({mark:"START",idx:startPick.idx,dist:startPick.dist,lap:0});
+    }
+    const lastIdx=roundings[roundings.length-1].idx;
+    const finishPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,lastIdx,pts.length-1);
+    if(finishPick.idx>lastIdx){
+      roundings.push({mark:"FINISH",idx:finishPick.idx,dist:finishPick.dist,lap:roundings[roundings.length-1].lap});
     }
   }
 
@@ -1400,7 +1467,7 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
-function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS){
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
   const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
@@ -1466,7 +1533,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   // Legs — use mark positions if available, otherwise detect from manoeuvres
   let legs=[];
   if(expandCourseMarks(preamble,markPositions||[],laps).length>=2){
-    legs=detectLegsFromMarks(en,markPositions,laps,preamble);
+    legs=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine);
     legs=classifyLegs(legs,wd);
   }
 
@@ -1806,8 +1873,9 @@ function App(){
   const [actDate,setActDate]=useState(null);
   const [cropStartText,setCropStartText]=useState("00:00:00");
   const [cropDurationText,setCropDurationText]=useState("");
-  const [sfLineEndAText,setSfLineEndAText]=useState("");
-  const [sfLineEndBText,setSfLineEndBText]=useState("");
+  const [raceStartText,setRaceStartText]=useState("00:00:00");
+  const [sfLineEndAText,setSfLineEndAText]=useState(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
+  const [sfLineEndBText,setSfLineEndBText]=useState(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
   const [detSettings,setDetSettings]=useState(DETECTION_DEFAULTS);
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
@@ -1954,7 +2022,9 @@ function App(){
         setRawPoints(pts);
         setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
         setCropStartText("00:00:00");setCropDurationText("");
-        setSfLineEndAText("");setSfLineEndBText("");
+        setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
+        setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
+        setRaceStartText("00:00:00");
         const sid=session?.strava?.athlete?.id ?? sAth?.id;
         if(sid!=null){
           const row=await loadAnalysisRow(sid,String(act.id));
@@ -1985,7 +2055,9 @@ function App(){
       setActId(`file-${Date.now()}`);
       setActDate(new Date(t0>1e12?t0:t0*1000).toISOString());
       setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
-      setSfLineEndAText("");setSfLineEndBText("");
+      setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
+      setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
+      setRaceStartText("00:00:00");
       setView("course-setup");
     }catch(e){console.error(e);alert("Failed to parse: "+e.message)}
     setProcessing(false);
@@ -2024,14 +2096,8 @@ function App(){
 
   const sfLineEnds=useMemo(()=>{
     if(customSfEnds)return customSfEnds;
-    const sf=WSC_MARKS["START/FINISH"];
-    if(!sf)return null;
-    const windFrom=windOvr!==null?windOvr:(analysis?.windDir??0);
-    const half=150;
-    const endA=destinationPoint(sf.lat,sf.lon,windFrom+90,half);
-    const endB=destinationPoint(sf.lat,sf.lon,windFrom-90,half);
-    return{endA,endB};
-  },[customSfEnds,windOvr,analysis]);
+    return DEFAULT_SF_LINE_ENDS;
+  },[customSfEnds]);
 
   /** WSC committee line: custom A–B, else mark + perpendicular line on map. */
   const mapMarksWithStart=useMemo(()=>{
@@ -2049,6 +2115,33 @@ function App(){
     if(!sfLineEnds)return null;
     return distanceAlongTrackToSegment(croppedPoints,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
   },[croppedPoints,sfLineEnds]);
+
+  const raceStartSecParsed=useMemo(()=>{
+    const p=parseHMS(raceStartText);
+    return p==null?0:Math.max(0,p);
+  },[raceStartText]);
+
+  const startFinishStats=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<2||!sfLineEnds)return null;
+    const t0=croppedPoints[0].time;
+    const startAbs=t0+raceStartSecParsed;
+    const startPt=interpolatePointByTime(croppedPoints,startAbs);
+    const startDist=startPt?distPointToSegmentM(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
+    let signedStartDist=null,startOnCourseSide=null;
+    const firstMarkSpec=WSC_COURSES[courseLetter]?.marks?.[0];
+    const firstMarkName=Array.isArray(firstMarkSpec)?firstMarkSpec[0]:firstMarkSpec;
+    const firstMark=firstMarkName?effectiveMarks[firstMarkName]:null;
+    if(startPt&&firstMark&&Number.isFinite(startDist)){
+      const markSide=lineSideValue(firstMark.lat,firstMark.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
+      const boatSide=lineSideValue(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
+      startOnCourseSide=markSide===0?false:(markSide*boatSide>=0);
+      signedStartDist=startOnCourseSide?-startDist:startDist;
+    }
+    const crosses=detectLineCrossings(croppedPoints,sfLineEnds.endA,sfLineEnds.endB);
+    const startCross=crosses.find(c=>c.time>=startAbs)||null;
+    const finishCross=startCross?crosses.find(c=>c.time>=startCross.time+600&&c.direction!==startCross.direction)||null:null;
+    return{startAbs,startDist,signedStartDist,startOnCourseSide,startCross,finishCross};
+  },[croppedPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks]);
 
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
   const courseMarkSeq=useMemo(()=>{
@@ -2083,15 +2176,15 @@ function App(){
   const setupMapAnalysis=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings]);
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
     if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
     setAnalysis(result);
     if(result&&windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
@@ -2134,6 +2227,7 @@ function App(){
     sfLineEndAText,
     sfLineEndBText,
     detSettings,
+    sfLineEnds,
   ]);
 
   const saveCourseSetupOnly = useCallback(async () => {
@@ -2192,10 +2286,10 @@ function App(){
     if(!analysis||!croppedPoints)return analysis;
     if(windOvr!==null&&windOvr!==analysis.windDir){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings);
+      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -2460,6 +2554,20 @@ function App(){
               {[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}
             </select>
           </div>
+          <div style={{flex:1,minWidth:140}}>
+            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Start Time</label>
+            <input
+              type="text"
+              value={raceStartText}
+              onChange={e=>setRaceStartText(e.target.value)}
+              onBlur={()=>{
+                const p=parseHMS(raceStartText);
+                setRaceStartText(formatHMS(p==null?0:p));
+              }}
+              placeholder="00:00:00"
+              style={{width:"100%",padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}
+            />
+          </div>
         </div>
 
         {/* Map + wind dial (wind FROM °, meteorological) */}
@@ -2483,22 +2591,15 @@ function App(){
             />
           </div>
         </div>
-        <div style={{marginBottom:16,padding:"12px 14px",background:C.card,borderRadius:10,border:`1px solid ${C.bdr}`}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Committee line (optional)</div>
-          <div style={{fontSize:10,color:C.txD,lineHeight:1.5,marginBottom:10}}>Leave both blank for the default: line through the WSC START/FINISH mark, perpendicular to wind FROM (teal glow + white dashes). To set the line yourself, enter decimal <strong style={{color:C.txM}}>lat, lon</strong> for each end (e.g. <code style={{color:C.acc}}>50.8512, -1.3087</code>). Saved with course setup.</div>
-          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <label style={{flex:1,minWidth:200,fontSize:11,color:C.txM}}>End A (lat, lon)
-              <input value={sfLineEndAText} onChange={e=>setSfLineEndAText(e.target.value)} placeholder="50.851, -1.309" style={{display:"block",width:"100%",marginTop:4,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}/>
-            </label>
-            <label style={{flex:1,minWidth:200,fontSize:11,color:C.txM}}>End B (lat, lon)
-              <input value={sfLineEndBText} onChange={e=>setSfLineEndBText(e.target.value)} placeholder="50.8520, -1.3075" style={{display:"block",width:"100%",marginTop:4,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:13,fontFamily:"'JetBrains Mono',monospace"}}/>
-            </label>
-          </div>
-          {customSfEnds&&<div style={{fontSize:10,color:C.acc,marginTop:8}}>Using custom line (SFA → SFB on map).</div>}
-          {(sfLineEndAText.trim()||sfLineEndBText.trim())&&!customSfEnds&&<div style={{fontSize:10,color:"#ff8a65",marginTop:8}}>Could not parse both ends — check format (two numbers per field).</div>}
-          {sfLineEnds&&<div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
+        <div style={{background:C.card,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Start / Finish line (drag SFA/SFB on map)</div>
+          {sfLineEnds&&<div style={{fontSize:10,color:C.txD,lineHeight:1.55}}>
             SFA: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endA.lat.toFixed(6)}, {sfLineEnds.endA.lon.toFixed(6)}</span><br/>
-            SFB: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endB.lat.toFixed(6)}, {sfLineEnds.endB.lon.toFixed(6)}</span>
+            SFB: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{sfLineEnds.endB.lat.toFixed(6)}, {sfLineEnds.endB.lon.toFixed(6)}</span><br/>
+            Start reference: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{formatHMS(raceStartSecParsed)}</span> after first GPS point<br/>
+            Distance from line at start time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:(startFinishStats?.startOnCourseSide===true?C.port:startFinishStats?.startOnCourseSide===false?C.stbd:C.acc)}}>{Number.isFinite(startFinishStats?.signedStartDist)?`${Math.round(startFinishStats.signedStartDist)} m`:(Number.isFinite(startFinishStats?.startDist)?`${Math.round(startFinishStats.startDist)} m`:"—")}</span><br/>
+            Start crossing: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.startCross?`${formatWallClock(startFinishStats.startCross.time)||"—"} (${startFinishStats.startCross.direction})`:"Not found after start time"}</span><br/>
+            Finish time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.finishCross?`${formatWallClock(startFinishStats.finishCross.time)||"—"} (${startFinishStats.finishCross.direction})`:"No opposite crossing >10 min after start"}</span>
           </div>}
         </div>
 
@@ -2538,8 +2639,8 @@ function App(){
           <div style={{fontSize:10,color:C.txD,marginTop:6}}>Defaults: Tack min turn 60°, Gybe min turn 45°. Tack spacing default is 4s to capture close tacks.</div>
         </div>
 
-        {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:11,color:C.txM,lineHeight:1.55,padding:"10px 12px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <strong style={{color:C.txt}}>START/FINISH</strong>{customSfEnds?" (custom ends)":" (WSC)"}: {customSfEnds?"white dashed line = your A–B.":"white dashed + teal glow (perpendicular to wind FROM)."} Shortest gap from track to line ~<strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track to closest approach <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong> · first GPS <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{formatWallClock(croppedPoints[0].time)||"—"}</strong> local (Unix seconds in file; crop times are still elapsed from first point).
+        {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:10,color:C.txD,lineHeight:1.5,padding:"8px 10px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          White dashed line = SFA→SFB. Closest approach on track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong>.
         </div>}
 
         {/* Mark legend — port (P) red, starboard (S) green */}
