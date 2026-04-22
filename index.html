@@ -164,6 +164,84 @@ const C={
    ═══════════════════════════════════════════════════════════════════ */
 const RE=6371000,D=Math.PI/180;
 function hav(a1,o1,a2,o2){const dl=(a2-a1)*D,do2=(o2-o1)*D;const a=Math.sin(dl/2)**2+Math.cos(a1*D)*Math.cos(a2*D)*Math.sin(do2/2)**2;return 2*RE*Math.asin(Math.sqrt(a))}
+/** ENU (east,north) metres from a local origin (lat0,lon0) °, for small distances. */
+function enuMeters(lat0,lon0,lat,lon){
+  const c=Math.cos(lat0*D);
+  return{x:(lon-lon0)*D*RE*c,y:(lat-lat0)*D*RE};
+}
+function cross2dZ(ax,ay,bx,by){
+  return ax*by-ay*bx;
+}
+/**
+ * Perpendicular to chord A→B, through A: signed 2D cross in local plane. Zero when P is on the line.
+ * (B-A) × (P-A) in z.
+ */
+function sideOfPerpAtA(latA,lonA,latB,lonB,latP,lonP){
+  const b=enuMeters(latA,lonA,latB,lonB);
+  const p=enuMeters(latA,lonA,latP,lonP);
+  if(Math.hypot(b.x,b.y)<0.1)return 0;
+  return cross2dZ(b.x,b.y,p.x,p.y);
+}
+/** Same for line through B, ⊥ A→B: (B-A) × (P-B) in z. */
+function sideOfPerpAtB(latA,lonA,latB,lonB,latP,lonP){
+  const b=enuMeters(latA,lonA,latB,lonB);
+  const p=enuMeters(latA,lonA,latP,lonP);
+  if(Math.hypot(b.x,b.y)<0.1)return 0;
+  return cross2dZ(b.x,b.y,p.x-b.x,p.y-b.y);
+}
+const LEG_CHORD_MIN_M=3;
+function segmentSignCrosses(s0,s1){
+  if(!Number.isFinite(s0)||!Number.isFinite(s1))return false;
+  return s0*s1<0;
+}
+/** Sum p.dist (or haversine segment) for indices (i0+1 … i1) inclusive. */
+function sumPathDist(pts,i0,i1){
+  if(i1<=i0||!pts?.length)return 0;
+  let s=0;
+  for(let k=i0+1;k<=i1;k++)s+=pts[k].dist??hav(pts[k-1].lat,pts[k-1].lon,pts[k].lat,pts[k].lon);
+  return s;
+}
+function firstPerpCrossing(pts, iStart, jEnd, sideAt){
+  const sF=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd,pts.length-1);
+  for(let j=Math.max(1,sF+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s0=sideAt(a),s1=sideAt(b);
+    if(segmentSignCrosses(s0,s1))return j;
+  }
+  return-1;
+}
+function allPerpCrossingEnds(pts, jMin, jEnd, sideAt){
+  const o=[];
+  for(let j=Math.max(1,jMin);j<=jEnd&&j<pts.length;j++){
+    const a=pts[j-1],b=pts[j];
+    if(segmentSignCrosses(sideAt(a),sideAt(b)))o.push(j);
+  }
+  return o;
+}
+/**
+ * Path between the line through A and B, ⊥ to chord A–B, at each mark. Distance = track along the boat between those two crossings.
+ * roundingM = same line at the from-mark, distance between first/last crossing before the leg (mark rounding "width").
+ * Fallback to fbStart/fbEnd (closest-approach) when no crossings.
+ */
+function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd){
+  const c=hav(latA,lonA,latB,lonB);
+  if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
+  const sideA=(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
+  const sideB=(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
+  const sF=Math.max(0,searchFrom|0);
+  const jEnd=pts.length-1;
+  const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
+  if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
+  const cB=firstPerpCrossing(pts, cA, jEnd, sideB);
+  if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
+  if(cB-cA+1<5)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
+  const rBefore=Math.max(1,sF+1);
+  const rEnd=Math.max(rBefore, cA-1);
+  const rCrosses=allPerpCrossingEnds(pts, rBefore, rEnd, sideA);
+  const roundingM=rCrosses.length>=2?sumPathDist(pts, rCrosses[0], rCrosses[rCrosses.length-1]):0;
+  return{startIdx:cA,endIdx:cB,roundingM,legPathDef:"perp",gatesAtA:cA,gatesAtB:cB};
+}
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
 function destinationPoint(lat,lon,bearingDeg,distM){
   const δ=distM/RE,θ=bearingDeg*D;
@@ -584,6 +662,7 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
       efficiency: l.efficiency,
       duration: l.duration,
       distanceM: l.distance != null && Number.isFinite(l.distance) ? l.distance : null,
+      roundingM: l.roundingM != null && Number.isFinite(l.roundingM) ? l.roundingM : null,
     })),
     updated_at: new Date().toISOString(),
   };
@@ -1643,9 +1722,22 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     }
   }
 
+  const getWP=(r)=>{
+    if(r.lat!=null&&r.lon!=null&&Number.isFinite(r.lat)&&Number.isFinite(r.lon))return{lat:r.lat,lon:r.lon};
+    const p=pts?.[r.idx];
+    return p?{lat:p.lat,lon:p.lon}:null;
+  };
+  let nextFrom=0;
   for(let i=0;i<roundings.length-1;i++){
+    const wA=getWP(roundings[i]),wB=getWP(roundings[i+1]);
     const si=roundings[i].idx,ei=roundings[i+1].idx;
-    const legPts=pts.slice(si,ei+1);
+    let startIdx=si,endIdx=ei,roundingM=0,legPathDef="closest";
+    if(wA&&wB){
+      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei);
+      startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";
+    }
+    const legPts=pts.slice(startIdx,endIdx+1);
+    nextFrom=endIdx;
     if(legPts.length<5)continue;
     const dist=legPts.reduce((a,p)=>a+(p.dist||0),0);
     const straightDist=hav(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
@@ -1659,11 +1751,12 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     legs.push({
       from:roundings[i].mark,to:roundings[i+1].mark,
       lap:roundings[i].lap,
-      startIdx:si,endIdx:ei,
+      startIdx,endIdx,
       distance:dist,straightDistance:straightDist,
       duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
       efficiency:eff,legBearing,
       type:"leg",
+      roundingM,legPathDef,
     });
   }
   return{legs,roundings};
@@ -3576,15 +3669,16 @@ function App(){
         </div>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
+        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Distances use the <strong style={{color:C.txt}}>track</strong> between the <strong style={{color:C.txt}}>gate lines</strong> at each end of the leg: a line through the mark, perpendicular to the mark-to-mark course. <strong style={{color:C.txt}}>Round</strong> = extra path in the <strong style={{color:C.txt}}>from-mark</strong> zone (first ↔ last gate crossing) before the leg proper — re-run analysis to refresh values.</p>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:720}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:820}}>
             <thead>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
                 <th rowSpan={2} style={th2}>Leg</th>
                 <th rowSpan={2} style={th2}>From → To</th>
                 <th rowSpan={2} style={th2}>Type</th>
-                <th colSpan={4} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
-                <th colSpan={4} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
+                <th colSpan={5} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
+                <th colSpan={5} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
                 <th rowSpan={2} style={th2}>Time gain/loss</th>
               </tr>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
@@ -3592,10 +3686,12 @@ function App(){
                 <th style={th2}>Eff%</th>
                 <th style={th2}>Dist (nm)</th>
                 <th style={th2}>Time</th>
+                <th style={th2}>Round (m)</th>
                 <th style={th2}>VMG</th>
                 <th style={th2}>Eff%</th>
                 <th style={th2}>Dist (nm)</th>
                 <th style={th2}>Time</th>
+                <th style={th2}>Round (m)</th>
               </tr>
             </thead>
             <tbody>
@@ -3604,6 +3700,7 @@ function App(){
                 const t0l=l0?.duration, t1l=l1?.duration;
                 const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
                 const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
+                const r0m=l0?.roundingM, r1m=l1?.roundingM;
                 let deltaS="—";
                 if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
                   const d=t1l-t0l;
@@ -3620,10 +3717,12 @@ function App(){
                     <td style={tdN}>{l0&&l0.efficiency!=null?fmtF(l0.efficiency,0):"—"}</td>
                     <td style={tdN}>{d0m!=null&&Number.isFinite(d0m)?m2nm(d0m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
+                    <td style={tdN}>{r0m!=null&&Number.isFinite(r0m)?Math.round(r0m):"—"}</td>
                     <td style={tdN}>{l1&&l1.avgVMG!=null?fmtF(l1.avgVMG,2):"—"}</td>
                     <td style={tdN}>{l1&&l1.efficiency!=null?fmtF(l1.efficiency,0):"—"}</td>
                     <td style={tdN}>{d1m!=null&&Number.isFinite(d1m)?m2nm(d1m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
+                    <td style={tdN}>{r1m!=null&&Number.isFinite(r1m)?Math.round(r1m):"—"}</td>
                     <td style={{...tdL,fontSize:11}}>{deltaS}</td>
                   </tr>
                 );
@@ -4234,7 +4333,7 @@ function App(){
               return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:C.card,borderRadius:8,marginBottom:3,border:`1px solid ${C.bdr}`,fontSize:11}}>
                 <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
                 <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
-                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{m2nm(l.distance).toFixed(2)}nm</div>
+                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{m2nm(l.distance).toFixed(2)}nm{l.roundingM!=null&&l.roundingM>0.5&&<span style={{color:C.txD,fontSize:9}}> · r {Math.round(l.roundingM)}m</span>}</div>
                 <div style={{width:50,color:C.txM}}>{fT(l.duration)}</div>
                 <div style={{width:50,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
                 <div style={{width:42,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVMG.toFixed(1)}</div>
