@@ -526,6 +526,22 @@ function serializableAnalysisSnapshot(results){
   catch(_){return null;}
 }
 
+/** Supabase/PostgREST may return JSONB as object or (in some clients) a JSON string. */
+function parseAnalysisSnapshotField(raw){
+  if(raw==null)return null;
+  if(typeof raw==="string"){
+    const t=raw.trim();
+    if(!t)return null;
+    try{
+      const o=JSON.parse(t);
+      if(o!=null&&typeof o==="object"&&!Array.isArray(o))return o;
+    }catch(_){ return null; }
+    return null;
+  }
+  if(typeof raw==="object"&&!Array.isArray(raw))return raw;
+  return null;
+}
+
 function unknownAnalysisSnapshotColumn(err){
   const s=JSON.stringify(err||{}).toLowerCase();
   return s.includes("analysis_snapshot")&&(s.includes("column")||s.includes("schema")||s.includes("could not find")||s.includes("does not exist"));
@@ -3000,12 +3016,27 @@ function App(){
     windwardMarkName,
   ]);
 
-  const openAnalysisFromSavedRow=useCallback((row)=>{
-    if(!row?.analysis_snapshot||typeof row.analysis_snapshot!=="object"){
+  const openAnalysisFromSavedRow=useCallback(async (rowIn)=>{
+    if(!rowIn?.activity_id){
+      alert("Invalid saved activity.");
+      return false;
+    }
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    let row=rowIn;
+    let snap=parseAnalysisSnapshotField(row.analysis_snapshot);
+    if((!snap||!Array.isArray(snap.points)||snap.points.length<2)&&sid!=null){
+      try{
+        const fresh=await loadAnalysisRow(sid,String(rowIn.activity_id));
+        if(fresh){
+          row=fresh;
+          snap=parseAnalysisSnapshotField(row.analysis_snapshot);
+        }
+      }catch(e){ console.warn("loadAnalysisRow for full analysis:",e); }
+    }
+    if(!snap){
       alert("Full analysis is not stored for this activity yet. Run Supabase migration (analysis_snapshot column) if needed, then open the GPX/FIT from Upload and run analysis once more to save charts and map.");
       return false;
     }
-    const snap=row.analysis_snapshot;
     const pts=snap.points;
     if(!Array.isArray(pts)||pts.length<2){
       alert("Saved analysis is missing track points. Upload the file again and run analysis.");
@@ -3030,7 +3061,7 @@ function App(){
     setView("analysis");
     setSavedSummaryId(null);
     return true;
-  },[]);
+  },[session,sAth]);
 
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
@@ -3219,9 +3250,9 @@ function App(){
                   </div>
                 ):act.__fromSupabaseOnly?(
                   <div style={{display:"flex",width:"100%",alignItems:"stretch"}}>
-                    <button type="button" onClick={()=>{
+                    <button type="button" onClick={async()=>{
                       if(compareMode){toggleComparePick(act.id);return;}
-                      if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;
+                      if(act.__savedRow&&await openAnalysisFromSavedRow(act.__savedRow))return;
                       setSavedSummaryId(String(act.id));setView("saved-summary");
                     }} title="Open or select for compare" style={{display:"flex",flex:1,alignItems:"center",gap:12,background:"transparent",padding:"12px 8px 12px 14px",border:"none",textAlign:"left",cursor:"pointer",minWidth:0}}>
                       <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>📁</div>
@@ -3230,7 +3261,7 @@ function App(){
                         <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,null)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span></div>
                       </div>
                     </button>
-                    {!compareMode&&<button type="button" onClick={(e)=>{e.stopPropagation();if(act.__savedRow&&openAnalysisFromSavedRow(act.__savedRow))return;setSavedSummaryId(String(act.id));setView("saved-summary");}} title={act.__savedRow?.analysis_snapshot?"Open full analysis (charts & map)":"View saved summary"} style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,background:"transparent",border:"none",borderLeft:`1px solid ${C.bdr}`,padding:"8px 12px 8px 14px",cursor:"pointer",color:C.acc,fontSize:12,fontWeight:700,fontFamily:"'Outfit',sans-serif",whiteSpace:"nowrap"}}>Analysis <span style={{color:C.txD,fontSize:16,fontWeight:400}} aria-hidden>›</span></button>}
+                    {!compareMode&&<button type="button" onClick={async (e)=>{e.stopPropagation();if(act.__savedRow&&await openAnalysisFromSavedRow(act.__savedRow))return;setSavedSummaryId(String(act.id));setView("saved-summary");}} title="Open full analysis (charts & map) or saved summary" style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,background:"transparent",border:"none",borderLeft:`1px solid ${C.bdr}`,padding:"8px 12px 8px 14px",cursor:"pointer",color:C.acc,fontSize:12,fontWeight:700,fontFamily:"'Outfit',sans-serif",whiteSpace:"nowrap"}}>Analysis <span style={{color:C.txD,fontSize:16,fontWeight:400}} aria-hidden>›</span></button>}
                   </div>
                 ):(
                   <button type="button" onClick={()=>{
@@ -3288,7 +3319,7 @@ function App(){
       <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px 40px"}}>
         <div style={{fontSize:16,fontWeight:700,color:C.txt,marginBottom:8}}>{title}</div>
         <div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:14,alignItems:"center"}}>
-          {r?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r)} style={{...btn(C.acc,"#0a1628"),padding:"10px 18px",fontSize:13}}>Open full analysis</button>}
+          {r&&<button type="button" onClick={async()=>{await openAnalysisFromSavedRow(r);}} style={{...btn(C.acc,"#0a1628"),padding:"10px 18px",fontSize:13}}>Open full analysis</button>}
           <button type="button" onClick={()=>fileRefSavedSummary.current?.click()} style={{...btn("transparent",C.acc,C.acc),padding:"10px 18px",fontSize:12,border:`1px solid ${C.acc}`}}>Upload GPX/FIT again</button>
           <input ref={fileRefSavedSummary} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
@@ -3357,9 +3388,9 @@ function App(){
       </div>
       <div style={{maxWidth:720,margin:"0 auto",padding:"20px 14px 40px"}}>
         <div style={{fontSize:11,color:C.txD,marginBottom:12,lineHeight:1.55}}>Side-by-side fields come from the last analysis saved to Supabase (course setup, wind, and computed stats). Open an activity and run analysis to refresh its row.</div>
-        {(r0?.analysis_snapshot||r1?.analysis_snapshot)&&<div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:16}}>
-          {r0?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r0)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:12}}>Open full analysis · left</button>}
-          {r1?.analysis_snapshot&&<button type="button" onClick={()=>openAnalysisFromSavedRow(r1)} style={{...btn(`${C.gld}22`,C.gld,C.gld),padding:"8px 14px",fontSize:12}}>Open full analysis · right</button>}
+        {(r0||r1)&&<div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:16}}>
+          {r0&&<button type="button" onClick={async()=>{await openAnalysisFromSavedRow(r0);}} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:12}}>Open full analysis · left</button>}
+          {r1&&<button type="button" onClick={async()=>{await openAnalysisFromSavedRow(r1);}} style={{...btn(`${C.gld}22`,C.gld,C.gld),padding:"8px 14px",fontSize:12}}>Open full analysis · right</button>}
         </div>}
         <div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
