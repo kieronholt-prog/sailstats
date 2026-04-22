@@ -3050,12 +3050,14 @@ function App(){
     setMarkOverrides(row.mark_overrides&&typeof row.mark_overrides==="object"?row.mark_overrides:{});
     if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
     else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
-    applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
     applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
     applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
     if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
     setRawPoints(pts);
-    setCroppedPoints(pts);
+    /* croppedPoints is useMemo from raw + crop. useEffect on rawPoints resets crop to 0 — re-apply saved crop after that. */
+    setTimeout(()=>{
+      applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
+    },0);
     setAnalysis(snap);
     setTab("overview");
     setView("analysis");
