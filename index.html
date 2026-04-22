@@ -574,7 +574,17 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     stats: results.stats,
     tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing, mark: t.markRounding?.mark ?? null, markSplit: t.markRounding?.splitRole ?? null, excluded: !!t.excludeFromStatsAndVMG, nearestMark: t.nearestMarkName ?? null })),
     gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null, excluded: !!g.excludeFromStatsAndVMG, nearestMark: g.nearestMarkName ?? null })),
-    leg_summary: results.legs.map(l => ({ from: l.from, to: l.to, type: l.type, avgSpeed: l.avgSpeed, avgVMG: l.avgVMG, efficiency: l.efficiency, duration: l.duration })),
+    leg_summary: results.legs.map((l,idx) => ({
+      legNo: idx + 1,
+      from: l.from,
+      to: l.to,
+      type: l.type,
+      avgSpeed: l.avgSpeed,
+      avgVMG: l.avgVMG,
+      efficiency: l.efficiency,
+      duration: l.duration,
+      distanceM: l.distance != null && Number.isFinite(l.distance) ? l.distance : null,
+    })),
     updated_at: new Date().toISOString(),
   };
   if(snap)baseRow.analysis_snapshot=snap;
@@ -1826,12 +1836,37 @@ function sampleStdDev(arr){
   return Math.sqrt(arr.reduce((s,x)=>s+(x-m)**2,0)/(arr.length-1));
 }
 
-/** Speed / COG / VMG stats for samples on upwind legs, split by tack (vs wind FROM). */
-function computeUpwindTackLegStats(en,legs,wd,roundingMask=null){
+/** Strip tack leg stats to JSON-safe compare fields (stored in analyses.stats). */
+function tackStatsForCompareStore(t){
+  if(!t)return null;
+  const trim=(x)=>({
+    n:x.n??0,
+    avgSpeed:x.avgSpeed??null,
+    speedStd:x.speedStd??null,
+    avgVMG:x.avgVMG??null,
+    avgCourse:x.avgCourse??null,
+    twaFromWind:x.twaFromWind??null,
+    twaStd:x.twaStd??null,
+    courseStd:x.courseStd??null,
+  });
+  return{
+    port:trim(t.port||{}),
+    stbd:trim(t.stbd||{}),
+    portSamplePct:t.portSamplePct??null,
+    stbdSamplePct:t.stbdSamplePct??null,
+    p2sTwaDiff:t.p2sTwaDiff??null,
+  };
+}
+
+/**
+ * Speed / COG / VMG stats for legs of a given type, split by tack (port vs starboard vs wind FROM).
+ * @param {"upwind"|"reach"|"downwind"} legType
+ */
+function computeTackLegStatsByType(en,legs,wd,legType,roundingMask=null){
   const port=[],stbd=[];
   const skip=i=>roundingMask&&roundingMask.length>i&&roundingMask[i];
   for(const l of legs||[]){
-    if(l.type!=="upwind"||l.startIdx==null||l.endIdx==null)continue;
+    if(l.type!==legType||l.startIdx==null||l.endIdx==null)continue;
     for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
       if(skip(i))continue;
       const p=en[i],s=ms2k(p.ss||0);
@@ -1844,11 +1879,13 @@ function computeUpwindTackLegStats(en,legs,wd,roundingMask=null){
     }
   }
   const pack=(arr)=>{
-    if(!arr.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null,avgVMG:null,twaFromWind:null,windRelLabel:null};
+    if(!arr.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null,avgVMG:null,twaFromWind:null,twaStd:null,windRelLabel:null};
     const spds=arr.map(x=>x.s),cogs=arr.map(x=>x.cog),vmgs=arr.map(x=>x.vmg);
+    const twaSamples=arr.map(x=>acuteTwaFromWindDeg(x.cog,wd));
     const avgSpeed=spds.reduce((a,b)=>a+b,0)/spds.length;
     const speedStd=sampleStdDev(spds);
     const{mean:avgCourse,std:courseStd}=circularMeanStdDeg(cogs);
+    const twaStd=twaSamples.length>=2?sampleStdDev(twaSamples):null;
     const avgVMG=vmgs.length?Math.abs(vmgs.reduce((a,b)=>a+b,0)/vmgs.length):null;
     let twaFromWind=null,windRelLabel=null;
     if(avgCourse!=null&&Number.isFinite(avgCourse)){
@@ -1857,9 +1894,19 @@ function computeUpwindTackLegStats(en,legs,wd,roundingMask=null){
       const signedFromWind=((avgCourse-wd+540)%360)-180;
       windRelLabel=`COG ${Math.round(avgCourse)}° (${signedFromWind>=0?"+":""}${Math.round(signedFromWind)}° from wind) · ${Math.round(acute)}° TWA`;
     }
-    return{n:arr.length,avgSpeed,speedStd,avgCourse,courseStd,avgVMG,twaFromWind,windRelLabel};
+    return{n:arr.length,avgSpeed,speedStd,avgCourse,courseStd,avgVMG,twaFromWind,twaStd,windRelLabel};
   };
-  return{port:pack(port),stbd:pack(stbd)};
+  const P=pack(port),S=pack(stbd);
+  const tot=P.n+S.n;
+  const portSamplePct=tot>0?100*P.n/tot:null;
+  const stbdSamplePct=tot>0?100*S.n/tot:null;
+  const p2sTwaDiff=P.twaFromWind!=null&&S.twaFromWind!=null&&Number.isFinite(P.twaFromWind)&&Number.isFinite(S.twaFromWind)
+    ?Math.abs(P.twaFromWind-S.twaFromWind):null;
+  return{port:P,stbd:S,portSamplePct,stbdSamplePct,p2sTwaDiff};
+}
+
+function computeUpwindTackLegStats(en,legs,wd,roundingMask=null){
+  return computeTackLegStatsByType(en,legs,wd,"upwind",roundingMask);
 }
 
 function computeMaxSpeedHighlight(en,legs,wd){
@@ -2077,7 +2124,14 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   let portS=0,stbdS=0;
   en.forEach(p=>{if(ms2k(p.ss)<0.5)return;const r=((p.cog-wd+360)%360);if(r>180)stbdS++;else portS++});
 
-  const upwindByTack=computeUpwindTackLegStats(en,legs,wd,roundingPointMask);
+  const upwindByTack=computeTackLegStatsByType(en,legs,wd,"upwind",roundingPointMask);
+  const reachByTack=computeTackLegStatsByType(en,legs,wd,"reach",roundingPointMask);
+  const downwindByTack=computeTackLegStatsByType(en,legs,wd,"downwind",roundingPointMask);
+  const tackStatsByLegType={
+    upwind:tackStatsForCompareStore(upwindByTack),
+    reach:tackStatsForCompareStore(reachByTack),
+    downwind:tackStatsForCompareStore(downwindByTack),
+  };
   const tacksStats=tacks.filter(t=>!t.excludeFromStatsAndVMG);
   const gybesStats=gybes.filter(g=>!g.excludeFromStatsAndVMG);
   const soloTackScores=tacksStats.filter(t=>t.q!=null).map(t=>t.q);
@@ -2103,6 +2157,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
       avgTackQuality,avgGybeQuality,
       windShiftRange:windStats.range,
       portStbdSplit:{port:portS,stbd:stbdS},
+      tackStatsByLegType,
     },
     tacks,gybes,legs,
     markRoundingDetails:markRoundingDetailsAll.filter(d=>!d.skipped),
@@ -3363,64 +3418,219 @@ function App(){
     const title1=(r1?.activity_name&&String(r1.activity_name).trim())||strava1?.name||`#${id1}`;
     const s0=r0?.stats,s1=r1?.stats;
     const leg0=r0?.leg_summary,leg1=r1?.leg_summary;
-    const mv0=meanNumeric((leg0||[]).map(l=>l.avgVMG));
-    const mv1=meanNumeric((leg1||[]).map(l=>l.avgVMG));
-    const tack0=r0?.tack_scores,tack1=r1?.tack_scores;
-    const gyb0=r0?.gybe_scores,gyb1=r1?.gybe_scores;
-    const avgTk=(arr)=>{const q=(arr||[]).filter(t=>!t.excluded&&Number.isFinite(t.q));return q.length?Math.round(q.reduce((a,t)=>a+t.q,0)/q.length):null;};
-    const avgGy=(arr)=>{const q=(arr||[]).filter(g=>!g.excluded&&Number.isFinite(g.q));return q.length?Math.round(q.reduce((a,g)=>a+g.q,0)/q.length):null;};
-    const atk0=avgTk(tack0),atk1=avgTk(tack1),agy0=avgGy(gyb0),agy1=avgGy(gyb1);
-    const dispAtk0=atk0??(s0?.avgTackQuality!=null?Math.round(s0.avgTackQuality):null);
-    const dispAtk1=atk1??(s1?.avgTackQuality!=null?Math.round(s1.avgTackQuality):null);
-    const dispGy0=agy0??(s0?.avgGybeQuality!=null?Math.round(s0.avgGybeQuality):null);
-    const dispGy1=agy1??(s1?.avgGybeQuality!=null?Math.round(s1.avgGybeQuality):null);
-    const fmt=(v,fn)=>v==null||!Number.isFinite(v)?"—":fn(v);
-    const cRow=(k,a,b)=>(
-      <tr key={k} style={{borderBottom:`1px solid ${C.bdr}`}}>
-        <td style={{padding:"10px 10px",color:C.txM,fontSize:12}}>{k}</td>
-        <td style={{padding:"10px 8px",color:C.txt,fontSize:12,fontFamily:"'JetBrains Mono',monospace",verticalAlign:"top"}}>{a}</td>
-        <td style={{padding:"10px 8px",color:C.txt,fontSize:12,fontFamily:"'JetBrains Mono',monospace",verticalAlign:"top"}}>{b}</td>
-      </tr>
-    );
+    const th2={textAlign:"left",padding:"8px 6px",fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:0.5};
+    const thTrack=(col)=>({textAlign:"right",padding:"8px 6px",fontSize:10,color:col,maxWidth:100});
+    const tdL={padding:"6px 6px",fontSize:12,color:C.txM};
+    const tdN={padding:"6px 6px",fontSize:12,color:C.txt,fontFamily:"'JetBrains Mono',monospace",textAlign:"right",verticalAlign:"top"};
+    const fmtF=(v,d=1)=>v==null||!Number.isFinite(v)?"—":Number(v).toFixed(d);
+    const fmtPDeg=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
+    const wind0=r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?Math.round(Number(r0.wind_direction)):"—";
+    const w1fix=r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?Math.round(Number(r1.wind_direction)):"—";
+    const rowSpd=(t,pfx)=>{
+      if(!t||!t[pfx]||!t[pfx].n)return"—";
+      const o=t[pfx];
+      return`${fmtF(o.avgSpeed,2)}${o.speedStd!=null&&Number.isFinite(o.speedStd)?` (σ ${fmtF(o.speedStd,2)})`:""}`;
+    };
+    const rowCog=(o)=>{
+      if(!o||!o.n||o.avgCourse==null||!Number.isFinite(o.avgCourse))return"—";
+      return`${fmtF(o.avgCourse,1)}°${o.courseStd!=null&&Number.isFinite(o.courseStd)?` (σ ${fmtF(o.courseStd,1)}°)`:""}`;
+    };
+    const TackTypeBlock=({name,ts0,ts1})=>{
+      const hasData=ts0||ts1;
+      if(!hasData)return(
+        <div style={{fontSize:11,color:C.txD,padding:10}}>No {name} data — re-run analysis to store tack × leg-type splits.</div>
+      );
+      return(<div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",minWidth:400}}>
+          <thead>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <th style={th2}>{name}</th>
+              <th style={thTrack(C.acc)}>{title0}</th>
+              <th style={thTrack(C.gld)}>{title1}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}><td colSpan={3} style={{...tdL,fontSize:10,color:C.port,fontWeight:700,paddingTop:8}}>Port tack</td></tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Avg speed (var)</td>
+              <td style={tdN}>{rowSpd(ts0,"port")}</td>
+              <td style={tdN}>{rowSpd(ts1,"port")}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Avg VMG (kts)</td>
+              <td style={tdN}>{ts0?.port?.avgVMG!=null?fmtF(ts0.port.avgVMG,2):"—"}</td>
+              <td style={tdN}>{ts1?.port?.avgVMG!=null?fmtF(ts1.port.avgVMG,2):"—"}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Mean COG (var)</td>
+              <td style={tdN}>{rowCog(ts0?.port)}</td>
+              <td style={tdN}>{rowCog(ts1?.port)}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Mean TWA (TWA var)</td>
+              <td style={tdN}>{ts0?.port?.twaFromWind!=null?`${fmtF(ts0.port.twaFromWind,1)}${ts0.port.twaStd!=null?` (σ ${fmtF(ts0.port.twaStd,1)})`:""}`:"—"}</td>
+              <td style={tdN}>{ts1?.port?.twaFromWind!=null?`${fmtF(ts1.port.twaFromWind,1)}${ts1.port.twaStd!=null?` (σ ${fmtF(ts1.port.twaStd,1)})`:""}`:"—"}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}><td colSpan={3} style={{...tdL,fontSize:10,color:C.stbd,fontWeight:700,paddingTop:6}}>Starboard tack</td></tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Avg speed (var)</td>
+              <td style={tdN}>{rowSpd(ts0,"stbd")}</td>
+              <td style={tdN}>{rowSpd(ts1,"stbd")}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Avg VMG (kts)</td>
+              <td style={tdN}>{ts0?.stbd?.avgVMG!=null?fmtF(ts0.stbd.avgVMG,2):"—"}</td>
+              <td style={tdN}>{ts1?.stbd?.avgVMG!=null?fmtF(ts1.stbd.avgVMG,2):"—"}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Mean COG (var)</td>
+              <td style={tdN}>{rowCog(ts0?.stbd)}</td>
+              <td style={tdN}>{rowCog(ts1?.stbd)}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Mean TWA (TWA var)</td>
+              <td style={tdN}>{ts0?.stbd?.twaFromWind!=null?`${fmtF(ts0.stbd.twaFromWind,1)}${ts0.stbd.twaStd!=null?` (σ ${fmtF(ts0.stbd.twaStd,1)})`:""}`:"—"}</td>
+              <td style={tdN}>{ts1?.stbd?.twaFromWind!=null?`${fmtF(ts1.stbd.twaFromWind,1)}${ts1.stbd.twaStd!=null?` (σ ${fmtF(ts1.stbd.twaStd,1)})`:""}`:"—"}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>P↔S mean TWA difference</td>
+              <td style={tdN}>{fmtPDeg(ts0?.p2sTwaDiff)}</td>
+              <td style={tdN}>{fmtPDeg(ts1?.p2sTwaDiff)}</td>
+            </tr>
+            <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+              <td style={tdL}>Port % / Stbd % (samples)</td>
+              <td style={tdN}>{ts0?.portSamplePct!=null?`${ts0.portSamplePct.toFixed(0)}% / ${(ts0.stbdSamplePct??0).toFixed(0)}%`:"—"}</td>
+              <td style={tdN}>{ts1?.portSamplePct!=null?`${ts1.portSamplePct.toFixed(0)}% / ${(ts1.stbdSamplePct??0).toFixed(0)}%`:"—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>);
+    };
+    const t0s=s0?.tackStatsByLegType;
+    const t1s=s1?.tackStatsByLegType;
+    const nLeg=Math.max(leg0?.length||0,leg1?.length||0);
+    const lab0=title0.length>20?`${title0.slice(0,18)}…`:title0;
+    const lab1=title1.length>20?`${title1.slice(0,18)}…`:title1;
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
         <button type="button" onClick={()=>{setView("activities");setCompareIds(null);}} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Activities</button>
         <div style={{fontSize:14,fontWeight:600,color:C.txt}}>Compare</div>
         <div style={{width:72}}/>
       </div>
-      <div style={{maxWidth:720,margin:"0 auto",padding:"20px 14px 40px"}}>
-        <div style={{fontSize:11,color:C.txD,marginBottom:12,lineHeight:1.55}}>Side-by-side fields come from the last analysis saved to Supabase (course setup, wind, and computed stats). Open an activity and run analysis to refresh its row.</div>
-        {(r0||r1)&&<div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:16}}>
-          {r0&&<button type="button" onClick={async()=>{await openAnalysisFromSavedRow(r0);}} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:12}}>Open full analysis · left</button>}
-          {r1&&<button type="button" onClick={async()=>{await openAnalysisFromSavedRow(r1);}} style={{...btn(`${C.gld}22`,C.gld,C.gld),padding:"8px 14px",fontSize:12}}>Open full analysis · right</button>}
-        </div>}
-        <div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
+      <div style={{maxWidth:900,margin:"0 auto",padding:"20px 14px 40px"}}>
+        <p style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Data from the last analysis saved in Supabase for each activity. Re-run <strong style={{color:C.txt}}>Analyse</strong> on an activity to refresh its stored metrics and leg splits.</p>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>1 · Overall performance</div>
+        <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20,overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
             <thead>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
-                <th style={{textAlign:"left",padding:"12px 10px",fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1}}>Metric</th>
-                <th style={{textAlign:"left",padding:"12px 8px",fontSize:11,color:C.acc,maxWidth:180}}>{title0}</th>
-                <th style={{textAlign:"left",padding:"12px 8px",fontSize:11,color:C.gld,maxWidth:180}}>{title1}</th>
+                <th style={th2}>Metric</th>
+                <th style={thTrack(C.acc)}>{title0}</th>
+                <th style={thTrack(C.gld)}>{title1}</th>
               </tr>
             </thead>
             <tbody>
-              {cRow("Date",formatCompareRowSubtitle(r0,strava0),formatCompareRowSubtitle(r1,strava1))}
-              {cRow("Course",r0?.course_letter||"—",r1?.course_letter||"—")}
-              {cRow("Laps",r0?.laps!=null?String(r0.laps):"—",r1?.laps!=null?String(r1.laps):"—")}
-              {cRow("Wind °",r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?`${Math.round(Number(r0.wind_direction))}`:"—",r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?`${Math.round(Number(r1.wind_direction))}`:"—")}
-              {cRow("Distance (nm)",s0?m2nm(s0.totalDist).toFixed(2):"—",s1?m2nm(s1.totalDist).toFixed(2):"—")}
-              {cRow("Duration",s0?fT(s0.duration):"—",s1?fT(s1.duration):"—")}
-              {cRow("Max speed (kts)",fmt(s0?.maxSpeed,v=>v.toFixed(1)),fmt(s1?.maxSpeed,v=>v.toFixed(1)))}
-              {cRow("Avg speed (kts)",fmt(s0?.avgSpeed,v=>v.toFixed(1)),fmt(s1?.avgSpeed,v=>v.toFixed(1)))}
-              {cRow("Tacks (racing)",s0!=null?`${s0.tackCount}`:"—",s1!=null?`${s1.tackCount}`:"—")}
-              {cRow("Gybes (racing)",s0!=null?`${s0.gybeCount}`:"—",s1!=null?`${s1.gybeCount}`:"—")}
-              {cRow("Avg tack %",dispAtk0!=null?`${dispAtk0}`:"—",dispAtk1!=null?`${dispAtk1}`:"—")}
-              {cRow("Avg gybe %",dispGy0!=null?`${dispGy0}`:"—",dispGy1!=null?`${dispGy1}`:"—")}
-              {cRow("Legs (n)",leg0?.length!=null?`${leg0.length}`:"—",leg1?.length!=null?`${leg1.length}`:"—")}
-              {cRow("Mean leg VMG",mv0!=null?mv0.toFixed(2):"—",mv1!=null?mv1.toFixed(2):"—")}
-              {cRow("Wind shift (°)",fmt(s0?.windShiftRange,v=>v.toFixed(1)),fmt(s1?.windShiftRange,v=>v.toFixed(1)))}
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <td style={tdL}>Elapsed time</td>
+                <td style={tdN}>{s0&&Number.isFinite(s0.duration)?fT(s0.duration):"—"}</td>
+                <td style={tdN}>{s1&&Number.isFinite(s1.duration)?fT(s1.duration):"—"}</td>
+              </tr>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <td style={tdL}>Total distance (nm)</td>
+                <td style={tdN}>{s0&&Number.isFinite(s0.totalDist)?m2nm(s0.totalDist).toFixed(2):"—"}</td>
+                <td style={tdN}>{s1&&Number.isFinite(s1.totalDist)?m2nm(s1.totalDist).toFixed(2):"—"}</td>
+              </tr>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <td style={tdL}>Tacks (racing)</td>
+                <td style={tdN}>{s0?.tackCount!=null?String(s0.tackCount):"—"}</td>
+                <td style={tdN}>{s1?.tackCount!=null?String(s1.tackCount):"—"}</td>
+              </tr>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <td style={tdL}>Gybes (racing)</td>
+                <td style={tdN}>{s0?.gybeCount!=null?String(s0.gybeCount):"—"}</td>
+                <td style={tdN}>{s1?.gybeCount!=null?String(s1.gybeCount):"—"}</td>
+              </tr>
+              <tr>
+                <td style={tdL}>Derived wind FROM (°)</td>
+                <td style={tdN}>{wind0}</td>
+                <td style={tdN}>{w1fix}</td>
+              </tr>
             </tbody>
           </table>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>2 · Upwind performance (by tack)</div>
+        <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20}}>
+          <TackTypeBlock name="Upwind" ts0={t0s?.upwind} ts1={t1s?.upwind}/>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>3 · Reach performance (by tack)</div>
+        <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20}}>
+          <TackTypeBlock name="Reach" ts0={t0s?.reach} ts1={t1s?.reach}/>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>4 · Downwind performance (by tack)</div>
+        <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20}}>
+          <TackTypeBlock name="Downwind" ts0={t0s?.downwind} ts1={t1s?.downwind}/>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
+        <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:720}}>
+            <thead>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <th rowSpan={2} style={th2}>Leg</th>
+                <th rowSpan={2} style={th2}>From → To</th>
+                <th rowSpan={2} style={th2}>Type</th>
+                <th colSpan={4} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
+                <th colSpan={4} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
+                <th rowSpan={2} style={th2}>Time gain/loss</th>
+              </tr>
+              <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
+                <th style={th2}>VMG</th>
+                <th style={th2}>Eff%</th>
+                <th style={th2}>Dist (nm)</th>
+                <th style={th2}>Time</th>
+                <th style={th2}>VMG</th>
+                <th style={th2}>Eff%</th>
+                <th style={th2}>Dist (nm)</th>
+                <th style={th2}>Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({length:nLeg},(_,i)=>{
+                const l0=leg0&&leg0[i],l1=leg1&&leg1[i];
+                const t0l=l0?.duration, t1l=l1?.duration;
+                const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
+                const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
+                let deltaS="—";
+                if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
+                  const d=t1l-t0l;
+                  if(Math.abs(d)<0.5)deltaS="0s";
+                  else if(d>0)deltaS=`+${d.toFixed(0)}s (${title1} slower)`;
+                  else deltaS=`${d.toFixed(0)}s (${title1} faster)`;
+                }
+                return(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.bdr}`}}>
+                    <td style={tdN}>{(l0&&l0.legNo)||(l1&&l1.legNo)||i+1}</td>
+                    <td style={tdL}>{(l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—"}</td>
+                    <td style={tdL}>{(l0&&l0.type)||(l1&&l1.type)||"—"}</td>
+                    <td style={tdN}>{l0&&l0.avgVMG!=null?fmtF(l0.avgVMG,2):"—"}</td>
+                    <td style={tdN}>{l0&&l0.efficiency!=null?fmtF(l0.efficiency,0):"—"}</td>
+                    <td style={tdN}>{d0m!=null&&Number.isFinite(d0m)?m2nm(d0m).toFixed(2):"—"}</td>
+                    <td style={tdN}>{l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
+                    <td style={tdN}>{l1&&l1.avgVMG!=null?fmtF(l1.avgVMG,2):"—"}</td>
+                    <td style={tdN}>{l1&&l1.efficiency!=null?fmtF(l1.efficiency,0):"—"}</td>
+                    <td style={tdN}>{d1m!=null&&Number.isFinite(d1m)?m2nm(d1m).toFixed(2):"—"}</td>
+                    <td style={tdN}>{l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
+                    <td style={{...tdL,fontSize:11}}>{deltaS}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {nLeg===0&&<div style={{padding:16,fontSize:12,color:C.txM}}>No leg breakdown — select a course and re-run analysis.</div>}
         </div>
         {(!r0||!r1)&&<div style={{marginTop:14,fontSize:12,color:C.wrn}}>One or both activities have no saved analysis yet. Open each, set course, and run analysis.</div>}
       </div>
