@@ -541,6 +541,7 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     cropDurationSec: courseSetup.cropDurationSec,
     sfLineEndAText: courseSetup.sfLineEndAText,
     sfLineEndBText: courseSetup.sfLineEndBText,
+    windwardMark: courseSetup.windwardMark,
   });
   const isFile=String(activityId).startsWith("file-");
   const snap=isFile?serializableAnalysisSnapshot(results):null;
@@ -665,6 +666,10 @@ function buildPersistedCourseSetup(csPrev, opts) {
   if (out.cropDurationText === undefined) out.cropDurationText = "";
   if (opts.sfLineEndAText !== undefined) out.sfLineEndAText = String(opts.sfLineEndAText ?? "").trim();
   if (opts.sfLineEndBText !== undefined) out.sfLineEndBText = String(opts.sfLineEndBText ?? "").trim();
+  if (opts.windwardMark !== undefined) {
+    const w = opts.windwardMark == null ? "" : String(opts.windwardMark).trim();
+    out.windwardMark = w;
+  }
   return out;
 }
 
@@ -688,6 +693,15 @@ function applySfLineEndsFromRow(cs, setSfLineEndAText, setSfLineEndBText) {
   else setSfLineEndBText("");
 }
 
+function applyWindwardMarkFromRow(cs, setWindwardMarkName) {
+  if (!cs || typeof cs !== "object") {
+    setWindwardMarkName("");
+    return;
+  }
+  if (typeof cs.windwardMark === "string" && cs.windwardMark.trim()) setWindwardMarkName(cs.windwardMark.trim());
+  else setWindwardMarkName("");
+}
+
 /** Save course / crop / marks / wind without full analysis — PATCH if row exists, else INSERT. */
 async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
   const sid = Number(stravaId);
@@ -703,6 +717,7 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
     cropDurationSec: parts.cropDurationSec,
     sfLineEndAText: parts.sfLineEndAText,
     sfLineEndBText: parts.sfLineEndBText,
+    windwardMark: parts.windwardMark,
   });
   const ad = toIsoTimestamptz(activityDate);
   const patchBody = {
@@ -1038,11 +1053,21 @@ function applyDetectionSettings(manoeuvres,pts,det){
   return out;
 }
 
-function initialWindFromStableSegments(stableSegments){
+function initialWindFromStableSegments(stableSegments,pts=null,windTuning=null){
   const bins=new Array(36).fill(0);
+  const wm=windTuning?.windward;
   for(const seg of stableSegments||[]){
+    let w=Math.max(1,seg.duration);
+    if(wm&&pts?.length&&Number.isFinite(wm.lat)&&Number.isFinite(wm.lon)){
+      const mid=Math.floor((seg.startIdx+seg.endIdx)/2);
+      const p=pts[mid];
+      if(p&&Number.isFinite(p.lat)&&Number.isFinite(p.lon)){
+        const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
+        if(Math.abs(adiff(bToM,seg.meanCOG))<=58)w*=2.35;
+      }
+    }
     const idx=Math.floor((seg.meanCOG%360)/10)%36;
-    bins[idx]+=Math.max(1,seg.duration);
+    bins[idx]+=w;
   }
   const peaks=bins.map((v,i)=>({a:i*10+5,w:v})).sort((a,b)=>b.w-a.w).slice(0,2);
   if(peaks.length<2)return{dir:0,conf:0};
@@ -1064,8 +1089,8 @@ function classifySides(manoeuvres,seedWind){
   };
 }
 
-function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null){
-  const seed=userWind!=null?{dir:Number(userWind)%360,conf:1}:initialWindFromStableSegments(stableSegments);
+function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null,windTuning=null){
+  const seed=userWind!=null?{dir:Number(userWind)%360,conf:1}:initialWindFromStableSegments(stableSegments,pts,windTuning);
   const allAngles=manoeuvres.map(m=>m.cogChange).sort((a,b)=>a-b);
   const med=allAngles.length?allAngles[Math.floor(allAngles.length/2)]:90;
   const hi=manoeuvres.filter(m=>Math.abs(m.cogChange-med)<=15);
@@ -1075,7 +1100,24 @@ function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null){
   const meanPortCOG=sideMeans.meanPortCOG??((meanStarboardCOG+90)%360);
   const cand1=(meanStarboardCOG+adiff(meanStarboardCOG,meanPortCOG)/2+360)%360;
   const cand2=(cand1+180)%360;
-  const crossCounts=[cand1,cand2].map(c=>manoeuvres.reduce((acc,m)=>acc+(crossingSide(m.preCOG,m.postCOG,c)==="upwind"?1:0),0));
+  const wm=windTuning?.windward;
+  const crossCounts=[cand1,cand2].map(c=>{
+    let acc=0;
+    for(const m of manoeuvres){
+      let wgt=1;
+      if(wm&&pts?.length){
+        const ti=Math.max(0,Math.min(pts.length-1,m.turnIdx??m.idx??0));
+        const p=pts[ti];
+        if(p){
+          const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
+          const pre=m.preRefCOG??m.preCOG;
+          if(Number.isFinite(pre)&&Math.abs(adiff(bToM,pre))<=52)wgt=1.5;
+        }
+      }
+      acc+=wgt*(crossingSide(m.preCOG,m.postCOG,c)==="upwind"?1:0);
+    }
+    return acc;
+  });
   const windDir=(userWind!=null?Number(userWind)%360:(crossCounts[0]>=crossCounts[1]?cand1:cand2));
   const tackAngle=Math.abs(adiff(meanStarboardCOG,meanPortCOG));
   for(const m of manoeuvres){
@@ -1267,9 +1309,9 @@ function scoreTackManoeuvre(m,pts,baselines,windTrace,windDir){
 }
 
 /** Auto wind (meteorological ° FROM), now from stable segment geometry. */
-function estWind(pts){
+function estWind(pts,windTuning=null){
   const{stableSegments,manoeuvres}=detectMans(pts);
-  const out=deriveWindAndClassify(manoeuvres,stableSegments,null,pts);
+  const out=deriveWindAndClassify(manoeuvres,stableSegments,null,pts,windTuning);
   return out.windEst;
 }
 
@@ -1760,7 +1802,7 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
-function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null){
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
   const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
@@ -1777,7 +1819,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const{stableSegments,manoeuvres:segMans}=detectMans(en);
   const earlyMans=detectEarlyMicroManoeuvres(en);
   const manoeuvres=mergeManoeuvresByTime(segMans,earlyMans);
-  const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind,en);
+  const windDerive=deriveWindAndClassify(manoeuvres,stableSegments,userWind,en,windTuning);
   const wd=windDerive.windDir;
   const windEst=windDerive.windEst;
   const manoeuvreEvents=applyDetectionSettings(manoeuvres,en,detSettings);
@@ -2260,6 +2302,7 @@ function App(){
   const [sfLineEndAText,setSfLineEndAText]=useState(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
   const [sfLineEndBText,setSfLineEndBText]=useState(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
   const [detSettings,setDetSettings]=useState(DETECTION_DEFAULTS);
+  const [windwardMarkName,setWindwardMarkName]=useState("");
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
@@ -2490,7 +2533,7 @@ function App(){
       if(streams.latlng&&streams.time){
         const pts=streams.time.data.map((t,i)=>({time:new Date(act.start_date).getTime()/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
         setRawPoints(pts);
-        setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+        setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);setWindwardMarkName("");
         setCropStartText("00:00:00");setCropDurationText("");
         setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
         setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
@@ -2506,9 +2549,10 @@ function App(){
             if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
             applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
             applySfLineEndsFromRow(row.course_setup,setSfLineEndAText,setSfLineEndBText);
+            applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
           }
         }
-        setView("course-setup");
+        setView("course-input");
       }
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
@@ -2525,11 +2569,11 @@ function App(){
       const t0=pts[0].time;
       setActId(`file-${Date.now()}`);
       setActDate(new Date(t0>1e12?t0:t0*1000).toISOString());
-      setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);
+      setRawPoints(pts);setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);setWindwardMarkName("");
       setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
       setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
       setRaceStartText(DEFAULT_RACE_START_TEXT);
-      setView("course-setup");
+      setView("course-input");
     }catch(e){console.error(e);alert("Failed to parse: "+e.message)}
     setProcessing(false);
   },[]);
@@ -2558,6 +2602,14 @@ function App(){
     });
     return marks;
   },[courseLetter,markOverrides]);
+
+  const windTuning=useMemo(()=>{
+    const n=windwardMarkName&&String(windwardMarkName).trim();
+    if(!n)return null;
+    const m=effectiveMarks[n];
+    if(!m||m.lat==null||m.lon==null)return null;
+    return{windward:{lat:Number(m.lat),lon:Number(m.lon)}};
+  },[windwardMarkName,effectiveMarks]);
 
   const customSfEnds=useMemo(()=>{
     const a=parseLatLonPair(sfLineEndAText),b=parseLatLonPair(sfLineEndBText);
@@ -2621,19 +2673,35 @@ function App(){
 
   const markOrderLap1=useMemo(()=>expandCourseMarks(coursePreambleSeq,courseMarkSeq,1),[coursePreambleSeq,courseMarkSeq]);
 
+  const windwardMarkOptions=useMemo(()=>{
+    const seen=new Set();
+    const out=[];
+    for(const pt of markOrderLap1){
+      if(!pt?.name||seen.has(pt.name))continue;
+      seen.add(pt.name);
+      out.push(pt.name);
+    }
+    return out;
+  },[markOrderLap1]);
+
+  useEffect(()=>{
+    if(!windwardMarkName)return;
+    if(!windwardMarkOptions.includes(windwardMarkName))setWindwardMarkName("");
+  },[windwardMarkOptions,windwardMarkName]);
+
   /** Full-track analysis used for start/finish and auto-crop detection. */
   const fullTrackAnalysis=useMemo(()=>{
     if(!rawPoints||rawPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
-  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
+    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
 
   /** Cropped analysis used for displayed manoeuvres/statistics. */
   const setupMapAnalysis=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
 
   const startFinishStats=useMemo(()=>{
     if(!rawPoints||rawPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
@@ -2686,7 +2754,7 @@ function App(){
     if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
     setAnalysis(result);
     if(result&&windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
@@ -2704,6 +2772,7 @@ function App(){
           cropDurationSec: cropDurationSecParsed,
           sfLineEndAText,
           sfLineEndBText,
+          windwardMark: windwardMarkName,
         });
       } catch (e) { console.warn("Save failed:", e); }
       refreshSavedAnalyses();
@@ -2731,6 +2800,8 @@ function App(){
     sfLineEndBText,
     detSettings,
     sfLineEnds,
+    windTuning,
+    windwardMarkName,
     refreshSavedAnalyses,
   ]);
 
@@ -2758,6 +2829,7 @@ function App(){
         cropDurationSec: cropDurationSecParsed,
         sfLineEndAText,
         sfLineEndBText,
+        windwardMark: windwardMarkName,
       });
       setSetupSaveMsg(ok ? "Saved course setup." : "Could not save — check console.");
       if (ok) setTimeout(() => setSetupSaveMsg(null), 4000);
@@ -2783,6 +2855,7 @@ function App(){
     cropDurationSecParsed,
     sfLineEndAText,
     sfLineEndBText,
+    windwardMarkName,
   ]);
 
   const openAnalysisFromSavedRow=useCallback((row)=>{
@@ -2806,6 +2879,7 @@ function App(){
     else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
     applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
     applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
+    applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
     if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
     setRawPoints(pts);
     setCroppedPoints(pts);
@@ -2821,10 +2895,10 @@ function App(){
     if(!analysis||!croppedPoints)return analysis;
     if(windOvr!==null&&windOvr!==analysis.windDir){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds);
+      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -2845,7 +2919,7 @@ function App(){
     setTimelineScroll(0);
   },[actId]);
 
-  const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
+  const effWind=windOvr!==null?windOvr:(view==="course-setup"||view==="course-input"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
 
   const courseMapStartFinish=useMemo(()=>{
     if(!sfLineEnds)return null;
@@ -3176,29 +3250,26 @@ function App(){
     </div>);
   }
 
-  /* ─── COURSE SETUP ─── */
-  if(view==="course-setup"){
+  /* ─── COURSE INPUT (form before map) ─── */
+  if(view==="course-input"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
-        <button onClick={()=>session?.strava?.linked?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
+        <button type="button" onClick={()=>session?.strava?.linked?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
         <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName}</div>
         <div style={{width:40}}/>
       </div>
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
-        <div style={{fontSize:18,fontWeight:700,marginBottom:16}}>Course Setup</div>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>Course & wind</div>
+        <p style={{fontSize:12,color:C.txM,margin:"0 0 16px",lineHeight:1.55}}>Choose the course, laps, start time, optional windward mark, and rough wind. Then open the map to move marks, committee line, and run analysis.</p>
 
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop (auto)</div>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track</div>
           <div style={{fontSize:12,color:C.txM,lineHeight:1.5}}>
-            Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
-            {croppedMeta&&<span> · Auto-cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
-          </div>
-          <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
-            Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
+            Duration: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
+            {croppedMeta&&<span> · After auto-crop: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
           </div>
         </div>}
 
-        {/* Course & Laps selector */}
         <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
           <div style={{flex:2,minWidth:180}}>
             <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Course</label>
@@ -3209,12 +3280,12 @@ function App(){
           </div>
           <div style={{flex:1,minWidth:80}}>
             <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Laps</label>
-            <select value={laps} onChange={e=>setLaps(parseInt(e.target.value))} style={{width:"100%",padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif"}}>
+            <select value={laps} onChange={e=>setLaps(parseInt(e.target.value,10))} style={{width:"100%",padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif"}}>
               {[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}
             </select>
           </div>
           <div style={{flex:1,minWidth:140}}>
-            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Start Time</label>
+            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Start time</label>
             <input
               type="text"
               value={raceStartText}
@@ -3228,6 +3299,71 @@ function App(){
             />
           </div>
         </div>
+
+        <div style={{marginBottom:16}}>
+          <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Windward mark (optional)</label>
+          <select
+            value={windwardMarkName}
+            onChange={e=>setWindwardMarkName(e.target.value)}
+            disabled={!courseLetter}
+            style={{width:"100%",maxWidth:400,padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif",opacity:courseLetter?1:0.5}}
+          >
+            <option value="">— None —</option>
+            {windwardMarkOptions.map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+          <p style={{fontSize:10,color:C.txD,margin:"6px 0 0",maxWidth:520,lineHeight:1.5}}>The wind estimate favours track segments and manoeuvres that head toward this mark (upwind leg). List is lap 1 marks in order. Pick a mark only if it matches the day’s course.</p>
+        </div>
+
+        <div style={{maxWidth:360,marginBottom:20}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Rough wind (FROM ° · meteorological)</div>
+          <WindRose
+            wd={effWind}
+            onChange={setWindOvr}
+            compact
+            hint={setupMapAnalysis?.windEst?`Auto ${setupMapAnalysis.windEst.dir}° (${(setupMapAnalysis.windEst.conf*100).toFixed(0)}% conf)${windTuning&&windTuning.windward?" · windward-weighted":""} — dial overrides`:"Set rough wind if known, or leave for auto (track-based)"}
+          />
+        </div>
+
+        <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
+          Continue to map
+        </button>
+      </div>
+    </div>);
+  }
+
+  /* ─── COURSE SETUP (map) ─── */
+  if(view==="course-setup"){
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button type="button" onClick={()=>setView("course-input")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Course & wind</button>
+        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName}</div>
+        <div style={{width:40}}/>
+      </div>
+      <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Map & detection</div>
+        <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginBottom:16,fontSize:12,color:C.txM,background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:"10px 14px"}}>
+          <span>Course: <strong style={{color:C.txt}}>{courseLetter||"—"}</strong></span>
+          <span>·</span>
+          <span>{laps} lap{laps===1?"":"s"}</span>
+          <span>·</span>
+          <span>Start {raceStartText||"—"}</span>
+          {windwardMarkName?<>
+            <span>·</span>
+            <span>Windward <strong style={{color:C.acc}}>{windwardMarkName}</strong></span>
+          </>:null}
+          <button type="button" onClick={()=>setView("course-input")} style={{...btn("transparent",C.acc,C.acc),padding:"4px 10px",fontSize:11,marginLeft:"auto"}}>Edit</button>
+        </div>
+
+        {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop (auto)</div>
+          <div style={{fontSize:12,color:C.txM,lineHeight:1.5}}>
+            Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
+            {croppedMeta&&<span> · Auto-cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
+          </div>
+          <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
+            Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
+          </div>
+        </div>}
 
         {/* Map + wind dial (wind FROM °, meteorological) */}
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16,alignItems:"stretch",minHeight:380}}>
@@ -3248,7 +3384,7 @@ function App(){
               wd={effWind}
               onChange={setWindOvr}
               compact
-              hint={setupMapAnalysis?.windEst?`Auto ${setupMapAnalysis.windEst.dir}° (${(setupMapAnalysis.windEst.conf*100).toFixed(0)}% conf) — slider overrides`:"Slider sets wind FROM · tacks/gybes update on map"}
+              hint={setupMapAnalysis?.windEst?`Auto ${setupMapAnalysis.windEst.dir}° (${(setupMapAnalysis.windEst.conf*100).toFixed(0)}% conf)${windTuning&&windTuning.windward?" · uses windward mark":""} — slider overrides`:"Slider sets wind FROM · tacks/gybes update on map"}
             />
           </div>
         </div>
