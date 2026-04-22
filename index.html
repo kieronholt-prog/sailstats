@@ -1063,7 +1063,7 @@ function initialWindFromStableSegments(stableSegments,pts=null,windTuning=null){
       const p=pts[mid];
       if(p&&Number.isFinite(p.lat)&&Number.isFinite(p.lon)){
         const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
-        if(Math.abs(adiff(bToM,seg.meanCOG))<=58)w*=2.35;
+        if(Math.abs(adiff(bToM,seg.meanCOG))<=48)w*=6.5;
       }
     }
     const idx=Math.floor((seg.meanCOG%360)/10)%36;
@@ -1074,6 +1074,136 @@ function initialWindFromStableSegments(stableSegments,pts=null,windTuning=null){
   const h1=peaks[0].a,h2=peaks[1].a;
   const shortBis=(h1+adiff(h1,h2)/2+360)%360;
   return{dir:Math.round(shortBis)%360,conf:Math.min(0.9,(peaks[0].w+peaks[1].w)/(stableSegments.length*12||1))};
+}
+
+/** Bearings to mark (°) and weights from stable segments that head roughly toward a windward mark. */
+function collectBearingToWindwardMark(pts,stableSegments,wm){
+  if(!wm||!pts?.length||!stableSegments?.length||!Number.isFinite(wm.lat)||!Number.isFinite(wm.lon))return{angles:[],weights:[]};
+  const angles=[],weights=[];
+  for(const seg of stableSegments){
+    const mid=Math.floor((seg.startIdx+seg.endIdx)/2);
+    const p=pts[mid];
+    if(!p||!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
+    const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
+    if(Math.abs(adiff(bToM,seg.meanCOG))>50)continue;
+    const w=Math.max(1,seg.duration);
+    angles.push(bToM);
+    weights.push(w);
+  }
+  return{angles,weights};
+}
+
+function circularWeightedMeanDeg(angles,weights){
+  if(!angles?.length||!weights?.length||angles.length!==weights.length)return null;
+  let s=0,c=0,wSum=0;
+  for(let i=0;i<angles.length;i++){
+    const w=Math.max(0,Number(weights[i])||0);
+    if(w<=0)continue;
+    const a=((Number(angles[i])%360)+360)%360;
+    s+=Math.sin(a*D)*w;
+    c+=Math.cos(a*D)*w;
+    wSum+=w;
+  }
+  if(wSum<=0)return null;
+  return((Math.atan2(s/wSum,c/wSum)/D+360)%360);
+}
+
+/**
+ * For automatic wind: pick wind FROM (met °) that (1) matches a windward mark when present, (2) makes
+ * port vs starboard upwind TWA (acute to wind) similar (≤5° target), and (3) keeps mean TWA in ~30–50°.
+ * Uses only stable straight-line segments; windward segments get extra weight.
+ */
+function refineWindFromUpwindTwaAndMark(stableSegments,pts,windTuning,seedWind){
+  if(!stableSegments||stableSegments.length<4||!pts?.length)return seedWind;
+  /** Acute angle COG↔wind FROM (same as acuteTwaFromWindDeg) — local to avoid load order issues. */
+  function acuteTwaToWind(cog,wdF){
+    const r=((Number(cog)-wdF+360)%360);
+    return r>180?360-r:r;
+  }
+  const wm=windTuning?.windward;
+  const toMark=wm?collectBearingToWindwardMark(pts,stableSegments,wm):{angles:[],weights:[]};
+  const wMarkBearing=toMark.angles.length>=4?circularWeightedMeanDeg(toMark.angles,toMark.weights):null;
+
+  function segmentTowardMarkWeight(seg){
+    if(!wm||!Number.isFinite(wm.lat)||!Number.isFinite(wm.lon))return 1;
+    const mid=Math.floor((seg.startIdx+seg.endIdx)/2);
+    const p=pts[mid];
+    if(!p)return 1;
+    const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
+    if(Math.abs(adiff(bToM,seg.meanCOG))<=48)return 3.2;
+    return 1;
+  }
+
+  function buildPortStbdTwa(trialW,twaLo,twaHi){
+    const portW=[],stbdW=[],portTw=[],stbdTw=[];
+    for(const seg of stableSegments){
+      const cog=seg.meanCOG;
+      const baseW=Math.max(1,seg.duration)*segmentTowardMarkWeight(seg);
+      const twa=acuteTwaToWind(cog,trialW);
+      if(twa<twaLo||twa>twaHi)continue;
+      const r=((cog-trialW+360)%360);
+      if(r>180){
+        stbdW.push(baseW);
+        stbdTw.push(twa);
+      }else{
+        portW.push(baseW);
+        portTw.push(twa);
+      }
+    }
+    return{portW,portTw,stbdW,stbdTw};
+  }
+
+  function weightedScalarMean(values,weights){
+    if(!values.length||!weights.length)return null;
+    let s=0,w=0;
+    for(let i=0;i<values.length;i++){
+      const wi=Number(weights[i])||0;
+      if(wi<=0)continue;
+      s+=values[i]*wi;
+      w+=wi;
+    }
+    return w>0?s/w:null;
+  }
+
+  function scoreTrial(trialW){
+    const strict=buildPortStbdTwa(trialW,24,56);
+    let portW=strict.portW,portTw=strict.portTw,stbdW=strict.stbdW,stbdTw=strict.stbdTw;
+    if(portTw.length<2||stbdTw.length<2){
+      const rel=buildPortStbdTwa(trialW,17,70);
+      portW=rel.portW;portTw=rel.portTw;stbdW=rel.stbdW;stbdTw=rel.stbdTw;
+    }
+    const mP=weightedScalarMean(portTw,portW);
+    const mS=weightedScalarMean(stbdTw,stbdW);
+    let sym=0;
+    if(mP!=null&&mS!=null)sym=Math.abs(mP-mS);
+    const bandA=(m)=>{
+      if(m==null||!Number.isFinite(m))return 0;
+      if(m<30)return(30-m)*1.1;
+      if(m>50)return(m-50)*1.1;
+      return 0;
+    };
+    const band=bandA(mP)+bandA(mS);
+    const markT=wMarkBearing!=null&&wm?0.55*Math.min(180,Math.abs(adiff(trialW,wMarkBearing))):0;
+    const seedT=0.2*Math.min(180,Math.abs(adiff(trialW,seedWind)));
+    return sym*6+band*2+markT+seedT;
+  }
+
+  let best=seedWind,bestS=1e9;
+  for(let step=0;step<360;step++){
+    const w=((step%360)+360)%360;
+    const s=scoreTrial(w);
+    if(s<bestS){
+      bestS=s;best=w;
+    }
+  }
+  if(wMarkBearing!=null&&wm){
+    const sMark=scoreTrial(wMarkBearing);
+    if(sMark<bestS){
+      bestS=sMark;
+      best=wMarkBearing;
+    }
+  }
+  return((best%360)+360)%360;
 }
 
 function classifySides(manoeuvres,seedWind){
@@ -1095,9 +1225,9 @@ function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null,windT
   const med=allAngles.length?allAngles[Math.floor(allAngles.length/2)]:90;
   const hi=manoeuvres.filter(m=>Math.abs(m.cogChange-med)<=15);
   const pool=hi.length>=3?hi:manoeuvres;
-  const sideMeans=classifySides(pool,seed.dir);
-  const meanStarboardCOG=sideMeans.meanStarboardCOG??circularMean(stableSegments.map(s=>s.meanCOG));
-  const meanPortCOG=sideMeans.meanPortCOG??((meanStarboardCOG+90)%360);
+  let sideMeans=classifySides(pool,seed.dir);
+  let meanStarboardCOG=sideMeans.meanStarboardCOG??circularMean(stableSegments.map(s=>s.meanCOG));
+  let meanPortCOG=sideMeans.meanPortCOG??((meanStarboardCOG+90)%360);
   const cand1=(meanStarboardCOG+adiff(meanStarboardCOG,meanPortCOG)/2+360)%360;
   const cand2=(cand1+180)%360;
   const wm=windTuning?.windward;
@@ -1111,14 +1241,18 @@ function deriveWindAndClassify(manoeuvres,stableSegments,userWind,pts=null,windT
         if(p){
           const bToM=bear(p.lat,p.lon,wm.lat,wm.lon);
           const pre=m.preRefCOG??m.preCOG;
-          if(Number.isFinite(pre)&&Math.abs(adiff(bToM,pre))<=52)wgt=1.5;
+          if(Number.isFinite(pre)&&Math.abs(adiff(bToM,pre))<=50)wgt=2.4;
         }
       }
       acc+=wgt*(crossingSide(m.preCOG,m.postCOG,c)==="upwind"?1:0);
     }
     return acc;
   });
-  const windDir=(userWind!=null?Number(userWind)%360:(crossCounts[0]>=crossCounts[1]?cand1:cand2));
+  let windDir=(userWind!=null?Number(userWind)%360:(crossCounts[0]>=crossCounts[1]?cand1:cand2));
+  if(userWind==null)windDir=refineWindFromUpwindTwaAndMark(stableSegments,pts,windTuning,windDir);
+  sideMeans=classifySides(pool,windDir);
+  if(sideMeans.meanStarboardCOG!=null)meanStarboardCOG=sideMeans.meanStarboardCOG;
+  if(sideMeans.meanPortCOG!=null)meanPortCOG=sideMeans.meanPortCOG;
   const tackAngle=Math.abs(adiff(meanStarboardCOG,meanPortCOG));
   for(const m of manoeuvres){
     const crossing=classifyCrossingFromPoints(pts,m,windDir);
