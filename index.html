@@ -2889,8 +2889,13 @@ function App(){
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
     const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+    if(!result){
+      setProcessing(false);
+      alert("Analysis could not run — need at least 20 GPS points in the cropped track. Widen the crop or check the file.");
+      return;
+    }
     setAnalysis(result);
-    if(result&&windOvr===null)setWindOvr(result.windDir);
+    if(windOvr===null)setWindOvr(result.windDir);
     setTab("overview");
     setView("analysis");
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
@@ -2938,6 +2943,9 @@ function App(){
     windwardMarkName,
     refreshSavedAnalyses,
   ]);
+
+  const doAnalysisRef=useRef(doAnalysis);
+  doAnalysisRef.current=doAnalysis;
 
   const saveCourseSetupOnly = useCallback(async () => {
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
@@ -3027,9 +3035,11 @@ function App(){
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
     if(!analysis||!croppedPoints)return analysis;
+    if(croppedPoints.length<20)return analysis;
     if(windOvr!==null&&windOvr!==analysis.windDir){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+      const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+      if(recalc!=null)return recalc;
     }
     return analysis;
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
@@ -3562,7 +3572,7 @@ function App(){
             })}
           </div>
           <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
-            <button onClick={()=>setDetSettings(DETECTION_DEFAULTS)} style={{...btn("transparent",C.txM,C.bdr),padding:"7px 10px",fontSize:11}}>
+            <button onClick={()=>{setDetSettings(DETECTION_DEFAULTS);setWindOvr(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"7px 10px",fontSize:11}}>
               Reset defaults
             </button>
           </div>
@@ -3618,7 +3628,7 @@ function App(){
           <button onClick={doAnalysis} style={{...btn(C.acc,"#0a1628"),flex:1,padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
             {processing?"Analysing...":"Analyse Track"+(courseLetter?` (Course ${courseLetter})`:" (no course)")}
           </button>
-          {courseLetter&&<button onClick={()=>{setCourseLetter("");doAnalysis()}} style={{...btn("transparent",C.txM,C.bdr),padding:"14px 18px",fontSize:13}}>
+          {courseLetter&&<button type="button" onClick={()=>{setCourseLetter("");setTimeout(()=>doAnalysisRef.current(),0);}} style={{...btn("transparent",C.txM,C.bdr),padding:"14px 18px",fontSize:13}}>
             Skip Course
           </button>}
         </div>
@@ -3648,6 +3658,24 @@ function App(){
             Saves course, crop, mark positions & wind for this activity (no full analysis required). Reloads when you open the activity again.
           </span>
         </div>
+      </div>
+    </div>);
+  }
+
+  /* ─── ANALYSIS (no computed result — avoid blank screen) ─── */
+  if(view==="analysis"&&!curAnalysis){
+    return(<div style={{background:C.bg,minHeight:"100vh"}}>
+      <div style={hdr}>
+        <button type="button" onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Map & detection</button>
+        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName||"Activity"}</div>
+        <div style={{width:40}}/>
+      </div>
+      <div style={{maxWidth:560,margin:"0 auto",padding:"32px 20px"}}>
+        <div style={{fontSize:18,fontWeight:700,color:C.txt,marginBottom:10}}>Analysis unavailable</div>
+        <p style={{fontSize:13,color:C.txM,lineHeight:1.6,marginBottom:16}}>
+          There is no valid analysis to show. This usually means there are fewer than 20 GPS points in the cropped window, or the track is still loading. Open the map, check auto-crop, and run <strong style={{color:C.txt}}>Analyse Track</strong> again.
+        </p>
+        <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),padding:"12px 20px",fontSize:14}}>Back to map</button>
       </div>
     </div>);
   }
