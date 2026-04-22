@@ -728,6 +728,177 @@ function formatCompareRowSubtitle(row,stravaAct){
   return "—";
 }
 
+function escapeHtml(s){
+  if(s==null)return"";
+  return String(s)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;");
+}
+function openPrintableCompareDocument(htmlString){
+  const w=window.open("","_blank","noopener,noreferrer");
+  if(!w){
+    alert("Please allow pop-ups to export the comparison, then try again.");
+    return;
+  }
+  w.document.write(htmlString);
+  w.document.close();
+  setTimeout(()=>{try{w.focus();w.print();}catch(_){/* ignore */}},150);
+}
+/** Time string for compare print HTML (matches on-screen fT). */
+function fT_print(s){
+  if(s==null||!Number.isFinite(s))return"—";
+  if(s<0)s=0;
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.floor(s%60);
+  return h>0?`${h}:${String(m).padStart(2,"0")}:${String(c).padStart(2,"0")}`:`${m}:${String(c).padStart(2,"0")}`;
+}
+/**
+ * Rich printable HTML for the Compare view (user can Print → Save as PDF).
+ * Mirrors on-screen compare sections 1–5.
+ */
+function buildComparePrintHtml(ctx){
+  const{title0,title1,sub0,sub1,r0,r1,s0,s1,leg0,leg1,t0s,t1s}=ctx;
+  const f=(v,d)=>v==null||!Number.isFinite(v)?"—":Number(v).toFixed(d);
+  const fT=(s)=>fT_print(s);
+  const m2nmP=(m)=>m!=null&&Number.isFinite(m)?(m/1852).toFixed(2):"—";
+  const fPD=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
+  const rowSpd=(t,pfx)=>{
+    if(!t||!t[pfx]||!t[pfx].n)return"—";
+    const o=t[pfx];
+    return `${f(o.avgSpeed,2)}${o.speedStd!=null&&Number.isFinite(o.speedStd)?` (σ ${f(o.speedStd,2)})`:""}`;
+  };
+  const rowCog=(o)=>{
+    if(!o||!o.n||o.avgCourse==null||!Number.isFinite(o.avgCourse))return"—";
+    return `${f(o.avgCourse,1)}°${o.courseStd!=null&&Number.isFinite(o.courseStd)?` (σ ${f(o.courseStd,1)}°)`:""}`;
+  };
+  const tackTable=(name,ts0,ts1)=>{
+    const has=(ts0||ts1);
+    if(!has)return`<p class="muted">No ${escapeHtml(name)} tack×leg-type data — re-run analysis to populate.</p>`;
+    return `<table>
+<thead><tr><th>Metric</th><th class="num c1">${escapeHtml(title0)}</th><th class="num c2">${escapeHtml(title1)}</th></tr></thead>
+<tbody>
+<tr class="sub"><td colspan="3">Port tack</td></tr>
+<tr><td>Avg speed (var)</td><td class="num">${escapeHtml(rowSpd(ts0,"port"))}</td><td class="num">${escapeHtml(rowSpd(ts1,"port"))}</td></tr>
+<tr><td>Avg VMG (kts)</td><td class="num">${escapeHtml(ts0?.port?.avgVMG!=null?f(ts0.port.avgVMG,2):"—")}</td><td class="num">${escapeHtml(ts1?.port?.avgVMG!=null?f(ts1.port.avgVMG,2):"—")}</td></tr>
+<tr><td>Mean COG (var)</td><td class="num">${escapeHtml(rowCog(ts0?.port))}</td><td class="num">${escapeHtml(rowCog(ts1?.port))}</td></tr>
+<tr><td>Mean TWA (TWA var)</td><td class="num">${escapeHtml(ts0?.port?.twaFromWind!=null?`${f(ts0.port.twaFromWind,1)}${ts0.port.twaStd!=null?` (σ ${f(ts0.port.twaStd,1)})`:""}`:"—")}</td><td class="num">${escapeHtml(ts1?.port?.twaFromWind!=null?`${f(ts1.port.twaFromWind,1)}${ts1.port.twaStd!=null?` (σ ${f(ts1.port.twaStd,1)})`:""}`:"—")}</td></tr>
+<tr class="sub"><td colspan="3">Starboard tack</td></tr>
+<tr><td>Avg speed (var)</td><td class="num">${escapeHtml(rowSpd(ts0,"stbd"))}</td><td class="num">${escapeHtml(rowSpd(ts1,"stbd"))}</td></tr>
+<tr><td>Avg VMG (kts)</td><td class="num">${escapeHtml(ts0?.stbd?.avgVMG!=null?f(ts0.stbd.avgVMG,2):"—")}</td><td class="num">${escapeHtml(ts1?.stbd?.avgVMG!=null?f(ts1.stbd.avgVMG,2):"—")}</td></tr>
+<tr><td>Mean COG (var)</td><td class="num">${escapeHtml(rowCog(ts0?.stbd))}</td><td class="num">${escapeHtml(rowCog(ts1?.stbd))}</td></tr>
+<tr><td>Mean TWA (TWA var)</td><td class="num">${escapeHtml(ts0?.stbd?.twaFromWind!=null?`${f(ts0.stbd.twaFromWind,1)}${ts0.stbd.twaStd!=null?` (σ ${f(ts0.stbd.twaStd,1)})`:""}`:"—")}</td><td class="num">${escapeHtml(ts1?.stbd?.twaFromWind!=null?`${f(ts1.stbd.twaFromWind,1)}${ts1.stbd.twaStd!=null?` (σ ${f(ts1.stbd.twaStd,1)})`:""}`:"—")}</td></tr>
+<tr><td>P↔S mean TWA difference</td><td class="num">${escapeHtml(fPD(ts0?.p2sTwaDiff))}</td><td class="num">${escapeHtml(fPD(ts1?.p2sTwaDiff))}</td></tr>
+<tr><td>Port % / Stbd % (samples)</td><td class="num">${escapeHtml(ts0?.portSamplePct!=null?`${ts0.portSamplePct.toFixed(0)}% / ${(ts0.stbdSamplePct??0).toFixed(0)}%`:"—")}</td><td class="num">${escapeHtml(ts1?.portSamplePct!=null?`${ts1.portSamplePct.toFixed(0)}% / ${(ts1.stbdSamplePct??0).toFixed(0)}%`:"—")}</td></tr>
+</tbody></table>`;
+  };
+  const nLeg=Math.max(leg0?.length||0,leg1?.length||0);
+  const legRows=[];
+  for(let i=0;i<nLeg;i++){
+    const l0=leg0&&leg0[i],l1=leg1&&leg1[i];
+    const t0l=l0?.duration, t1l=l1?.duration;
+    const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
+    const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
+    const r0m=l0?.roundingM, r1m=l1?.roundingM;
+    let deltaS="—";
+    if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
+      const d=t1l-t0l;
+      if(Math.abs(d)<0.5)deltaS="0s";
+      else if(d>0)deltaS=`+${d.toFixed(0)}s (${escapeHtml(title1)} slower)`;
+      else deltaS=`${d.toFixed(0)}s (${escapeHtml(title1)} faster)`;
+    }
+    const r0s=r0m!=null&&Number.isFinite(r0m)&&r0m>0.05?String(Math.round(r0m)):"—";
+    const r1s=r1m!=null&&Number.isFinite(r1m)&&r1m>0.05?String(Math.round(r1m)):"—";
+    legRows.push(`<tr>
+<td class="num">${l0&&l0.legNo?String(l0.legNo):l1&&l1.legNo?String(l1.legNo):String(i+1)}</td>
+<td>${escapeHtml((l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—")}</td>
+<td>${escapeHtml((l0&&l0.type)||(l1&&l1.type)||"—")}</td>
+<td class="num">${escapeHtml(l0&&l0.avgVMG!=null?f(l0.avgVMG,2):"—")}</td><td class="num">${escapeHtml(l0&&l0.efficiency!=null?f(l0.efficiency,0):"—")}</td>
+<td class="num">${r0s}</td><td class="num">${d0m!=null&&Number.isFinite(d0m)?m2nmP(d0m):"—"}</td><td class="num">${l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
+<td class="num">${escapeHtml(l1&&l1.avgVMG!=null?f(l1.avgVMG,2):"—")}</td><td class="num">${escapeHtml(l1&&l1.efficiency!=null?f(l1.efficiency,0):"—")}</td>
+<td class="num">${r1s}</td><td class="num">${d1m!=null&&Number.isFinite(d1m)?m2nmP(d1m):"—"}</td><td class="num">${l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
+<td>${deltaS}</td>
+</tr>`);
+  }
+  const lab0=title0.length>28?title0.slice(0,26)+"…":title0;
+  const lab1=title1.length>28?title1.slice(0,26)+"…":title1;
+  const now=new Date().toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"});
+  return`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Compare — SailStats</title>
+<style>
+@page{ margin: 14mm; }
+*{ box-sizing: border-box; }
+body{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; color: #1a1a1a; font-size: 10.5px; line-height: 1.45; max-width: 900px; margin: 0 auto; padding: 12px; }
+h1{ font-size: 20px; font-weight: 700; margin: 0 0 6px; color: #0a1628; }
+.subtitle{ color: #555; font-size: 11px; margin-bottom: 4px; }
+.acts{ display: table; width: 100%; margin: 0 0 20px; border-collapse: collapse; }
+.acts th,.acts td{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; font-size: 11px; }
+.acts th{ color: #0d47a1; }
+.generated{ color: #888; font-size: 9px; margin-bottom: 20px; }
+h2{ font-size: 12px; font-weight: 700; margin: 18px 0 8px; color: #0a1628; page-break-after: avoid; text-transform: uppercase; letter-spacing: 0.04em; }
+table{ border-collapse: collapse; width: 100%; margin: 0 0 10px; page-break-inside: avoid; }
+th,td{ border: 1px solid #ccc; padding: 5px 6px; vertical-align: top; }
+th{ background: #f2f4f7; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #444; }
+td.num, th.num, .num{ text-align: right; font-family: Consolas, 'JetBrains Mono', ui-monospace, monospace; }
+th.c1{ color: #0d6b55; } th.c2{ color: #a85d0a; }
+tr.sub td{ background: #f8f8f8; font-weight: 600; color: #333; }
+tr.sub td{ font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; }
+p.muted{ color: #666; font-size: 10px; }
+.foot{ font-size: 9px; color: #666; line-height: 1.5; margin-top: 6px; max-width: 100%; }
+</style>
+</head><body>
+<h1>SailStats — Compare</h1>
+<div class="subtitle">Two saved analyses (Supabase) · use <strong>Print</strong> → <strong>Save as PDF</strong> in the browser dialog if you want a PDF</div>
+<table class="acts"><thead><tr><th>Left</th><th>Date</th><th>Right</th><th>Date</th></tr></thead>
+<tbody><tr>
+<td><strong>${escapeHtml(title0)}</strong></td><td>${escapeHtml(sub0)}</td>
+<td><strong>${escapeHtml(title1)}</strong></td><td>${escapeHtml(sub1)}</td>
+</tr></tbody></table>
+<div class="generated">Generated ${escapeHtml(now)}</div>
+
+<h2>1 — Overall performance</h2>
+<table>
+<thead><tr><th>Metric</th><th class="num c1">${escapeHtml(title0)}</th><th class="num c2">${escapeHtml(title1)}</th></tr></thead>
+<tbody>
+<tr><td>Elapsed time</td><td class="num">${s0&&Number.isFinite(s0.duration)?fT(s0.duration):"—"}</td><td class="num">${s1&&Number.isFinite(s1.duration)?fT(s1.duration):"—"}</td></tr>
+<tr><td>Total distance (nm)</td><td class="num">${s0&&Number.isFinite(s0.totalDist)?(s0.totalDist/1852).toFixed(2):"—"}</td><td class="num">${s1&&Number.isFinite(s1.totalDist)?(s1.totalDist/1852).toFixed(2):"—"}</td></tr>
+<tr><td>Tacks (racing)</td><td class="num">${s0?.tackCount!=null?String(s0.tackCount):"—"}</td><td class="num">${s1?.tackCount!=null?String(s1.tackCount):"—"}</td></tr>
+<tr><td>Gybes (racing)</td><td class="num">${s0?.gybeCount!=null?String(s0.gybeCount):"—"}</td><td class="num">${s1?.gybeCount!=null?String(s1.gybeCount):"—"}</td></tr>
+<tr><td>Derived wind FROM (°)</td><td class="num">${r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?String(Math.round(Number(r0.wind_direction))):"—"}</td><td class="num">${r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?String(Math.round(Number(r1.wind_direction))):"—"}</td></tr>
+</tbody></table>
+
+<h2>2 — Upwind (by tack)</h2>
+${tackTable("Upwind",t0s?.upwind,t1s?.upwind)}
+
+<h2>3 — Reach (by tack)</h2>
+${tackTable("Reach",t0s?.reach,t1s?.reach)}
+
+<h2>4 — Downwind (by tack)</h2>
+${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
+
+<h2>5 — Performance by leg</h2>
+<p class="foot">Legs use gate lines through each end perpendicular to the centre line between marks. Round = rounding path/offset (m) before the leg, then track (nm). Re-run Analyse to refresh.</p>
+<table>
+<thead>
+<tr>
+<th class="num" rowspan="2">Leg</th><th rowspan="2">From → To</th><th rowspan="2">Type</th>
+<th class="c1" colspan="5">${escapeHtml(lab0)}</th>
+<th class="c2" colspan="5">${escapeHtml(lab1)}</th>
+<th rowspan="2">Time gain/loss</th>
+</tr>
+<tr>
+<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Round (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Round (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+</tr>
+</thead>
+<tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"14\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
+</table>
+</body></html>`;
+}
+
 /** Strava feed + Supabase-only rows (e.g. GPX/FIT uploads with id `file-…`). */
 function mergeActivitiesWithSaved(acts,savedByActId){
   const stravaActs=Array.isArray(acts)?acts:[];
@@ -3625,14 +3796,32 @@ function App(){
     const nLeg=Math.max(leg0?.length||0,leg1?.length||0);
     const lab0=title0.length>20?`${title0.slice(0,18)}…`:title0;
     const lab1=title1.length>20?`${title1.slice(0,18)}…`:title1;
+    const exportCompare=()=>{
+      if(!r0||!r1){
+        alert("Two saved activities are required to export a comparison.");
+        return;
+      }
+      const sub0=formatCompareRowSubtitle(r0,strava0);
+      const sub1=formatCompareRowSubtitle(r1,strava1);
+      const html=buildComparePrintHtml({
+        title0,title1,sub0,sub1,
+        r0,r1,
+        s0,s1,
+        leg0,leg1,
+        t0s,t1s,
+      });
+      openPrintableCompareDocument(html);
+    };
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
         <button type="button" onClick={()=>{setView("activities");setCompareIds(null);}} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Activities</button>
         <div style={{fontSize:14,fontWeight:600,color:C.txt}}>Compare</div>
-        <div style={{width:72}}/>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button type="button" disabled={!r0||!r1} onClick={exportCompare} style={{...btn("transparent",!r0||!r1?C.txD:C.acc,C.bdr),padding:"6px 12px",fontSize:12,fontWeight:600,display:"inline-flex",alignItems:"center",gap:4,opacity:!r0||!r1?0.5:1,cursor:!r0||!r1?"not-allowed":"pointer"}} title="Open a print-ready page — in the print dialog use Save as PDF (e.g. Chrome)">Export PDF / print</button>
+        </div>
       </div>
       <div style={{maxWidth:900,margin:"0 auto",padding:"20px 14px 40px"}}>
-        <p style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Data from the last analysis saved in Supabase for each activity. Re-run <strong style={{color:C.txt}}>Analyse</strong> on an activity to refresh its stored metrics and leg splits.</p>
+        <p style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Data from the last analysis saved in Supabase for each activity. Re-run <strong style={{color:C.txt}}>Analyse</strong> on an activity to refresh its stored metrics and leg splits. <strong style={{color:C.txt}}>Export PDF / print</strong> (top right) opens a clean report; in the system print dialog choose <strong style={{color:C.txt}}>Save as PDF</strong> where your browser offers it.</p>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>1 · Overall performance</div>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20,overflowX:"auto"}}>
