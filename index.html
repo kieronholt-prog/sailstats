@@ -220,26 +220,35 @@ function allPerpCrossingEnds(pts, jMin, jEnd, sideAt){
   return o;
 }
 /**
- * Path between the line through A and B, ⊥ to chord A–B, at each mark. Distance = track along the boat between those two crossings.
- * roundingM = same line at the from-mark, distance between first/last crossing before the leg (mark rounding "width").
+ * Leg path between two boundaries. For course marks, uses the gate line through each mark ⊥ to the mark–mark chord (see sideOfPerpAtA/B).
+ * START and FINISH use the actual start/finish line segment (endA–endB), not a beam ⊥ the leg at a point on that line.
+ * roundingM = extra path in the from-mark zone (only when the from boundary is a mark, not START).
  * Fallback to fbStart/fbEnd (closest-approach) when no crossings.
  */
-function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd){
+function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,toMark,startFinishLine){
   const c=hav(latA,lonA,latB,lonB);
   if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
+  const eA=startFinishLine?.endA, eB=startFinishLine?.endB;
+  const hasSf=eA&&eB&&Number.isFinite(eA.lat)&&Number.isFinite(eA.lon)&&Number.isFinite(eB.lat)&&Number.isFinite(eB.lon);
+  const fromIsStart=String(fromMark||"")==="START";
+  const toIsFinish=String(toMark||"")==="FINISH";
   const sideA=(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
   const sideB=(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
+  const onSfLine=(p)=>sideOfPerpAtA(eA.lat,eA.lon,eB.lat,eB.lon,p.lat,p.lon);
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
-  const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
+  const cA=fromIsStart&&hasSf?firstPerpCrossing(pts, sF, jEnd, onSfLine):firstPerpCrossing(pts, sF, jEnd, sideA);
   if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
-  const cB=firstPerpCrossing(pts, cA, jEnd, sideB);
+  const cB=toIsFinish&&hasSf?firstPerpCrossing(pts, cA, jEnd, onSfLine):firstPerpCrossing(pts, cA, jEnd, sideB);
   if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
   if(cB-cA+1<5)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest"};
-  const rBefore=Math.max(1,sF+1);
-  const rEnd=Math.max(rBefore, cA-1);
-  const rCrosses=allPerpCrossingEnds(pts, rBefore, rEnd, sideA);
-  const roundingM=rCrosses.length>=2?sumPathDist(pts, rCrosses[0], rCrosses[rCrosses.length-1]):0;
+  let roundingM=0;
+  if(!fromIsStart){
+    const rBefore=Math.max(1,sF+1);
+    const rEnd=Math.max(rBefore, cA-1);
+    const rCrosses=allPerpCrossingEnds(pts, rBefore, rEnd, sideA);
+    roundingM=rCrosses.length>=2?sumPathDist(pts, rCrosses[0], rCrosses[rCrosses.length-1]):0;
+  }
   return{startIdx:cA,endIdx:cB,roundingM,legPathDef:"perp",gatesAtA:cA,gatesAtB:cB};
 }
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
@@ -1733,7 +1742,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     const si=roundings[i].idx,ei=roundings[i+1].idx;
     let startIdx=si,endIdx=ei,roundingM=0,legPathDef="closest";
     if(wA&&wB){
-      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei);
+      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,roundings[i].mark,roundings[i+1].mark,startFinishLine);
       startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";
     }
     const legPts=pts.slice(startIdx,endIdx+1);
@@ -3669,7 +3678,7 @@ function App(){
         </div>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
-        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Distances use the <strong style={{color:C.txt}}>track</strong> between the <strong style={{color:C.txt}}>gate lines</strong> at each end of the leg: a line through the mark, perpendicular to the mark-to-mark course. <strong style={{color:C.txt}}>Round</strong> = extra path in the <strong style={{color:C.txt}}>from-mark</strong> zone (first ↔ last gate crossing) before the leg proper — re-run analysis to refresh values.</p>
+        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Distances use the <strong style={{color:C.txt}}>track</strong> between boundaries at each end: <strong style={{color:C.txt}}>start/finish</strong> is the S/F <strong style={{color:C.txt}}>line</strong> you set (A–B); <strong style={{color:C.txt}}>marks</strong> use a gate through the mark ⊥ to the mark-to-mark leg. <strong style={{color:C.txt}}>Round</strong> = extra path in the <strong style={{color:C.txt}}>from-mark</strong> zone (not at S/F) — re-run analysis to refresh values.</p>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:820}}>
             <thead>
