@@ -737,14 +737,43 @@ function escapeHtml(s){
     .replace(/"/g,"&quot;");
 }
 function openPrintableCompareDocument(htmlString){
-  const w=window.open("","_blank","noopener,noreferrer");
-  if(!w){
-    alert("Please allow pop-ups to export the comparison, then try again.");
-    return;
+  const tryPrint=(w)=>{ try{w.focus();w.print();}catch(_){/* ignore */} };
+  /** `window.open(..., "noopener")` is omitted — in Chrome and others the returned Window is null, so document.write never runs (blank tab). */
+  const w1=window.open("about:blank","_blank");
+  if(w1){
+    try{
+      w1.document.open();
+      w1.document.write(htmlString);
+      w1.document.close();
+      setTimeout(()=>tryPrint(w1),200);
+      return;
+    }catch(e){
+      try{w1.close();}catch(_){/* ignore */}
+    }
   }
-  w.document.write(htmlString);
-  w.document.close();
-  setTimeout(()=>{try{w.focus();w.print();}catch(_){/* ignore */}},150);
+  try{
+    const url=URL.createObjectURL(new Blob([htmlString],{type:"text/html;charset=utf-8"}));
+    const w2=window.open(url,"_blank");
+    if(w2){
+      w2.addEventListener("load",()=>setTimeout(()=>tryPrint(w2),50),{once:true});
+      w2.addEventListener("afterprint",()=>{ try{URL.revokeObjectURL(url);}catch(_){} },{once:true});
+      setTimeout(()=>{ try{URL.revokeObjectURL(url);}catch(_){} },9e4);
+      return;
+    }
+    URL.revokeObjectURL(url);
+  }catch(_){/* fallback */ }
+  const iframe=document.createElement("iframe");
+  iframe.setAttribute("style","position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden");
+  iframe.setAttribute("srcdoc",htmlString);
+  document.body.appendChild(iframe);
+  const cleanup=()=>{ try{document.body.removeChild(iframe);}catch(_){/* ignore */} };
+  const runFramePrint=()=>{
+    setTimeout(()=>{ try{iframe.contentWindow?.print();}catch(_){} setTimeout(cleanup,2e3);},150);
+  };
+  if(iframe.contentDocument&&iframe.contentDocument.readyState==="complete")runFramePrint();
+  else iframe.addEventListener("load", runFramePrint,{once:true});
+  setTimeout(cleanup,12e4);
+  try{console.info("SailStats: export used in-page print (pop-up was blocked or unavailable)");}catch(_){}
 }
 /** Time string for compare print HTML (matches on-screen fT). */
 function fT_print(s){
@@ -3821,7 +3850,7 @@ function App(){
         </div>
       </div>
       <div style={{maxWidth:900,margin:"0 auto",padding:"20px 14px 40px"}}>
-        <p style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Data from the last analysis saved in Supabase for each activity. Re-run <strong style={{color:C.txt}}>Analyse</strong> on an activity to refresh its stored metrics and leg splits. <strong style={{color:C.txt}}>Export PDF / print</strong> (top right) opens a clean report; in the system print dialog choose <strong style={{color:C.txt}}>Save as PDF</strong> where your browser offers it.</p>
+        <p style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Data from the last analysis saved in Supabase for each activity. Re-run <strong style={{color:C.txt}}>Analyse</strong> on an activity to refresh its stored metrics and leg splits. <strong style={{color:C.txt}}>Export PDF / print</strong> opens a report tab and the print dialog — use <strong style={{color:C.txt}}>Save as PDF</strong> in that dialog. Allow pop-ups for <strong style={{color:C.txt}}>this page’s address</strong> (e.g. <code style={{color:C.txt}}>*.github.io</code> for GitHub Pages), not only <code style={{color:C.txt}}>github.com</code>. If pop-ups are blocked, export falls back to printing from an in-page frame.</p>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>1 · Overall performance</div>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20,overflowX:"auto"}}>
