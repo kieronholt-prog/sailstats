@@ -3961,25 +3961,25 @@ function App(){
   if(view==="activities"){
     return(<div style={{background:C.bg,minHeight:"100vh",paddingBottom:compareMode?72:0}}>
       <div style={hdr}>
-        <button onClick={signOutAll} style={{background:"none",border:"none",color:C.txM,fontSize:12}}>Sign Out</button>
-        <div style={{fontSize:15,fontWeight:700,color:C.acc}}>SailStats</div>
-        <div style={{fontSize:11,color:C.txM}}>{sAth?.firstname||session?.user?.email||""}</div>
+        <button onClick={signOutAll} style={{background:"none",border:"none",color:C.txM,fontSize:16}}>Sign Out</button>
+        <div style={{fontSize:19,fontWeight:700,color:C.acc}}>SailStats</div>
+        <div style={{fontSize:15,color:C.txM}}>{sAth?.firstname||session?.user?.email||""}</div>
       </div>
-      <div style={{maxWidth:560,margin:"0 auto",padding:"20px 14px"}}>
+      <div style={{width:"100%",maxWidth:"100%",margin:0,boxSizing:"border-box",padding:"20px 16px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
-          <div style={{fontSize:18,fontWeight:700}}>Your Activities</div>
+          <div style={{fontSize:22,fontWeight:700}}>Your Activities</div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-            <button type="button" onClick={()=>setCompareMode(c=>!c)} style={{...btn(compareMode?`${C.acc}25`:"transparent",compareMode?C.acc:C.txM,C.bdr),padding:"7px 12px",fontSize:11}}>{compareMode?"Cancel compare":"Compare"}</button>
-            <button type="button" onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:11}}>+ Upload File</button>
+            <button type="button" onClick={()=>setCompareMode(c=>!c)} style={{...btn(compareMode?`${C.acc}25`:"transparent",compareMode?C.acc:C.txM,C.bdr),padding:"7px 12px",fontSize:15}}>{compareMode?"Cancel compare":"Compare"}</button>
+            <button type="button" onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:15}}>+ Upload File</button>
           </div>
           <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
-        {compareMode&&<div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
-        {session?.strava?.linked&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}>From Strava we import <strong style={{color:C.txt}}>Sail</strong> and <strong style={{color:C.txt}}>Windsurf</strong> activities only.</div>}
-        {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center"}}>Loading...</div>}
-        {processing&&<div style={{color:C.acc,padding:30,textAlign:"center"}}>Processing...</div>}
-        {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; use the buttons below or <strong>Compare</strong>.</div>}
-        {!loadingActs && !processing && session?.strava?.linked && activitiesListMerged.length===0 &&<div style={{color:C.txM,fontSize:12,padding:"16px 0",lineHeight:1.5}}>No <strong style={{color:C.txt}}>Sail</strong> or <strong style={{color:C.txt}}>Windsurf</strong> activities in your recent Strava list, and no saved uploads yet. Upload a GPX/FIT or record a Sail/Windsurf activity in Strava.</div>}
+        {compareMode&&<div style={{fontSize:14,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
+        {session?.strava?.linked&&<div style={{fontSize:14,color:C.txD,marginBottom:10,lineHeight:1.5}}>From Strava we import <strong style={{color:C.txt}}>Sail</strong> and <strong style={{color:C.txt}}>Windsurf</strong> activities only.</div>}
+        {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center",fontSize:16}}>Loading...</div>}
+        {processing&&<div style={{color:C.acc,padding:30,textAlign:"center",fontSize:16}}>Processing...</div>}
+        {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:14,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; use the buttons below or <strong>Compare</strong>.</div>}
+        {!loadingActs && !processing && session?.strava?.linked && activitiesListMerged.length===0 &&<div style={{color:C.txM,fontSize:16,padding:"16px 0",lineHeight:1.5}}>No <strong style={{color:C.txt}}>Sail</strong> or <strong style={{color:C.txt}}>Windsurf</strong> activities in your recent Strava list, and no saved uploads yet. Upload a GPX/FIT or record a Sail/Windsurf activity in Strava.</div>}
         {activitiesListMerged.map(act=>{
           const sidStr=String(act.id);
           const saved=act.__fromSupabaseOnly?act.__savedRow:savedByActId[sidStr];
@@ -3992,14 +3992,14 @@ function App(){
           return(
             <div key={rowKey} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
               {compareMode&&<label style={{display:"flex",alignItems:"center",paddingLeft:4,cursor:"pointer"}}>
-                <input type="checkbox" checked={picked} onChange={()=>toggleComparePick(act.id)} style={{width:16,height:16,accentColor:C.acc}}/>
+                <input type="checkbox" checked={picked} onChange={()=>toggleComparePick(act.id)} style={{width:20,height:20,accentColor:C.acc}}/>
               </label>}
               <div style={{flex:1,minWidth:0,background:C.card,borderRadius:10,border:`1px solid ${picked?C.acc:C.bdr}`,overflow:"hidden",transition:"border-color 0.15s"}}>
                 {String(renameActId)===String(act.id)?(
                   <div style={{padding:"10px 12px",display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
-                    <input value={renameDraft} onChange={e=>setRenameDraft(e.target.value)} placeholder="Display name" autoFocus style={{flex:1,minWidth:140,padding:"8px 10px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:13}}/>
-                    <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:11}}>{renameBusy?"…":"Save"}</button>
-                    <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:11}}>Cancel</button>
+                    <input value={renameDraft} onChange={e=>setRenameDraft(e.target.value)} placeholder="Display name" autoFocus style={{flex:1,minWidth:140,padding:"8px 10px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:17}}/>
+                    <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:15}}>{renameBusy?"…":"Save"}</button>
+                    <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:15}}>Cancel</button>
                   </div>
                 ):(
                   <div>
@@ -4010,12 +4010,22 @@ function App(){
                       tabIndex={compareMode?0:-1}
                       style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px 8px 14px",width:"100%",background:"transparent",border:"none",textAlign:"left",cursor:compareMode?"pointer":"default",minWidth:0}}
                     >
-                      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
+                      <div style={{width:38,height:38,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,background:`${C.blu}22`,flexShrink:0}}>
                         {isUpload?"📁":(act.type?.includes("Sail")?"⛵":act.type?.includes("Wind")?"🏄":act.type?.includes("Ride")?"🚴":"📍")}
                       </div>
                       <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
-                        <div style={{fontSize:10,color:C.txM,marginTop:2}}>
+                        <div style={{display:"flex",alignItems:"center",gap:4,minWidth:0}}>
+                          <div style={{fontSize:17,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,minWidth:0}}>{displayName}</div>
+                          {!compareMode&&hasSaved&&String(renameActId)!==String(act.id)&&(
+                            <button
+                              type="button"
+                              title="Edit display name"
+                              onClick={e=>{e.stopPropagation();setRenameActId(String(act.id));setRenameDraft(displayName);}}
+                              style={{background:"none",border:"none",color:C.txM,cursor:"pointer",padding:"2px 4px",fontSize:19,lineHeight:1,flexShrink:0}}
+                            >✎</button>
+                          )}
+                        </div>
+                        <div style={{fontSize:14,color:C.txM,marginTop:2}}>
                           {isUpload?formatCompareRowSubtitle(saved,null):formatCompareRowSubtitle(saved,act)}
                           {act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}
                           {act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}
@@ -4026,25 +4036,22 @@ function App(){
                     </div>
                     {!compareMode&&(
                       <div style={{display:"flex",flexWrap:"wrap",gap:8,padding:"4px 12px 12px 14px",alignItems:"center"}}>
-                        <button type="button" disabled={!hasSaved} onClick={()=>deleteActivityRow(act,hasSaved)} title={hasSaved?"Delete saved analysis from SailStats":"No saved data to delete"} style={{...btn("transparent",hasSaved?C.wrn:C.txD,hasSaved?C.wrn:C.bdr),padding:"6px 12px",fontSize:11,opacity:hasSaved?1:0.4,cursor:hasSaved?"pointer":"not-allowed"}}>Delete</button>
-                        <button type="button" onClick={()=>openSetupFromList(act,saved,isUpload)} style={{...btn("transparent",C.acc,C.acc),padding:"6px 12px",fontSize:11,borderWidth:1}}>Setup</button>
-                        <button type="button" onClick={()=>viewAnalysisFromList(act,saved,isUpload)} style={{...btn(`${C.acc}20`,C.acc,C.acc),padding:"6px 12px",fontSize:11}}>View analysis</button>
+                        <button type="button" disabled={!hasSaved} onClick={()=>deleteActivityRow(act,hasSaved)} title={hasSaved?"Delete saved analysis from SailStats":"No saved data to delete"} style={{...btn("transparent",hasSaved?C.wrn:C.txD,hasSaved?C.wrn:C.bdr),padding:"6px 12px",fontSize:15,opacity:hasSaved?1:0.4,cursor:hasSaved?"pointer":"not-allowed"}}>Delete</button>
+                        <button type="button" onClick={()=>openSetupFromList(act,saved,isUpload)} style={{...btn("transparent",C.acc,C.acc),padding:"6px 12px",fontSize:15,borderWidth:1}}>Setup</button>
+                        <button type="button" onClick={()=>viewAnalysisFromList(act,saved,isUpload)} style={{...btn(`${C.acc}20`,C.acc,C.acc),padding:"6px 12px",fontSize:15}}>View analysis</button>
                       </div>
                     )}
                   </div>
                 )}
               </div>
-              {!compareMode&&hasSaved&&String(renameActId)!==String(act.id)&&(
-                <button type="button" title="Rename in list" onClick={e=>{e.stopPropagation();setRenameActId(String(act.id));setRenameDraft(displayName);}} style={{...btn("transparent",C.txM,C.bdr),padding:"0 12px",fontSize:14,borderRadius:10,alignSelf:"stretch"}}>✎</button>
-              )}
             </div>
           );
         })}
       </div>
       {compareMode&&comparePick.length===2&&(
         <div style={{position:"fixed",left:0,right:0,bottom:0,padding:"12px 16px",background:`${C.card}f2`,borderTop:`1px solid ${C.bdr}`,backdropFilter:"blur(8px)",zIndex:200,display:"flex",justifyContent:"center",gap:12}}>
-          <button type="button" onClick={openCompareSelected} style={{...btn(C.acc,"#0a1628"),padding:"12px 24px",fontSize:13,fontWeight:700}}>Compare selected</button>
-          <button type="button" onClick={()=>setComparePick([])} style={{...btn("transparent",C.txM,C.bdr),padding:"12px 16px",fontSize:12}}>Clear</button>
+          <button type="button" onClick={openCompareSelected} style={{...btn(C.acc,"#0a1628"),padding:"12px 24px",fontSize:17,fontWeight:700}}>Compare selected</button>
+          <button type="button" onClick={()=>setComparePick([])} style={{...btn("transparent",C.txM,C.bdr),padding:"12px 16px",fontSize:16}}>Clear</button>
         </div>
       )}
     </div>);
