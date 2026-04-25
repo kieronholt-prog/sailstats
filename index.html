@@ -68,6 +68,8 @@ const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
 const LS_GPS_TO_BOW_M_KEY="sailstats_gpsToBowM";
 const DEFAULT_GPS_TO_BOW_M=2;
+const LS_BOAT_TYPE_KEY="sailstats_boatType";
+const BOAT_TYPE_OPTIONS=["","ILCA 6 / Laser Radial","ILCA 7 / Laser Standard","420","29er / 49er","RS Aero","Finn","GP14","Other dinghy","Other"];
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
 /** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
@@ -3062,6 +3064,18 @@ function App(){
     try{localStorage.setItem(LS_GPS_TO_BOW_M_KEY,String(gpsToBowM));}catch(_){}
   },[gpsToBowM]);
 
+  const [boatType,setBoatType]=useState(()=>{
+    try{
+      const s=localStorage.getItem(LS_BOAT_TYPE_KEY);
+      if(s==null||s==="")return"";
+      if(BOAT_TYPE_OPTIONS.includes(s))return s;
+      return"Other dinghy";
+    }catch(_){ return""; }
+  });
+  useEffect(()=>{
+    try{localStorage.setItem(LS_BOAT_TYPE_KEY,boatType||"");}catch(_){}
+  },[boatType]);
+
   const applyWorkerSession=useCallback((d)=>{
     if(!d||!d.ok||!d.supabase_access_token)return false;
     supabaseUserJwt=d.supabase_access_token;
@@ -3982,7 +3996,31 @@ function App(){
       <div style={hdr}>
         <button onClick={signOutAll} style={{background:"none",border:"none",color:C.txM,fontSize:16}}>Sign Out</button>
         <div style={{fontSize:19,fontWeight:700,color:C.acc}}>SailStats</div>
-        <div style={{fontSize:15,color:C.txM}}>{sAth?.firstname||session?.user?.email||""}</div>
+        <button
+          type="button"
+          onClick={()=>setView("user-settings")}
+          title="User settings"
+          aria-label="User settings"
+          style={{
+            background:`${C.card}`,
+            border:`1px solid ${C.bdr}`,
+            borderRadius:10,
+            padding:"7px 9px",
+            color:C.acc,
+            cursor:"pointer",
+            display:"flex",
+            alignItems:"center",
+            justifyContent:"center",
+            lineHeight:0,
+          }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+            <path d="M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M3.5 20a8.2 8.2 0 0 1 6.3-3h4.4a8.2 8.2 0 0 1 6.3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            <circle cx="18" cy="6" r="2.8" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1.4"/>
+            <path d="M18 4.3v3.4M16.3 6h3.4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+          </svg>
+        </button>
       </div>
       <div style={{width:"100%",maxWidth:"100%",margin:0,boxSizing:"border-box",padding:"20px 16px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
@@ -4074,6 +4112,43 @@ function App(){
         </div>
       )}
     </div>);
+  }
+
+  /* ─── USER SETTINGS ─── */
+  if(view==="user-settings"){
+    return(
+      <div style={{background:C.bg,minHeight:"100vh"}}>
+        <div style={hdr}>
+          <button type="button" onClick={()=>setView("activities")} style={{background:"none",border:"none",color:C.txM,fontSize:16}}>← Activities</button>
+          <div style={{fontSize:16,fontWeight:600,color:C.txt}}>User settings</div>
+          <div style={{width:40}}/>
+        </div>
+        <div style={{maxWidth:700,margin:"0 auto",padding:"20px 16px"}}>
+          {session?.user?.email&&<p style={{fontSize:14,color:C.txM,marginBottom:18}}>Signed in as <span style={{color:C.acc,fontWeight:600}}>{session.user.email}</span></p>}
+          <div style={{marginBottom:20}}>
+            <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>Boat type</label>
+            <select value={boatType} onChange={e=>setBoatType(e.target.value)} style={{width:"100%",maxWidth:400,padding:"10px 12px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'Outfit',sans-serif"}}>
+              {BOAT_TYPE_OPTIONS.map((opt,i)=><option key={`bt-${i}`} value={opt}>{opt===""?"— Select —":opt}</option>)}
+            </select>
+            <p style={{fontSize:10,color:C.txD,margin:"8px 0 0",maxWidth:480,lineHeight:1.5}}>For your records in this browser. You can change it any time.</p>
+          </div>
+          <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14}}>
+            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>GPS / track</div>
+            <label style={{fontSize:12,color:C.txt,display:"block",marginBottom:6}}>Antenna to bow (m)</label>
+            <input
+              type="number"
+              min={0}
+              max={25}
+              step={0.1}
+              value={gpsToBowM}
+              onChange={e=>{const n=parseFloat(e.target.value);if(Number.isFinite(n)&&n>=0&&n<=25)setGpsToBowM(n);}}
+              style={{width:120,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}
+            />
+            <p style={{fontSize:10,color:C.txD,margin:"8px 0 0",lineHeight:1.5}}>Forward distance from GPS tracker to the bow, along COG, for committee-line distance and start leg. Default 2&nbsp;m. Saved in this browser. Changing it re-runs the wind-aware analysis on the next calculation.</p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   /* ─── SAVED SUMMARY (upload / no Strava stream) ─── */
@@ -4397,7 +4472,7 @@ function App(){
       </div>
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
         <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>Setup</div>
-        <p style={{fontSize:12,color:C.txM,margin:"0 0 16px",lineHeight:1.55}}>Choose course, laps, start and windward mark; set antenna to bow. Use the map for marks and the start line, the dial for wind FROM, then run analysis.</p>
+        <p style={{fontSize:12,color:C.txM,margin:"0 0 16px",lineHeight:1.55}}>Choose course, laps, start, and windward mark. Use the map for marks and the start line, the dial for wind FROM, then run analysis. <strong style={{color:C.txt}}>Antenna to bow</strong> and <strong style={{color:C.txt}}>boat type</strong> are in <strong style={{color:C.txt}}>User settings</strong>.</p>
 
         <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
           <div style={{flex:2,minWidth:180}}>
@@ -4441,21 +4516,6 @@ function App(){
             {windwardMarkOptions.map(n=><option key={n} value={n}>{n}</option>)}
           </select>
           <p style={{fontSize:10,color:C.txD,margin:"6px 0 0",maxWidth:520,lineHeight:1.5}}>The wind estimate favours track segments and manoeuvres that head toward this mark (upwind leg). List is lap 1 marks in order. Pick a mark only if it matches the day’s course.</p>
-        </div>
-
-        <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>User / GPS</div>
-          <label style={{fontSize:12,color:C.txt,display:"block",marginBottom:6}}>Antenna to bow (m)</label>
-          <input
-            type="number"
-            min={0}
-            max={25}
-            step={0.1}
-            value={gpsToBowM}
-            onChange={e=>{const n=parseFloat(e.target.value);if(Number.isFinite(n)&&n>=0&&n<=25)setGpsToBowM(n);}}
-            style={{width:120,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}
-          />
-          <p style={{fontSize:10,color:C.txD,margin:"8px 0 0",lineHeight:1.5}}>Forward distance from GPS tracker to the bow, along COG, for committee-line distance and start leg. Default 2&nbsp;m. Saved in this browser. Changing it re-runs the wind-aware analysis on the next calculation.</p>
         </div>
 
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
