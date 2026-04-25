@@ -69,7 +69,77 @@ const DEFAULT_RACE_START_TEXT="18:30:00";
 const LS_GPS_TO_BOW_M_KEY="sailstats_gpsToBowM";
 const DEFAULT_GPS_TO_BOW_M=2;
 const LS_BOAT_TYPE_KEY="sailstats_boatType";
-const BOAT_TYPE_OPTIONS=["","ILCA 6 / Laser Radial","ILCA 7 / Laser Standard","420","29er / 49er","RS Aero","Finn","GP14","Other dinghy","Other"];
+const BOAT_TYPE_OPTIONS=[
+  "",
+  "12 Metre",
+  "2.4 Metre",
+  "29er",
+  "420",
+  "470",
+  "49er",
+  "49erFX",
+  "5.5 Metre",
+  "505",
+  "6 Metre",
+  "8 Metre",
+  "A-Class Catamaran",
+  "Cadet",
+  "Contender",
+  "Dart 18",
+  "Dragon",
+  "Enterprise",
+  "Etchells",
+  "Europe",
+  "Finn",
+  "Fireball",
+  "Flying Dutchman",
+  "Flying Fifteen",
+  "Formula 18",
+  "GP14",
+  "Hansa 2.3",
+  "Hansa 303",
+  "Hansa Liberty",
+  "Hobie 14",
+  "Hobie 16",
+  "Hobie 17",
+  "Hobie 18",
+  "Hobie Dragoon",
+  "Hobie Tiger",
+  "Hobie Wildcat",
+  "International 14",
+  "International 2.4mR",
+  "J/22",
+  "J/24",
+  "J/70",
+  "J/80",
+  "Laser / ILCA 7",
+  "Laser Radial / ILCA 6",
+  "Laser 4.7 / ILCA 4",
+  "Lightning",
+  "Melges 24",
+  "Melges 32",
+  "Mirror",
+  "Nacra 17",
+  "Nacra Infusion",
+  "OK Dinghy",
+  "Optimist",
+  "RS Feva",
+  "RS Tera",
+  "RS:X",
+  "Snipe",
+  "Soling",
+  "Star",
+  "Sunfish",
+  "Tasar",
+  "Tempest",
+  "Topper",
+  "Tornado",
+  "Vaurien",
+  "Wayfarer",
+  "Windsurfer",
+  "Yngling",
+  "Other",
+];
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
 /** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
@@ -204,6 +274,41 @@ function sideOfPerpAtB(latA,lonA,latB,lonB,latP,lonP){
   if(Math.hypot(b.x,b.y)<0.1)return 0;
   return (p.x-b.x)*b.x+(p.y-b.y)*b.y;
 }
+/**
+ * Gate through A, ⊥ to boat COG: line through A with normal in direction of travel (E,N) — (P−A)·û = 0 on the beam.
+ */
+function sideOfPerpAtABearing(latA,lonA,bearingDeg,latP,lonP){
+  const θ=Number(bearingDeg)*D;
+  const ux=Math.sin(θ),uy=Math.cos(θ);
+  const p=enuMeters(latA,lonA,latP,lonP);
+  return p.x*ux+p.y*uy;
+}
+function sideOfPerpAtBBearing(latB,lonB,bearingDeg,latP,lonP){
+  const θ=Number(bearingDeg)*D;
+  const ux=Math.sin(θ),uy=Math.cos(θ);
+  const p=enuMeters(latB,lonB,latP,lonP);
+  return p.x*ux+p.y*uy;
+}
+/** Circular mean of valid COG on [i0..i1]; if too sparse, return great-circle bearing of endpoints. */
+function meanCogOnTrackSegment(pts,i0,i1){
+  if(!pts?.length)return null;
+  const a=Math.max(0,Math.min(i0|0,pts.length-1));
+  const b=Math.max(a,Math.min(i1|0,pts.length-1));
+  const cogs=[];
+  for(let i=a;i<=b;i++){
+    const c=pts[i].cog;
+    if(Number.isFinite(c))cogs.push(c);
+  }
+  if(cogs.length>=3)return circularMeanStdDeg(cogs).mean;
+  if(b>a)return bear(pts[a].lat,pts[a].lon,pts[b].lat,pts[b].lon);
+  return null;
+}
+/** Same upwind test as classifyLegs: rel=(legBearing−wd+360)%360, upwind if rel<60 or rel>300. */
+function isUpwindLegBearingVsWindDeg(legBearing,wdFrom){
+  if(!Number.isFinite(legBearing)||!Number.isFinite(wdFrom))return false;
+  const rel=((legBearing-wdFrom+360)%360);
+  return rel<60||rel>300;
+}
 const LEG_CHORD_MIN_M=3;
 function segmentSignCrosses(s0,s1){
   if(!Number.isFinite(s0)||!Number.isFinite(s1))return false;
@@ -297,16 +402,31 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
   return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
 }
 /**
- * Leg = track from first crossing of the ⊥ at A to chord (A centre → B centre), to first crossing of ⊥ at B.
+ * Leg = track from first crossing of the ⊥ at A to the gate at A, to first crossing of ⊥ at B to the gate at B.
+ * Default gates are ⊥ to chord A↔B; when the same upwind test as classifyLegs on a leg-bearing proxy
+ * (track from search to fbEnd, else chord A↔B) passes, and mean leg COG is available, both gates are ⊥ to mean leg COG.
  * A,B are mark centres, or the start/finish line midpoint (committee line) when from/to is START/FINISH.
  * START leg: distance from S/F to bow (GPS + gpsToBowM along COG) — see startLineDistanceSignedM (signed).
  * Other from-marks: legacy mark_path_m along ⊥ when not using perp_in_out from roundings.
  */
-function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM){
+function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM,windFromDeg=null){
   const c=hav(latA,lonA,latB,lonB);
   if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
-  const sideA=(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
-  const sideB=(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
+  const s0=Math.max(0,searchFrom|0),idxEnd=fbEnd|0;
+  const legMeanC=meanCogOnTrackSegment(pts,s0,idxEnd);
+  const wdF=Number(windFromDeg);
+  let legBearingProxy=null;
+  if(idxEnd>s0&&pts[s0]&&pts[idxEnd])
+    legBearingProxy=bear(pts[s0].lat,pts[s0].lon,pts[idxEnd].lat,pts[idxEnd].lon);
+  if(legBearingProxy==null||!Number.isFinite(legBearingProxy))
+    legBearingProxy=bear(latA,lonA,latB,lonB);
+  const wantCogGates=isUpwindLegBearingVsWindDeg(legBearingProxy,wdF)&&Number.isFinite(legMeanC);
+  const sideA=wantCogGates
+    ?(p)=>sideOfPerpAtABearing(latA,lonA,legMeanC, p.lat,p.lon)
+    :(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
+  const sideB=wantCogGates
+    ?(p)=>sideOfPerpAtBBearing(latB,lonB,legMeanC, p.lat,p.lon)
+    :(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
@@ -2074,7 +2194,7 @@ function computeRoundingPointMask(pts,details,baselines){
   return mask;
 }
 
-function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2){
+function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2,windFromDeg=null){
   const legs=[];
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
   if(fullSeq.length<2)return{legs,roundings:[]};
@@ -2149,7 +2269,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     let startIdx=si,endIdx=ei,roundingM=0,roundingStraightM=null,legPathDef="closest",roundingKind=null;
     let startLineDistanceM=null;
     if(wA&&wB){
-      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM);
+      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg);
       startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;roundingStraightM=null;
       if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
       if(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)startIdx=r0.exitIdx;
@@ -2330,7 +2450,7 @@ function classifyLegs(legs,wd,gybeEvents=null){
   return legs.map(l=>{
     const rel=((l.legBearing-wd+360)%360);
     let type;
-    if(rel<60||rel>300)type="upwind";
+    if(isUpwindLegBearingVsWindDeg(l.legBearing,wd))type="upwind";
     else if(rel>120&&rel<240){
       type="downwind";
       const hasRacingGybe=(gybeEvents||[]).some(g=>racingGybeIntersectsLeg(l,g));
@@ -2556,7 +2676,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const markLocList=allCourseMarkLocations(markPositions,preamble,laps);
   let legDetection=null;
   if(expandCourseMarks(preamble,markPositions||[],laps).length>=2)
-    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM);
+    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM,wd);
   const roundingIdxs=legDetection?.roundings?.map(r=>r.idx).filter(i=>Number.isFinite(i)&&i>=0)??[];
   for(const m of manoeuvreEvents){
     const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
@@ -3069,7 +3189,7 @@ function App(){
       const s=localStorage.getItem(LS_BOAT_TYPE_KEY);
       if(s==null||s==="")return"";
       if(BOAT_TYPE_OPTIONS.includes(s))return s;
-      return"Other dinghy";
+      return"Other";
     }catch(_){ return""; }
   });
   useEffect(()=>{
