@@ -65,6 +65,9 @@ const DEFAULT_SF_LINE_ENDS={
 };
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
+/** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
+const LS_GPS_TO_BOW_M_KEY="sailstats_gpsToBowM";
+const DEFAULT_GPS_TO_BOW_M=2;
 const STRAVA_REDIRECT = window.location.origin + window.location.pathname;
 
 /** Set after SailStats login (Supabase user JWT for RLS). Do not persist to localStorage. */
@@ -219,31 +222,109 @@ function allPerpCrossingEnds(pts, jMin, jEnd, sideAt){
   }
   return o;
 }
+/** Lateral (m) of mark from bow: + = mark to starboard (right), − = to port, using COG at boat (° T). */
+function markLateralFromBowM(bLat,bLon,mLat,mLon,cogDeg){
+  if(cogDeg==null||!Number.isFinite(cogDeg))return null;
+  const θ=cogDeg*D;
+  const c=Math.cos(bLat*D);
+  const dE=(mLon-bLon)*D*RE*c,dN=(mLat-bLat)*D*RE;
+  const rE=Math.cos(θ),rN=-Math.sin(θ);
+  return dE*rE+dN*rN;
+}
+function segmentHeadingForCrossing(pts,j){
+  if(j==null||j<0||!pts?.[j])return null;
+  const b=pts[j],a=pts[Math.max(0,j-1)];
+  if(Number.isFinite(b.cog))return b.cog;
+  if(Number.isFinite(a?.cog))return a.cog;
+  if(a&&b)return bear(a.lat,a.lon,b.lat,b.lon);
+  return null;
+}
+/** P/S: mark to port (P) or starboard (S) of bow at crossing. tack null/unknown → any crossing. */
+function perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon){
+  if(tack!=="P"&&tack!=="S")return true;
+  const c=segmentHeadingForCrossing(pts,j);
+  if(c==null)return true;
+  const b=pts[j],lat=b.lat,lon=b.lon;
+  const L=markLateralFromBowM(lat,lon,mLat,mLon,c);
+  if(L==null||!Number.isFinite(L))return true;
+  const lim=1.5;
+  if(tack==="S")return L>-lim;
+  if(tack==="P")return L<lim;
+  return true;
+}
+function firstValidPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon){
+  const sF=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd,pts.length-1);
+  for(let j=Math.max(1,sF+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s0=sideAt(a),s1=sideAt(b);
+    if(!segmentSignCrosses(s0,s1))continue;
+    if(perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))return j;
+  }
+  return-1;
+}
+/**
+ * Inbound gate: line through mark ⊥ to (prev → mark). Outbound gate: line through mark ⊥ to (mark → next).
+ * Rounded only if both are crossed; tack (P| S) = mark to port|starboard of bow at that crossing. tack null: any.
+ */
+function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
+  const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
+  const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
+  if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{ok:false};
+  const sF=Math.max(0,searchFrom|0);
+  const jEnd=pts.length-1;
+  const sideIn=pp=>sideOfPerpAtB(prev.lat,prev.lon,curr.lat,curr.lon,pp.lat,pp.lon);
+  const sideOut=pp=>sideOfPerpAtA(curr.lat,curr.lon,next.lat,next.lon,pp.lat,pp.lon);
+  const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideIn,tack,curr.lat,curr.lon);
+  if(eIn<0)return{ok:false};
+  const eOut=firstValidPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon);
+  if(eOut<0||eOut<=eIn)return{ok:false};
+  if(eOut-eIn+1<2)return{ok:false};
+  const trackM=sumPathDist(pts,eIn,eOut);
+  const straightM=hav(pts[eIn].lat,pts[eIn].lon,pts[eOut].lat,pts[eOut].lon);
+  return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
+}
 /**
  * Leg = track from first crossing of the ⊥ at A to chord (A centre → B centre), to first crossing of ⊥ at B.
  * A,B are mark centres, or the start/finish line midpoint (committee line) when from/to is START/FINISH.
- * rounding: mark → along-track between first/last gate crossings in the from-mark approach; START →
- * perpendicular offset (m) from the GPS point just before the leg start to the S/F segment.
+ * START leg: distance from S/F to bow (GPS + gpsToBowM along COG) — see startLineDistanceSignedM (signed).
+ * Other from-marks: legacy mark_path_m along ⊥ when not using perp_in_out from roundings.
  */
-function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine){
+function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM){
   const c=hav(latA,lonA,latB,lonB);
-  if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest",roundingKind:null};
+  if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
   const sideA=(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
   const sideB=(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
-  if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest",roundingKind:null};
+  if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
   const cB=firstPerpCrossing(pts, cA, jEnd, sideB);
-  if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest",roundingKind:null};
-  if(cB-cA+1<5)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,legPathDef:"closest",roundingKind:null};
-  let roundingM=0,roundingKind=null;
+  if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
   const e0=startFinishLine?.endA, e1=startFinishLine?.endB;
   const hasSf=e0&&e1&&Number.isFinite(e0.lat)&&Number.isFinite(e0.lon)&&Number.isFinite(e1.lat)&&Number.isFinite(e1.lon);
+  let jSf=-1;
+  if(String(fromMark||"")==="START"&&hasSf)
+    jSf=firstCommitteeLineSegmentCrossing(pts,sF,Math.min(cB,jEnd),e0,e1);
+  let legStartIdx=cA;
+  if(String(fromMark||"")==="START"&&jSf>=0&&jSf<cB&&(cB-jSf+1)>=5)legStartIdx=jSf;
+  if(cB-legStartIdx+1<5)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
+  let roundingM=0,roundingKind=null,startLineDistanceSignedM=null;
   if(String(fromMark||"")==="START"&&hasSf){
-    const pr=pts[Math.max(0, cA-1)];
-    roundingM=distPointToSegmentM(pr.lat,pr.lon,e0.lat,e0.lon,e1.lat,e1.lon);
-    roundingKind="sf_offset_m";
+    if(jSf>=0){
+      const p0=pts[jSf-1],p1=pts[jSf];
+      const onLine=interpolateTrackSegmentToLineLL(p0,p1,e0.lat,e0.lon,e1.lat,e1.lon);
+      const cog=segmentHeadingForCrossing(pts,jSf)??bear(p0.lat,p0.lon,p1.lat,p1.lon);
+      const f=Number(gpsToBowM)||0;
+      const bow=f>0.05?destinationPoint(onLine.lat,onLine.lon,cog,f):{lat:onLine.lat,lon:onLine.lon};
+      startLineDistanceSignedM=signedDistanceToCommitteeLineM(bow.lat,bow.lon,e0,e1,latB,lonB);
+    }else{
+      const prIdx=Math.max(0, cA-1);
+      const bow=gpsPositionToBow(pts,prIdx,Number(gpsToBowM)||0)??{lat:pts[prIdx].lat,lon:pts[prIdx].lon};
+      startLineDistanceSignedM=signedDistanceToCommitteeLineM(bow.lat,bow.lon,e0,e1,latB,lonB);
+    }
+    roundingM=0;
+    roundingKind="sf_line_m";
   }else if(String(fromMark||"")!=="START"){
     const rBefore=Math.max(1,sF+1);
     const rEnd=Math.max(rBefore, cA-1);
@@ -253,7 +334,7 @@ function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fb
       roundingKind="mark_path_m";
     }else{roundingM=0;roundingKind="mark_path_m";}
   }
-  return{startIdx:cA,endIdx:cB,roundingM,legPathDef:"perp",roundingKind,gatesAtA:cA,gatesAtB:cB};
+  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"perp",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null};
 }
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
 function destinationPoint(lat,lon,bearingDeg,distM){
@@ -374,6 +455,64 @@ function lineSideValue(lat,lon,aLat,aLon,bLat,bLon){
   const b=latLonToLocalM(bLat,bLon,refLat,refLon);
   const abx=b.x-a.x,aby=b.y-a.y,apx=p.x-a.x,apy=p.y-a.y;
   return abx*apy-aby*apx;
+}
+/**
+ * Project GPS forward to bow: along COG (° T) or segment bearing, by `forwardM` (m, ≥0).
+ * Used to offset antenna to bow for S/F and gate distances.
+ */
+function gpsPositionToBow(pts,idx,forwardM){
+  if(!pts?.length||!(forwardM>0.05))return null;
+  const j=Math.max(0,Math.min(pts.length-1,idx|0));
+  const p=pts[j];
+  if(!p)return null;
+  let cog=p.cog;
+  if(!Number.isFinite(cog)&&j>0){
+    const a=pts[j-1];
+    cog=bear(a.lat,a.lon,p.lat,p.lon);
+  }
+  if(!Number.isFinite(cog))return{lat:p.lat,lon:p.lon};
+  return destinationPoint(p.lat,p.lon,cog,forwardM);
+}
+/** S/F segment: negative = course side of line (same side as ref mark), positive = pre-line side. */
+function signedDistanceToCommitteeLineM(bLat,bLon,e0,e1,refLat,refLon){
+  const d=distPointToSegmentM(bLat,bLon,e0.lat,e0.lon,e1.lat,e1.lon);
+  if(!Number.isFinite(d))return 0;
+  const sB=lineSideValue(bLat,bLon,e0.lat,e0.lon,e1.lat,e1.lon);
+  const sR=lineSideValue(refLat,refLon,e0.lat,e0.lon,e1.lat,e1.lon);
+  if(!Number.isFinite(sB)||!Number.isFinite(sR)||sR===0||sB===0)return d;
+  const same=(sB*sR)>0;
+  return same?-d:d;
+}
+
+/** First index j (second point of segment j-1→j) where the track crosses the committee line (finite line, side flip). */
+function firstCommitteeLineSegmentCrossing(pts,iStart,jEnd,endA,endB){
+  if(!pts?.length||!endA||!endB)return-1;
+  const s0=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd|0,pts.length-1);
+  const sideAt=pp=>lineSideValue(pp.lat,pp.lon,endA.lat,endA.lon,endB.lat,endB.lon);
+  for(let j=Math.max(1,s0+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s1=sideAt(a),s2=sideAt(b);
+    if(segmentSignCrosses(s1,s2))return j;
+  }
+  return-1;
+}
+/** Intersection of track segment p0–p1 with the infinite line through endA–endB; returns a point on the track segment. */
+function interpolateTrackSegmentToLineLL(p0,p1,endA,endB){
+  const refLat=(p0.lat+p1.lat+endA.lat+endB.lat)/4,refLon=(p0.lon+p1.lon+endA.lon+endB.lon)/4;
+  const P0=latLonToLocalM(p0.lat,p0.lon,refLat,refLon);
+  const P1=latLonToLocalM(p1.lat,p1.lon,refLat,refLon);
+  const A=latLonToLocalM(endA.lat,endA.lon,refLat,refLon);
+  const B=latLonToLocalM(endB.lat,endB.lon,refLat,refLon);
+  const vx=P1.x-P0.x,vy=P1.y-P0.y;
+  const wx=B.x-A.x,wy=B.y-A.y;
+  const apx=P0.x-A.x,apy=P0.y-A.y;
+  const den=vx*wy-vy*wx;
+  if(Math.abs(den)<1e-14)return{lat:(p0.lat+p1.lat)/2,lon:(p0.lon+p1.lon)/2};
+  const t=(apx*wy-apy*wx)/den;
+  const tCl=Math.max(0,Math.min(1,t));
+  const ix=P0.x+tCl*vx,iy=P0.y+tCl*vy;
+  return{lat:refLat+iy/111320,lon:refLon+ix/(111320*Math.cos(refLat*D))};
 }
 
 function interpolatePointByTime(pts,targetTime){
@@ -676,6 +815,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
       duration: l.duration,
       distanceM: l.distance != null && Number.isFinite(l.distance) ? l.distance : null,
       roundingM: l.roundingM != null && Number.isFinite(l.roundingM) ? l.roundingM : null,
+      roundingStraightM: l.roundingStraightM != null && Number.isFinite(l.roundingStraightM) ? l.roundingStraightM : null,
+      startLineDistanceM: l.startLineDistanceM != null && Number.isFinite(l.startLineDistanceM) ? l.startLineDistanceM : null,
       roundingKind: l.roundingKind != null ? String(l.roundingKind) : null,
     })),
     updated_at: new Date().toISOString(),
@@ -828,7 +969,16 @@ function buildComparePrintHtml(ctx){
     const t0l=l0?.duration, t1l=l1?.duration;
     const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
     const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
-    const r0m=l0?.roundingM, r1m=l1?.roundingM;
+    const r0m=l0?.roundingM, r1m=l1?.roundingM, rs0=l0?.roundingStraightM, rs1=l1?.roundingStraightM;
+    const fmtR=(m,rs)=>(m!=null&&Number.isFinite(m)&&m>0.05?String(Math.round(m))+(rs!=null&&Number.isFinite(rs)&&rs>0.05?` (st ${String(Math.round(rs))})`:""):"—");
+    const lineCell=(l,m,rs)=>{
+      if(l&&l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)){
+        const v=Math.round(l.startLineDistanceM);
+        const neg=v<0;
+        return`Distance from line <span class="${neg?"lineNeg":""}">${v}m</span>`;
+      }
+      return fmtR(m,rs);
+    };
     let deltaS="—";
     if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
       const d=t1l-t0l;
@@ -836,8 +986,8 @@ function buildComparePrintHtml(ctx){
       else if(d>0)deltaS=`+${d.toFixed(0)}s (${escapeHtml(title1)} slower)`;
       else deltaS=`${d.toFixed(0)}s (${escapeHtml(title1)} faster)`;
     }
-    const r0s=r0m!=null&&Number.isFinite(r0m)&&r0m>0.05?String(Math.round(r0m)):"—";
-    const r1s=r1m!=null&&Number.isFinite(r1m)&&r1m>0.05?String(Math.round(r1m)):"—";
+    const r0s=lineCell(l0,r0m,rs0);
+    const r1s=lineCell(l1,r1m,rs1);
     legRows.push(`<tr>
 <td class="num">${l0&&l0.legNo?String(l0.legNo):l1&&l1.legNo?String(l1.legNo):String(i+1)}</td>
 <td>${escapeHtml((l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—")}</td>
@@ -875,6 +1025,7 @@ td.num, th.num, .num{ text-align: right; font-family: Consolas, 'JetBrains Mono'
 th.c1{ color: #0d6b55; } th.c2{ color: #a85d0a; }
 tr.sub td{ background: #f8f8f8; font-weight: 600; color: #333; }
 tr.sub td{ font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; }
+.lineNeg{ color: #c53030; font-weight: 600; }
 p.muted{ color: #666; font-size: 10px; }
 .foot{ font-size: 9px; color: #666; line-height: 1.5; margin-top: 6px; max-width: 100%; }
 </style>
@@ -909,7 +1060,7 @@ ${tackTable("Reach",t0s?.reach,t1s?.reach)}
 ${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
 
 <h2>5 — Performance by leg</h2>
-<p class="foot">Legs use gate lines through each end perpendicular to the centre line between marks. Round = rounding path/offset (m) before the leg, then track (nm). Re-run Analyse to refresh.</p>
+<p class="foot">Legs: outbound to inbound gates. <strong>Distance from line</strong> (START leg): signed distance from committee line to bow (GPS + user offset); negative = course side (red in app). <strong>Rnd</strong>: in–out mark path. P/S at gates. Re-run Analyse to refresh.</p>
 <table>
 <thead>
 <tr>
@@ -919,8 +1070,8 @@ ${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
 <th rowspan="2">Time gain/loss</th>
 </tr>
 <tr>
-<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Round (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
-<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Round (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
 </tr>
 </thead>
 <tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"14\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
@@ -1792,8 +1943,6 @@ function closestIndexToLine(pts,endA,endB,fromIdx,toIdx){
   return{idx:bestIdx,dist:bestDist};
 }
 
-/** Metres — track must pass within this distance for a sequential mark hit (leg split). */
-const LEG_ROUNDING_HIT_M=80;
 /** Metres — expand “rounding zone” around closest approach for turn geometry. */
 const MARK_ROUND_ZONE_M=10;
 /** Seconds — total time window centered on closest approach (± half each side). */
@@ -1900,39 +2049,62 @@ function computeRoundingPointMask(pts,details,baselines){
   return mask;
 }
 
-function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null){
+function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2){
   const legs=[];
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
   if(fullSeq.length<2)return{legs,roundings:[]};
 
+  const sfMid=startFinishLine?.endA&&startFinishLine?.endB?{
+    lat:(startFinishLine.endA.lat+startFinishLine.endB.lat)/2,
+    lon:(startFinishLine.endA.lon+startFinishLine.endB.lon)/2
+  }:null;
+  const wpFromRow=row=>(row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)
+    ?{lat:row.lat,lon:row.lon}:null);
+
   const roundings=[];
   let searchFrom=0;
 
-  for(const mark of fullSeq){
-    let bestDist=Infinity,bestIdx=-1;
-    for(let i=searchFrom;i<pts.length;i++){
-      const d=hav(pts[i].lat,pts[i].lon,mark.lat,mark.lon);
-      if(d<bestDist){bestDist=d;bestIdx=i;}
-      if(d>bestDist+50&&bestDist<LEG_ROUNDING_HIT_M)break;
-    }
-    if(bestDist<LEG_ROUNDING_HIT_M*3&&bestIdx>searchFrom){
-      roundings.push({
-        mark:mark.name,idx:bestIdx,dist:bestDist,lap:mark.lap,
-        lat:mark.lat,lon:mark.lon,tack:mark.tack??null,
-      });
-      searchFrom=bestIdx+5;
-    }
+  for(let mi=0;mi<fullSeq.length;mi++){
+    const m=fullSeq[mi];
+    const curr=wpFromRow(m);
+    if(!curr)return{legs,roundings:[]};
+    let prev=null;
+    if(mi>0){
+      const pr=fullSeq[mi-1];
+      prev=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
+    }else if(sfMid)prev=sfMid;
+    let nextW=null;
+    if(mi+1<fullSeq.length){
+      const nx=fullSeq[mi+1];
+      nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
+    }else if(sfMid)nextW=sfMid;
+    if(!prev||!nextW)return{legs,roundings:[]};
+    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null);
+    if(!g2.ok)return{legs,roundings:[]};
+    const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
+    roundings.push({
+      mark:m.name,idx:g2.exitIdx,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
+      entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
+    });
+    searchFrom=g2.exitIdx;
   }
 
   if(startFinishLine?.endA&&startFinishLine?.endB&&roundings.length){
-    const startPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,0,roundings[0].idx);
+    const firstBound=roundings[0].entryIdx!=null?roundings[0].entryIdx:roundings[0].idx;
+    const startPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,0,Math.max(0,firstBound));
     if(startPick.idx>=0&&startPick.idx<roundings[0].idx){
-      roundings.unshift({mark:"START",idx:startPick.idx,dist:startPick.dist,lap:0,lat:null,lon:null,tack:null});
+      roundings.unshift({
+        mark:"START",idx:startPick.idx,dist:startPick.dist,lap:0,lat:null,lon:null,tack:null,
+        roundingGateOK:false,entryIdx:null,exitIdx:null,roundingTrackM:null,roundingStraightM:null,
+      });
     }
     const lastIdx=roundings[roundings.length-1].idx;
     const finishPick=closestIndexToLine(pts,startFinishLine.endA,startFinishLine.endB,lastIdx,pts.length-1);
     if(finishPick.idx>lastIdx){
-      roundings.push({mark:"FINISH",idx:finishPick.idx,dist:finishPick.dist,lap:roundings[roundings.length-1].lap,lat:null,lon:null,tack:null});
+      roundings.push({
+        mark:"FINISH",idx:finishPick.idx,dist:finishPick.dist,lap:roundings[roundings.length-1].lap,lat:null,lon:null,tack:null,
+        roundingGateOK:false,entryIdx:null,exitIdx:null,roundingTrackM:null,roundingStraightM:null,
+      });
     }
   }
 
@@ -1941,22 +2113,37 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     const p=pts?.[r.idx];
     return p?{lat:p.lat,lon:p.lon}:null;
   };
-  const sfMid=startFinishLine?.endA&&startFinishLine?.endB?{
-    lat:(startFinishLine.endA.lat+startFinishLine.endB.lat)/2,
-    lon:(startFinishLine.endA.lon+startFinishLine.endB.lon)/2
-  }:null;
+  const sf=sfMid;
   let nextFrom=0;
   for(let i=0;i<roundings.length-1;i++){
     const r0=roundings[i],r1=roundings[i+1];
     const wA0=getWP(r0),wB0=getWP(r1);
-    const wA=String(r0.mark)==="START"&&sfMid?sfMid:(wA0||null);
-    const wB=String(r1.mark)==="FINISH"&&sfMid?sfMid:(wB0||null);
+    const wA=String(r0.mark)==="START"&&sf?sf:(wA0||null);
+    const wB=String(r1.mark)==="FINISH"&&sf?sf:(wB0||null);
     const si=r0.idx,ei=r1.idx;
-    let startIdx=si,endIdx=ei,roundingM=0,legPathDef="closest",roundingKind=null;
+    let startIdx=si,endIdx=ei,roundingM=0,roundingStraightM=null,legPathDef="closest",roundingKind=null;
+    let startLineDistanceM=null;
     if(wA&&wB){
-      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine);
-      startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;
+      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM);
+      startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;roundingStraightM=null;
+      if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
+      if(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)startIdx=r0.exitIdx;
+      if(String(r1.mark)!=="FINISH"&&r1.roundingGateOK&&r1.entryIdx!=null)endIdx=r1.entryIdx;
+      if(endIdx<=startIdx||endIdx-startIdx+1<2){
+        startIdx=g.startIdx;endIdx=g.endIdx;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;
+        roundingM=g.roundingM??0;roundingStraightM=null;
+        if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
+      }else{
+        legPathDef="perp";
+        if(r0.mark!=="START"&&r0.roundingGateOK&&r0.roundingTrackM!=null&&Number.isFinite(r0.roundingTrackM)&&r0.roundingTrackM>0){
+          roundingM=r0.roundingTrackM;roundingKind="perp_in_out_m";
+          if(r0.roundingStraightM!=null&&Number.isFinite(r0.roundingStraightM))roundingStraightM=r0.roundingStraightM;
+        }else if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null){
+          startLineDistanceM=g.startLineDistanceSignedM;roundingM=0;roundingKind="sf_line_m";
+        }
+      }
     }
+    const fromStart=String(r0.mark)==="START"&&startLineDistanceM!=null;
     const legPts=pts.slice(startIdx,endIdx+1);
     nextFrom=endIdx;
     if(legPts.length<5)continue;
@@ -1977,7 +2164,10 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
       efficiency:eff,legBearing,
       type:"leg",
-      roundingM,legPathDef,roundingKind,
+      roundingM:fromStart?null:roundingM,
+      roundingStraightM:fromStart?null:roundingStraightM,
+      startLineDistanceM,
+      legPathDef,roundingKind,
     });
   }
   return{legs,roundings};
@@ -1994,8 +2184,12 @@ function cumulativeTurnDeg(pts,i0,i1){
   return Math.round(s*10)/10;
 }
 
-function expandMarkRoundingZone(pts,peakIdx,mLat,mLon){
-  if(!pts?.length||peakIdx<0||peakIdx>=pts.length||mLat==null||mLon==null)return{z0:peakIdx,z1:peakIdx};
+function expandMarkRoundingZone(pts,peakIdx,mLat,mLon,entryIdx,exitIdx){
+  if(entryIdx!=null&&exitIdx!=null&&Number.isFinite(entryIdx)&&Number.isFinite(exitIdx)&&
+    exitIdx>=entryIdx&&exitIdx<pts.length&&entryIdx>=0){
+    return{z0:entryIdx|0,z1:Math.min(exitIdx,pts.length-1)};
+  }
+  if(!pts?.length||peakIdx<0||peakIdx>=pts.length||mLat==null||mLon==null)return{z0:Math.max(0,peakIdx|0),z1:Math.max(0,peakIdx|0)};
   let z0=peakIdx,z1=peakIdx;
   const tMid=pts[peakIdx].time;
   const tMin=tMid-MARK_ROUND_MAX_SPAN_SEC/2;
@@ -2034,8 +2228,8 @@ function analyzeMarkRoundingDetails(pts,roundings,manoeuvreEvents){
     if(isSF||r.lat==null||r.lon==null||!Number.isFinite(r.lat)||!Number.isFinite(r.lon)){
       return{raw:r,skipped:true};
     }
-    const peak=r.idx;
-    const{z0,z1}=expandMarkRoundingZone(pts,peak,r.lat,r.lon);
+    const peak=(r.exitIdx!=null?r.exitIdx:r.idx);
+    const{z0,z1}=expandMarkRoundingZone(pts,peak,r.lat,r.lon,r.entryIdx,r.exitIdx);
     const totalTurnInZoneDeg=cumulativeTurnDeg(pts,z0,z1);
     const c0=pts[z0].cog,c1=pts[z1].cog;
     const netBearingChangeDeg=Number.isFinite(c0)&&Number.isFinite(c1)?Math.round(Math.abs(adiff(c0,c1))*10)/10:0;
@@ -2313,7 +2507,7 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
-function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null){
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null,gpsToBowM=2){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
   const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
@@ -2337,7 +2531,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const markLocList=allCourseMarkLocations(markPositions,preamble,laps);
   let legDetection=null;
   if(expandCourseMarks(preamble,markPositions||[],laps).length>=2)
-    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine);
+    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM);
   const roundingIdxs=legDetection?.roundings?.map(r=>r.idx).filter(i=>Number.isFinite(i)&&i>=0)??[];
   for(const m of manoeuvreEvents){
     const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
@@ -2345,10 +2539,16 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     m.nearestMarkDistM=nm.dist;
     m.nearestMarkName=nm.name;
     const excludeMarkRadius=Number.isFinite(nm.dist)&&nm.dist<=MARK_MANOEUVRE_AT_MARK_M;
-    const excludeNearRoundingIdx=roundingIdxs.length>0&&roundingIdxs.some(ri=>Math.abs(ti-ri)<=MARK_MANOEUVRE_NEAR_ROUNDING_PTS);
+    const excludeInMarkRounding=(legDetection?.roundings||[]).some(r=>{
+      if(!r||r.mark==="START"||r.mark==="FINISH")return false;
+      if(r.roundingGateOK&&r.entryIdx!=null&&r.exitIdx!=null&&r.exitIdx>=r.entryIdx)
+        return ti>=r.entryIdx&&ti<=r.exitIdx;
+      return false;
+    });
+    const excludeNearRoundingIdx=!excludeInMarkRounding&&roundingIdxs.length>0&&roundingIdxs.some(ri=>Math.abs(ti-ri)<=MARK_MANOEUVRE_NEAR_ROUNDING_PTS);
     m.excludeMarkRadius=excludeMarkRadius;
     m.excludeNearRoundingIdx=excludeNearRoundingIdx;
-    m.excludeFromStatsAndVMG=excludeMarkRadius||excludeNearRoundingIdx;
+    m.excludeFromStatsAndVMG=excludeMarkRadius||excludeInMarkRounding||excludeNearRoundingIdx;
   }
   const baselines=buildBaselines(stableSegments,windDerive.meanPortCOG,windDerive.meanStarboardCOG,windDerive.tackAngle,wd);
   const windBuild=buildWindTrace(stableSegments,baselines,en[0].time,en[en.length-1].time);
@@ -2460,6 +2660,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     windStats,
     vmgMode,
     detSettings,
+    gpsToBowM,
     stableSegments,
     baselines,
     stats:{
@@ -2821,11 +3022,22 @@ function App(){
   const [sfLineEndAText,setSfLineEndAText]=useState(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
   const [sfLineEndBText,setSfLineEndBText]=useState(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
   const [detSettings,setDetSettings]=useState(DETECTION_DEFAULTS);
+  const [gpsToBowM,setGpsToBowM]=useState(()=>{
+    try{
+      const s=localStorage.getItem(LS_GPS_TO_BOW_M_KEY);
+      if(s!=null){const n=parseFloat(s);if(Number.isFinite(n)&&n>=0&&n<=25)return n;}
+    }catch(_){}
+    return DEFAULT_GPS_TO_BOW_M;
+  });
   const [windwardMarkName,setWindwardMarkName]=useState("");
   const [timelineZoom,setTimelineZoom]=useState(1);
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
   const fileRefSavedSummary=useRef(null);
+
+  useEffect(()=>{
+    try{localStorage.setItem(LS_GPS_TO_BOW_M_KEY,String(gpsToBowM));}catch(_){}
+  },[gpsToBowM]);
 
   const applyWorkerSession=useCallback((d)=>{
     if(!d||!d.ok||!d.supabase_access_token)return false;
@@ -3212,31 +3424,31 @@ function App(){
   const fullTrackAnalysis=useMemo(()=>{
     if(!rawPoints||rawPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
-  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
+    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
+  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   /** Cropped analysis used for displayed manoeuvres/statistics. */
   const setupMapAnalysis=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   const startFinishStats=useMemo(()=>{
     if(!rawPoints||rawPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
     const pts=fullTrackAnalysis.points||rawPoints;
     const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
     const startPt=startIdx>=0?pts[startIdx]:null;
-    const startDist=startPt?distPointToSegmentM(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
+    const bow=startPt?gpsPositionToBow(pts,startIdx,Number(gpsToBowM)||0):null;
+    const refLat=bow?.lat??startPt?.lat,refLon=bow?.lon??startPt?.lon;
+    const startDist=refLat!=null?distPointToSegmentM(refLat,refLon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
     let signedStartDist=null,startOnCourseSide=null;
     const firstMarkSpec=WSC_COURSES[courseLetter]?.marks?.[0];
     const firstMarkName=Array.isArray(firstMarkSpec)?firstMarkSpec[0]:firstMarkSpec;
     const firstMark=firstMarkName?effectiveMarks[firstMarkName]:null;
-    if(startPt&&firstMark&&Number.isFinite(startDist)){
-      const markSide=lineSideValue(firstMark.lat,firstMark.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
-      const boatSide=lineSideValue(startPt.lat,startPt.lon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
-      startOnCourseSide=markSide===0?false:(markSide*boatSide>=0);
-      signedStartDist=startOnCourseSide?-startDist:startDist;
+    if(refLat!=null&&refLon!=null&&firstMark&&Number.isFinite(startDist)){
+      signedStartDist=signedDistanceToCommitteeLineM(refLat,refLon,sfLineEnds.endA,sfLineEnds.endB,firstMark.lat,firstMark.lon);
+      startOnCourseSide=signedStartDist<0;
     }
     const legs=fullTrackAnalysis.legs||[];
     const startLeg=legs.find(l=>l.from==="START")||null;
@@ -3251,7 +3463,7 @@ function App(){
       if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
     return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
-  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis]);
+  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM]);
 
   useEffect(()=>{
     if(!rawPoints||rawPoints.length<2||!startFinishStats)return;
@@ -3273,7 +3485,7 @@ function App(){
     if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
     if(!result){
       setProcessing(false);
       alert("Analysis could not run — need at least 20 GPS points in the cropped track. Widen the crop or check the file.");
@@ -3327,6 +3539,7 @@ function App(){
     windTuning,
     windwardMarkName,
     refreshSavedAnalyses,
+    gpsToBowM,
   ]);
 
   const doAnalysisRef=useRef(doAnalysis);
@@ -3438,13 +3651,15 @@ function App(){
   const curAnalysis=useMemo(()=>{
     if(!analysis||!croppedPoints)return analysis;
     if(croppedPoints.length<20)return analysis;
-    if(windOvr!==null&&windOvr!==analysis.windDir){
+    const windChg=windOvr!==null&&windOvr!==analysis.windDir;
+    const bowChg=Number(gpsToBowM)!==Number(analysis.gpsToBowM??DEFAULT_GPS_TO_BOW_M);
+    if(windChg||bowChg){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning);
+      const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
       if(recalc!=null)return recalc;
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -3908,7 +4123,7 @@ function App(){
         </div>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
-        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each leg is the <strong style={{color:C.txt}}>track</strong> between the first crossings of the <strong style={{color:C.txt}}>gates</strong> through the two leg ends: each gate is the line through that mark (or the S/F line midpoint) <strong style={{color:C.txt}}>perpendicular</strong> to the straight <strong style={{color:C.txt}}>centre</strong> line to the other mark. <strong style={{color:C.txt}}>Round</strong> = mark rounding <strong style={{color:C.txt}}>path</strong> (m) before the leg, or S/F: offset to the <strong style={{color:C.txt}}>line</strong> (m) at the sample before the leg. Then <strong style={{color:C.txt}}>Dist</strong> = leg along-track (nm) — re-run analysis to refresh.</p>
+        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each <strong style={{color:C.txt}}>leg</strong> = track from the <strong style={{color:C.txt}}>outbound</strong> gate at the <em>from</em> mark (line ⊥ to that leg&rsquo;s chord) to the <strong style={{color:C.txt}}>inbound</strong> gate at the <em>to</em> mark. <strong style={{color:C.txt}}>Distance from line</strong> (START leg only): signed distance from the committee line to the <strong style={{color:C.txt}}>bow</strong> (GPS + offset); negative and highlighted if on the course side of the line. <strong style={{color:C.txt}}>Rnd</strong> = in–out mark path (m) at the <em>from</em> mark. <strong style={{color:C.txt}}>Dist</strong> = leg along-track (nm) — re-run analysis to refresh.</p>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",minWidth:820}}>
             <thead>
@@ -3923,12 +4138,12 @@ function App(){
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
                 <th style={th2}>VMG</th>
                 <th style={th2}>Eff%</th>
-                <th style={th2}>Round (m)</th>
+                <th style={th2}>Rnd / line (m)</th>
                 <th style={th2}>Track (nm)</th>
                 <th style={th2}>Time</th>
                 <th style={th2}>VMG</th>
                 <th style={th2}>Eff%</th>
-                <th style={th2}>Round (m)</th>
+                <th style={th2}>Rnd / line (m)</th>
                 <th style={th2}>Track (nm)</th>
                 <th style={th2}>Time</th>
               </tr>
@@ -3939,7 +4154,9 @@ function App(){
                 const t0l=l0?.duration, t1l=l1?.duration;
                 const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
                 const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
-                const r0m=l0?.roundingM, r1m=l1?.roundingM;
+                const r0m=l0?.roundingM, r1m=l1?.roundingM, r0s=l0?.roundingStraightM, r1s=l1?.roundingStraightM;
+                const fmtRndVal=(m,s)=>m!=null&&Number.isFinite(m)&&m>0.05?`${String(Math.round(m))}`+(s!=null&&Number.isFinite(s)&&s>0.05?` (st ${String(Math.round(s))})`:""):"—";
+                const preLegOrRnd=(l)=>{if(l&&l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)){const v=Math.round(l.startLineDistanceM);return(<>Distance from line <span style={{color:v<0?C.wrn:C.acc,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{v}m</span></>);}return fmtRndVal(l?.roundingM,l?.roundingStraightM);};
                 let deltaS="—";
                 if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
                   const d=t1l-t0l;
@@ -3954,12 +4171,12 @@ function App(){
                     <td style={tdL}>{(l0&&l0.type)||(l1&&l1.type)||"—"}</td>
                     <td style={tdN}>{l0&&l0.avgVMG!=null?fmtF(l0.avgVMG,2):"—"}</td>
                     <td style={tdN}>{l0&&l0.efficiency!=null?fmtF(l0.efficiency,0):"—"}</td>
-                    <td style={tdN}>{r0m!=null&&Number.isFinite(r0m)&&r0m>0.05?Math.round(r0m):"—"}</td>
+                    <td style={tdN}>{preLegOrRnd(l0)}</td>
                     <td style={tdN}>{d0m!=null&&Number.isFinite(d0m)?m2nm(d0m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
                     <td style={tdN}>{l1&&l1.avgVMG!=null?fmtF(l1.avgVMG,2):"—"}</td>
                     <td style={tdN}>{l1&&l1.efficiency!=null?fmtF(l1.efficiency,0):"—"}</td>
-                    <td style={tdN}>{r1m!=null&&Number.isFinite(r1m)&&r1m>0.05?Math.round(r1m):"—"}</td>
+                    <td style={tdN}>{preLegOrRnd(l1)}</td>
                     <td style={tdN}>{d1m!=null&&Number.isFinite(d1m)?m2nm(d1m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
                     <td style={{...tdL,fontSize:11}}>{deltaS}</td>
@@ -3968,7 +4185,7 @@ function App(){
               })}
             </tbody>
           </table>
-          {nLeg===0&&<div style={{padding:16,fontSize:12,color:C.txM}}>No leg breakdown — select a course and re-run analysis.</div>}
+          {nLeg===0&&<div style={{padding:16,fontSize:12,color:C.txM}}>No leg breakdown — set course and analysis, and ensure the track crosses all mark gates (no closest-point fallback). Re-run analysis.</div>}
         </div>
         {(!r0||!r1)&&<div style={{marginTop:14,fontSize:12,color:C.wrn}}>One or both activities have no saved analysis yet. Open each, set course, and run analysis.</div>}
       </div>
@@ -4049,6 +4266,21 @@ function App(){
           />
         </div>
 
+        <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14,marginBottom:20}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>User / GPS</div>
+          <label style={{fontSize:12,color:C.txt,display:"block",marginBottom:6}}>Antenna to bow (m)</label>
+          <input
+            type="number"
+            min={0}
+            max={25}
+            step={0.1}
+            value={gpsToBowM}
+            onChange={e=>{const n=parseFloat(e.target.value);if(Number.isFinite(n)&&n>=0&&n<=25)setGpsToBowM(n);}}
+            style={{width:120,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}
+          />
+          <p style={{fontSize:10,color:C.txD,margin:"8px 0 0",lineHeight:1.5}}>Forward distance from GPS tracker to the bow, along COG, for committee-line distance and start leg. Default 2&nbsp;m. Saved in this browser. Changing it re-runs the wind-aware analysis on the next calculation.</p>
+        </div>
+
         <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
           Continue to map
         </button>
@@ -4076,6 +4308,18 @@ function App(){
             <span>·</span>
             <span>Windward <strong style={{color:C.acc}}>{windwardMarkName}</strong></span>
           </>:null}
+          <span>·</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:6}}>GPS→bow
+            <input
+              type="number"
+              min={0}
+              max={25}
+              step={0.1}
+              value={gpsToBowM}
+              onChange={e=>{const n=parseFloat(e.target.value);if(Number.isFinite(n)&&n>=0&&n<=25)setGpsToBowM(n);}}
+              style={{width:56,padding:"4px 6px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}
+            />m
+          </span>
           <button type="button" onClick={()=>setView("course-input")} style={{...btn("transparent",C.acc,C.acc),padding:"4px 10px",fontSize:11,marginLeft:"auto"}}>Edit</button>
         </div>
 
@@ -4572,7 +4816,7 @@ function App(){
               return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:C.card,borderRadius:8,marginBottom:3,border:`1px solid ${C.bdr}`,fontSize:11}}>
                 <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
                 <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
-                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.roundingM!=null&&Number.isFinite(l.roundingM)&&l.roundingM>0.05?<>Rnd <span style={{color:C.acc}}>{Math.round(l.roundingM)}m</span> · </>:null}Trk {m2nm(l.distance).toFixed(2)}nm</div>
+                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)?(<>Distance from line <span style={{color:Math.round(l.startLineDistanceM)<0?C.wrn:C.acc,fontWeight:600}}>{Math.round(l.startLineDistanceM)}m</span> · </>):(l.roundingM!=null&&Number.isFinite(l.roundingM)&&l.roundingM>0.05?<>Rnd <span style={{color:C.acc}}>{Math.round(l.roundingM)}m</span>{l.roundingStraightM!=null&&Number.isFinite(l.roundingStraightM)&&l.roundingStraightM>0.05?<> <span style={{color:C.txM}}>(st {Math.round(l.roundingStraightM)}m)</span></>:null} · </>:null)}Trk {m2nm(l.distance).toFixed(2)}nm</div>
                 <div style={{width:50,color:C.txM}}>{fT(l.duration)}</div>
                 <div style={{width:50,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
                 <div style={{width:42,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVMG.toFixed(1)}</div>
@@ -4597,7 +4841,7 @@ function App(){
                 </div>);
               })}
             </div>
-          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Mark roundings not detected — try adjusting mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Course Setup</button></div>}
+          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Gates not found for the full mark sequence (in/out perpendiculars and P/S). Widen the crop, check the track, or mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Course Setup</button></div>}
         </>}
 
         {/* SPEED */}
