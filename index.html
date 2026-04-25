@@ -3438,6 +3438,25 @@ function App(){
 
   const markOrderLap1=useMemo(()=>expandCourseMarks(coursePreambleSeq,courseMarkSeq,1),[coursePreambleSeq,courseMarkSeq]);
 
+  /** One-line S/F → marks → S/F for Setup (preamble dimmed; first main mark dimmed when laps===1). */
+  const setupRoundingOrderPreview=useMemo(()=>{
+    const pre=coursePreambleSeq||[];
+    const main=courseMarkSeq||[];
+    if(pre.length===0&&main.length===0)return null;
+    const nodes=[];
+    nodes.push({key:"sf0",kind:"sf"});
+    for(let i=0;i<pre.length;i++){
+      const m=pre[i];
+      nodes.push({key:`pre-${i}`,kind:"mark",name:m.name,tack:m.tack,dim:true});
+    }
+    for(let i=0;i<main.length;i++){
+      const m=main[i];
+      nodes.push({key:`m-${i}`,kind:"mark",name:m.name,tack:m.tack,dim:i===0&&laps===1});
+    }
+    nodes.push({key:"sf1",kind:"sf"});
+    return nodes;
+  },[coursePreambleSeq,courseMarkSeq,laps]);
+
   const windwardMarkOptions=useMemo(()=>{
     const seen=new Set();
     const out=[];
@@ -4450,6 +4469,27 @@ function App(){
           </div>
         </div>}
 
+        {setupRoundingOrderPreview&&<div style={{background:C.card,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.bdr}`,marginBottom:16}}>
+          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Rounding order</div>
+          <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:6,rowGap:8}}>
+            {setupRoundingOrderPreview.map((n,idx)=>{
+              const st=n.kind!=="mark"?null:(n.tack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:n.tack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${C.blu}14`,br:C.blu,fg:C.txM});
+              return(
+                <span key={n.key} style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                  {idx>0&&<span style={{color:C.txD,fontSize:14,fontWeight:400,userSelect:"none"}}>—</span>}
+                  {n.kind==="sf"?(
+                    <span style={{display:"inline-flex",alignItems:"center",padding:"4px 10px",borderRadius:6,background:`${C.bdr}40`,border:`1px solid ${C.bdrL}`,color:C.txt,fontSize:12,fontWeight:700}}>S/F</span>
+                  ):st?(
+                    <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}55`,color:st.fg,fontSize:12,fontWeight:600,opacity:n.dim?0.45:1,transition:"opacity 0.15s"}}>
+                      {n.name}<span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,opacity:0.95}}>{n.tack||"—"}</span>
+                    </span>
+                  ):null}
+                </span>
+              );
+            })}
+          </div>
+        </div>}
+
         {/* Map + wind dial (wind FROM °, meteorological) */}
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16,alignItems:"stretch",minHeight:380}}>
           <div style={{flex:2,minWidth:280,minHeight:380,borderRadius:12,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
@@ -4522,46 +4562,6 @@ function App(){
 
         {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:10,color:C.txD,lineHeight:1.5,padding:"8px 10px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
           White dashed line = SFA→SFB. Closest approach on track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong>.
-        </div>}
-
-        {/* Mark legend — port (P) red, starboard (S) green */}
-        {courseLetter&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Rounding order (lap 1)</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5,alignItems:"center",marginBottom:10}}>
-            {markOrderLap1.length===0&&<span style={{fontSize:11,color:C.txM}}>—</span>}
-            {markOrderLap1.map((pt,i)=>{
-              const st=pt.tack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:pt.tack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${C.blu}14`,br:C.blu,fg:C.txM};
-              return(<span key={`${pt.name}-${i}-${pt.lap}`} style={{display:"inline-flex",alignItems:"center",gap:4}}>
-                {i>0&&<span style={{color:C.txD,fontSize:11}}>→</span>}
-                <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}55`,color:st.fg,fontSize:11,fontWeight:600}}>
-                  {pt.name}<span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,opacity:0.95}}>{pt.tack||"—"}</span>
-                </span>
-              </span>);
-            })}
-            {laps>1&&<span style={{fontSize:10,color:C.txM,marginLeft:4}}>· then lap ×{laps}</span>}
-          </div>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Marks on map</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {Object.entries(effectiveMarks).map(([name,mk])=>{
-              const st=mk.roundTack==="P"?{bg:`${C.port}22`,br:C.port,fg:C.port}:mk.roundTack==="S"?{bg:`${C.stbd}20`,br:C.stbd,fg:C.stbd}:{bg:`${C.gld}15`,br:C.gld,fg:C.gld};
-              return(
-              <div key={name} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:st.bg,border:`1px solid ${st.br}44`}}>
-                <div style={{width:6,height:6,borderRadius:3,background:st.br}}/>
-                <span style={{fontSize:11,color:st.fg,fontWeight:600}}>{name}</span>
-                {mk.roundTack&&<span style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:st.fg}}>{mk.roundTack}</span>}
-                <span style={{fontSize:9,color:C.txD}}>drag</span>
-              </div>);
-            })}
-          </div>
-          {WSC_COURSES[courseLetter]&&(()=>{
-            const c=WSC_COURSES[courseLetter];
-            const pre=(c.marksPreamble||[]).map(formatCourseRow).join(" → ");
-            const body=(c.marks||[]).map(formatCourseRow).join(" → ");
-            const seq=pre?`${pre} → ${body}`:body;
-            return(<div style={{fontSize:11,color:C.txM,marginTop:8}}>
-              Full sequence: {seq||"—"}{laps>1?` · lap ×${laps}`:""}
-            </div>);
-          })()}
         </div>}
 
         {/* Analyse button */}
