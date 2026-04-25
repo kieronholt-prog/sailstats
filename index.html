@@ -650,6 +650,21 @@ function interpolatePointByTime(pts,targetTime){
   return null;
 }
 
+/** SOG (kts) at absolute time, linearly in `ss` between GPS samples. */
+function speedKtsAtTime(pts,tAbs){
+  if(!pts?.length||!Number.isFinite(tAbs))return null;
+  if(tAbs<=pts[0].time)return ms2k(pts[0].ss||0);
+  if(tAbs>=pts[pts.length-1].time)return ms2k(pts[pts.length-1].ss||0);
+  for(let i=1;i<pts.length;i++){
+    if(tAbs<=pts[i].time){
+      const a=pts[i-1],b=pts[i];
+      const u=(tAbs-a.time)/Math.max(1e-6,b.time-a.time);
+      return ms2k((a.ss||0)+u*((b.ss||0)-(a.ss||0)));
+    }
+  }
+  return null;
+}
+
 function clockSecondsFromUnix(unixSec){
   const d=new Date(unixSec*1000);
   return d.getHours()*3600+d.getMinutes()*60+d.getSeconds();
@@ -683,6 +698,19 @@ function detectLineCrossings(pts,endA,endB){
     out.push({time:t,direction:dir,idx:i});
   }
   return out;
+}
+
+/** Interpolated crossing time (Unix s) for segment p[segP2Idx-1]→p[segP2Idx], same as `detectLineCrossings`. */
+function interpolatedCommitteeLineCrossingTime(pts,segP2Idx,endA,endB){
+  if(!pts||segP2Idx<1||segP2Idx>=pts.length||!endA||!endB)return null;
+  const p1=pts[segP2Idx-1],p2=pts[segP2Idx];
+  const s1=lineSideValue(p1.lat,p1.lon,endA.lat,endA.lon,endB.lat,endB.lon);
+  const s2=lineSideValue(p2.lat,p2.lon,endA.lat,endA.lon,endB.lat,endB.lon);
+  if(!Number.isFinite(s1)||!Number.isFinite(s2))return null;
+  if((s1===0&&s2===0)||s1*s2>0)return null;
+  const den=Math.abs(s1)+Math.abs(s2);
+  const u=den>1e-9?Math.abs(s1)/den:0.5;
+  return p1.time+(p2.time-p1.time)*u;
 }
 
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
@@ -2104,61 +2132,62 @@ function manoeuvreIndexMask(pts,tacks,gybes){
 }
 
 /**
- * Start-line summary for Overview: signed distance (from leg), time early/late vs signal, % speed at gun vs mean next 30s (excl. manoeuvres).
+ * Start-line summary for Overview: signed distance (from distAnalysis), time early/late (tCross − tStart),
+ * % speed at gun vs mean next 30s (excl. manoeuvres).
+ * `seriesAnalysis` should be full-track analysis when available so line crossing and post-start speed use the same time base as Setup (wall-clock start). `distAnalysis` is usually cropped and drives the distance figure.
  */
-function computeStartLineOverviewBadges(analysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM){
-  if(!analysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
-  const pts=analysis.points;
+function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM){
+  if(!distAnalysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
+  const ser=seriesAnalysis&&seriesAnalysis.points?.length?seriesAnalysis:distAnalysis;
+  const sPts=ser.points;
+  const sLeg=ser.legs?.find(l=>l.from==="START");
+  if(!sPts.length||!sLeg||sLeg.startIdx==null||sLeg.endIdx==null)return null;
+  const dLeg=distAnalysis.legs?.find(l=>l.from==="START");
+  if(!dLeg||dLeg.startIdx==null||dLeg.endIdx==null)return null;
+  const dPts=distAnalysis.points;
   const e0=sfEnds.endA,e1=sfEnds.endB;
-  const startLeg=analysis.legs?.find(l=>l.from==="START");
-  if(!startLeg||startLeg.startIdx==null||startLeg.endIdx==null)return null;
 
-  let distM=startLeg.startLineDistanceM;
+  let distM=dLeg.startLineDistanceM;
   if(!Number.isFinite(distM)){
     const firstSpec=WSC_COURSES[courseLetter]?.marks?.[0];
     const firstName=Array.isArray(firstSpec)?firstSpec[0]:firstSpec;
     const fm=firstName?effectiveMarks?.[firstName]:null;
-    const si=Math.max(0,Math.min(pts.length-1,startLeg.startIdx|0));
-    const bow=gpsPositionToBow(pts,si,Number(gpsToBowM)||0);
-    const refLat=bow?.lat??pts[si]?.lat,refLon=bow?.lon??pts[si]?.lon;
+    const si=Math.max(0,Math.min(dPts.length-1,dLeg.startIdx|0));
+    const bow=gpsPositionToBow(dPts,si,Number(gpsToBowM)||0);
+    const refLat=bow?.lat??dPts[si]?.lat,refLon=bow?.lon??dPts[si]?.lon;
     if(refLat!=null&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon))
       distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
   }
 
-  const crossings=detectLineCrossings(pts,e0,e1).filter(c=>
-    c.idx>startLeg.startIdx&&c.idx<=startLeg.endIdx&&Math.abs(c.time-tSignalAbs)<180
-  );
-  let timeDeltaSec=null;
+  const onStartLeg=c=>c.idx>sLeg.startIdx&&c.idx<=sLeg.endIdx;
+  const crossings=detectLineCrossings(sPts,e0,e1).filter(onStartLeg);
+  let tCross=null;
   if(crossings.length){
     let best=crossings[0],bd=Math.abs(crossings[0].time-tSignalAbs);
     for(const c of crossings){
       const d=Math.abs(c.time-tSignalAbs);
       if(d<bd){bd=d;best=c;}
     }
-    timeDeltaSec=best.time-tSignalAbs;
+    tCross=best.time;
   }else{
-    const pick=closestIndexToLine(pts,e0,e1,startLeg.startIdx,startLeg.endIdx);
-    if(pick.idx>=0&&pts[pick.idx])timeDeltaSec=pts[pick.idx].time-tSignalAbs;
+    const j=firstCommitteeLineSegmentCrossing(sPts,sLeg.startIdx,sLeg.endIdx,e0,e1);
+    if(j>=0)tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
   }
+  const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tSignalAbs:null;
 
-  let iGun=0,bd=Infinity;
-  for(let i=0;i<pts.length;i++){
-    const d=Math.abs(pts[i].time-tSignalAbs);
-    if(d<bd){bd=d;iGun=i;}
-  }
-  const vGun=ms2k(pts[iGun].ss||0);
-  const mask=manoeuvreIndexMask(pts,analysis.tacks,analysis.gybes);
+  const vGun=speedKtsAtTime(sPts,tSignalAbs);
+  const mask=manoeuvreIndexMask(sPts,ser.tacks,ser.gybes);
   const speeds=[];
-  for(let i=0;i<pts.length;i++){
-    const t=pts[i].time;
+  for(let i=0;i<sPts.length;i++){
+    const t=sPts[i].time;
     if(t<=tSignalAbs)continue;
     if(t>tSignalAbs+30)break;
     if(mask[i])continue;
-    const s=ms2k(pts[i].ss||0);
+    const s=ms2k(sPts[i].ss||0);
     if(s>0.05)speeds.push(s);
   }
   let speedPct=null;
-  if(speeds.length&&vGun>0.05){
+  if(speeds.length&&vGun!=null&&vGun>0.05){
     const avg=speeds.reduce((a,b)=>a+b,0)/speeds.length;
     if(avg>0.05)speedPct=100*vGun/avg;
   }
@@ -4073,9 +4102,12 @@ function App(){
 
   const overviewStartBadges=useMemo(()=>{
     if(!curAnalysis||!rawPoints?.length||!sfLineEnds)return null;
-    const tSig=rawPoints[0].time+raceStartSecParsed;
-    return computeStartLineOverviewBadges(curAnalysis,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM);
-  },[curAnalysis,rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM]);
+    const si=nearestPointIndexByClockTime(rawPoints,raceStartSecParsed);
+    if(si<0||!rawPoints[si])return null;
+    const tSig=rawPoints[si].time;
+    const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
+    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM);
+  },[curAnalysis,rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -4960,7 +4992,7 @@ function App(){
                 if(t<0)return`${Math.round(-t)}s early`;
                 return`${Math.round(t)}s late`;
               })()}
-              sub="Crossing (or closest on START leg) vs race clock from Setup"
+              sub="Time from line crossing to start (early) or from start to crossing (late); start = clock time in Setup"
               color={(()=>{
                 const t=overviewStartBadges.timeDeltaSec;
                 if(t==null||!Number.isFinite(t))return C.txM;
