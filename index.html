@@ -2084,6 +2084,93 @@ function closestIndexToLine(pts,endA,endB,fromIdx,toIdx){
   return{idx:bestIdx,dist:bestDist};
 }
 
+/** Mark GPS indices that fall inside detected tack/gybe windows (pre→post segment). */
+function manoeuvreIndexMask(pts,tacks,gybes){
+  const n=pts?.length||0;
+  if(!n)return new Uint8Array(0);
+  const m=new Uint8Array(n);
+  const addEv=(x)=>{
+    if(x?.preSegment&&x?.postSegment){
+      const a=Math.max(0,x.preSegment.startIdx|0),b=Math.min(n-1,x.postSegment.endIdx|0);
+      for(let k=a;k<=b;k++)m[k]=1;
+    }else{
+      const ti=x?.turnIdx??x?.idx??-1;
+      if(ti>=0)for(let k=Math.max(0,ti-6);k<=Math.min(n-1,ti+8);k++)m[k]=1;
+    }
+  };
+  (tacks||[]).forEach(addEv);
+  (gybes||[]).forEach(addEv);
+  return m;
+}
+
+/**
+ * Start-line summary for Overview: signed distance (from leg), time early/late vs signal, % speed at gun vs mean next 30s (excl. manoeuvres).
+ */
+function computeStartLineOverviewBadges(analysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM){
+  if(!analysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
+  const pts=analysis.points;
+  const e0=sfEnds.endA,e1=sfEnds.endB;
+  const startLeg=analysis.legs?.find(l=>l.from==="START");
+  if(!startLeg||startLeg.startIdx==null||startLeg.endIdx==null)return null;
+
+  let distM=startLeg.startLineDistanceM;
+  if(!Number.isFinite(distM)){
+    const firstSpec=WSC_COURSES[courseLetter]?.marks?.[0];
+    const firstName=Array.isArray(firstSpec)?firstSpec[0]:firstSpec;
+    const fm=firstName?effectiveMarks?.[firstName]:null;
+    const si=Math.max(0,Math.min(pts.length-1,startLeg.startIdx|0));
+    const bow=gpsPositionToBow(pts,si,Number(gpsToBowM)||0);
+    const refLat=bow?.lat??pts[si]?.lat,refLon=bow?.lon??pts[si]?.lon;
+    if(refLat!=null&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon))
+      distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+  }
+
+  const crossings=detectLineCrossings(pts,e0,e1).filter(c=>
+    c.idx>startLeg.startIdx&&c.idx<=startLeg.endIdx&&Math.abs(c.time-tSignalAbs)<180
+  );
+  let timeDeltaSec=null;
+  if(crossings.length){
+    let best=crossings[0],bd=Math.abs(crossings[0].time-tSignalAbs);
+    for(const c of crossings){
+      const d=Math.abs(c.time-tSignalAbs);
+      if(d<bd){bd=d;best=c;}
+    }
+    timeDeltaSec=best.time-tSignalAbs;
+  }else{
+    const pick=closestIndexToLine(pts,e0,e1,startLeg.startIdx,startLeg.endIdx);
+    if(pick.idx>=0&&pts[pick.idx])timeDeltaSec=pts[pick.idx].time-tSignalAbs;
+  }
+
+  let iGun=0,bd=Infinity;
+  for(let i=0;i<pts.length;i++){
+    const d=Math.abs(pts[i].time-tSignalAbs);
+    if(d<bd){bd=d;iGun=i;}
+  }
+  const vGun=ms2k(pts[iGun].ss||0);
+  const mask=manoeuvreIndexMask(pts,analysis.tacks,analysis.gybes);
+  const speeds=[];
+  for(let i=0;i<pts.length;i++){
+    const t=pts[i].time;
+    if(t<=tSignalAbs)continue;
+    if(t>tSignalAbs+30)break;
+    if(mask[i])continue;
+    const s=ms2k(pts[i].ss||0);
+    if(s>0.05)speeds.push(s);
+  }
+  let speedPct=null;
+  if(speeds.length&&vGun>0.05){
+    const avg=speeds.reduce((a,b)=>a+b,0)/speeds.length;
+    if(avg>0.05)speedPct=100*vGun/avg;
+  }
+
+  return{
+    hasLine:true,
+    distM:Number.isFinite(distM)?distM:null,
+    timeDeltaSec:timeDeltaSec!=null&&Number.isFinite(timeDeltaSec)?timeDeltaSec:null,
+    speedPct:Number.isFinite(speedPct)?speedPct:null,
+  };
+}
+
 /** Metres — expand “rounding zone” around closest approach for turn geometry. */
 const MARK_ROUND_ZONE_M=10;
 /** Seconds — total time window centered on closest approach (± half each side). */
@@ -2870,6 +2957,13 @@ function Stat({label,value,unit,color=C.acc,icon}){
   return(<div style={{background:C.card,borderRadius:12,padding:"14px 16px",border:`1px solid ${C.bdr}`,minWidth:100,flex:1}}>
     <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1.2,marginBottom:5}}>{icon&&<span style={{marginRight:5}}>{icon}</span>}{label}</div>
     <div style={{fontSize:24,fontWeight:700,color,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.1}}>{value}{unit&&<span style={{fontSize:12,color:C.txM,fontWeight:400,marginLeft:3}}>{unit}</span>}</div>
+  </div>);
+}
+function StartBadge({label,value,sub,color=C.acc}){
+  return(<div style={{flex:1,minWidth:118,background:C.card,borderRadius:16,padding:"18px 14px",border:`1px solid ${C.bdr}`,borderTop:`4px solid ${color}`,textAlign:"center",boxShadow:`0 8px 24px ${C.bg}`}}>
+    <div style={{fontSize:9,color:C.txM,textTransform:"uppercase",letterSpacing:1.1,marginBottom:10,fontWeight:600}}>{label}</div>
+    <div style={{fontSize:28,fontWeight:800,color:C.txt,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.1,wordBreak:"break-word"}}>{value}</div>
+    {sub?<div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.4}}>{sub}</div>:null}
   </div>);
 }
 
@@ -3977,6 +4071,12 @@ function App(){
     return analysis;
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
+  const overviewStartBadges=useMemo(()=>{
+    if(!curAnalysis||!rawPoints?.length||!sfLineEnds)return null;
+    const tSig=rawPoints[0].time+raceStartSecParsed;
+    return computeStartLineOverviewBadges(curAnalysis,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM);
+  },[curAnalysis,rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM]);
+
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
     if(!curAnalysis?.speedTL?.length)return null;
@@ -4844,6 +4944,39 @@ function App(){
 
         {/* OVERVIEW */}
         {tab==="overview"&&<>
+          {overviewStartBadges&&overviewStartBadges.hasLine&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:18}}>
+            <StartBadge
+              label="Distance to line at start"
+              value={overviewStartBadges.distM!=null&&Number.isFinite(overviewStartBadges.distM)?`${Math.round(overviewStartBadges.distM)} m`:"—"}
+              sub={overviewStartBadges.distM!=null&&Number.isFinite(overviewStartBadges.distM)?(overviewStartBadges.distM<0?"Course side of line (signed)":overviewStartBadges.distM>0?"Off-course side of line (signed)":"On the line"):"Set course, line & race start in Setup"}
+              color={overviewStartBadges.distM!=null&&overviewStartBadges.distM<0?C.wrn:C.acc}
+            />
+            <StartBadge
+              label="Time early / late"
+              value={(()=>{
+                const t=overviewStartBadges.timeDeltaSec;
+                if(t==null||!Number.isFinite(t))return"—";
+                if(Math.abs(t)<0.8)return"On time";
+                if(t<0)return`${Math.round(-t)}s early`;
+                return`${Math.round(t)}s late`;
+              })()}
+              sub="Crossing (or closest on START leg) vs race clock from Setup"
+              color={(()=>{
+                const t=overviewStartBadges.timeDeltaSec;
+                if(t==null||!Number.isFinite(t))return C.txM;
+                if(t<-0.8)return C.wrn;
+                if(t>0.8)return C.gld;
+                return C.acc;
+              })()}
+            />
+            <StartBadge
+              label="% at speed at start"
+              value={overviewStartBadges.speedPct!=null&&Number.isFinite(overviewStartBadges.speedPct)?`${Math.round(overviewStartBadges.speedPct)}%`:"—"}
+              sub="SOG at start signal vs mean SOG in the 30s after (tack/gybe samples excluded)"
+              color={C.blu}
+            />
+          </div>}
+
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
             <Stat label="Distance" value={m2nm(a.stats.totalDist).toFixed(2)} unit="nm" icon="📏"/>
             <Stat label="Duration" value={fT(a.stats.duration)} icon="⏱"/>
