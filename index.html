@@ -931,7 +931,11 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
       to: l.to,
       type: l.type,
       avgSpeed: l.avgSpeed,
-      avgVMG: l.avgVMG,
+      avgVmc: l.avgVmc != null && Number.isFinite(l.avgVmc) ? l.avgVmc : l.avgVMG,
+      avgVMG: l.avgVmc != null && Number.isFinite(l.avgVmc) ? l.avgVmc : l.avgVMG,
+      chordProgressKts: l.chordProgressKts != null && Number.isFinite(l.chordProgressKts) ? l.chordProgressKts : null,
+      markChordM: l.markChordM != null && Number.isFinite(l.markChordM) ? l.markChordM : null,
+      markChordBearingDeg: l.markChordBearingDeg != null && Number.isFinite(l.markChordBearingDeg) ? l.markChordBearingDeg : null,
       efficiency: l.efficiency,
       duration: l.duration,
       distanceM: l.distance != null && Number.isFinite(l.distance) ? l.distance : null,
@@ -1061,6 +1065,9 @@ function buildComparePrintHtml(ctx){
   const fT=(s)=>fT_print(s);
   const m2nmP=(m)=>m!=null&&Number.isFinite(m)?(m/1852).toFixed(2):"—";
   const fPD=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
+  const tackVmgKts=(p)=>p!=null&&typeof p==="object"?(p.avgVmgToWind!=null&&Number.isFinite(p.avgVmgToWind)?p.avgVmgToWind:(p.avgVMG!=null&&Number.isFinite(p.avgVMG)?p.avgVMG:null)):null;
+  const legVmcKts=(l)=>l!=null&&typeof l==="object"?(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null)):null;
+  const legChordKts=(l)=>l&&l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts:null;
   const rowSpd=(t,pfx)=>{
     if(!t||!t[pfx]||!t[pfx].n)return"—";
     const o=t[pfx];
@@ -1078,12 +1085,12 @@ function buildComparePrintHtml(ctx){
 <tbody>
 <tr class="sub"><td colspan="3">Port tack</td></tr>
 <tr><td>Avg speed (var)</td><td class="num">${escapeHtml(rowSpd(ts0,"port"))}</td><td class="num">${escapeHtml(rowSpd(ts1,"port"))}</td></tr>
-<tr><td>Avg VMG (kts)</td><td class="num">${escapeHtml(ts0?.port?.avgVMG!=null?f(ts0.port.avgVMG,2):"—")}</td><td class="num">${escapeHtml(ts1?.port?.avgVMG!=null?f(ts1.port.avgVMG,2):"—")}</td></tr>
+<tr><td>VMG to wind (kts)</td><td class="num">${escapeHtml(tackVmgKts(ts0?.port)!=null?f(tackVmgKts(ts0?.port),2):"—")}</td><td class="num">${escapeHtml(tackVmgKts(ts1?.port)!=null?f(tackVmgKts(ts1?.port),2):"—")}</td></tr>
 <tr><td>Mean COG (var)</td><td class="num">${escapeHtml(rowCog(ts0?.port))}</td><td class="num">${escapeHtml(rowCog(ts1?.port))}</td></tr>
 <tr><td>Mean TWA (TWA var)</td><td class="num">${escapeHtml(ts0?.port?.twaFromWind!=null?`${f(ts0.port.twaFromWind,1)}${ts0.port.twaStd!=null?` (σ ${f(ts0.port.twaStd,1)})`:""}`:"—")}</td><td class="num">${escapeHtml(ts1?.port?.twaFromWind!=null?`${f(ts1.port.twaFromWind,1)}${ts1.port.twaStd!=null?` (σ ${f(ts1.port.twaStd,1)})`:""}`:"—")}</td></tr>
 <tr class="sub"><td colspan="3">Starboard tack</td></tr>
 <tr><td>Avg speed (var)</td><td class="num">${escapeHtml(rowSpd(ts0,"stbd"))}</td><td class="num">${escapeHtml(rowSpd(ts1,"stbd"))}</td></tr>
-<tr><td>Avg VMG (kts)</td><td class="num">${escapeHtml(ts0?.stbd?.avgVMG!=null?f(ts0.stbd.avgVMG,2):"—")}</td><td class="num">${escapeHtml(ts1?.stbd?.avgVMG!=null?f(ts1.stbd.avgVMG,2):"—")}</td></tr>
+<tr><td>VMG to wind (kts)</td><td class="num">${escapeHtml(tackVmgKts(ts0?.stbd)!=null?f(tackVmgKts(ts0?.stbd),2):"—")}</td><td class="num">${escapeHtml(tackVmgKts(ts1?.stbd)!=null?f(tackVmgKts(ts1?.stbd),2):"—")}</td></tr>
 <tr><td>Mean COG (var)</td><td class="num">${escapeHtml(rowCog(ts0?.stbd))}</td><td class="num">${escapeHtml(rowCog(ts1?.stbd))}</td></tr>
 <tr><td>Mean TWA (TWA var)</td><td class="num">${escapeHtml(ts0?.stbd?.twaFromWind!=null?`${f(ts0.stbd.twaFromWind,1)}${ts0.stbd.twaStd!=null?` (σ ${f(ts0.stbd.twaStd,1)})`:""}`:"—")}</td><td class="num">${escapeHtml(ts1?.stbd?.twaFromWind!=null?`${f(ts1.stbd.twaFromWind,1)}${ts1.stbd.twaStd!=null?` (σ ${f(ts1.stbd.twaStd,1)})`:""}`:"—")}</td></tr>
 <tr><td>P↔S mean TWA difference</td><td class="num">${escapeHtml(fPD(ts0?.p2sTwaDiff))}</td><td class="num">${escapeHtml(fPD(ts1?.p2sTwaDiff))}</td></tr>
@@ -1120,9 +1127,9 @@ function buildComparePrintHtml(ctx){
 <td class="num">${l0&&l0.legNo?String(l0.legNo):l1&&l1.legNo?String(l1.legNo):String(i+1)}</td>
 <td>${escapeHtml((l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—")}</td>
 <td>${escapeHtml((l0&&l0.type)||(l1&&l1.type)||"—")}</td>
-<td class="num">${escapeHtml(l0&&l0.avgVMG!=null?f(l0.avgVMG,2):"—")}</td><td class="num">${escapeHtml(l0&&l0.efficiency!=null?f(l0.efficiency,0):"—")}</td>
+<td class="num">${escapeHtml(legVmcKts(l0)!=null?f(legVmcKts(l0),2):"—")}</td><td class="num">${escapeHtml(legChordKts(l0)!=null?f(legChordKts(l0),2):"—")}</td><td class="num">${escapeHtml(l0&&l0.efficiency!=null?f(l0.efficiency,0):"—")}</td>
 <td class="num">${r0s}</td><td class="num">${d0m!=null&&Number.isFinite(d0m)?m2nmP(d0m):"—"}</td><td class="num">${l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
-<td class="num">${escapeHtml(l1&&l1.avgVMG!=null?f(l1.avgVMG,2):"—")}</td><td class="num">${escapeHtml(l1&&l1.efficiency!=null?f(l1.efficiency,0):"—")}</td>
+<td class="num">${escapeHtml(legVmcKts(l1)!=null?f(legVmcKts(l1),2):"—")}</td><td class="num">${escapeHtml(legChordKts(l1)!=null?f(legChordKts(l1),2):"—")}</td><td class="num">${escapeHtml(l1&&l1.efficiency!=null?f(l1.efficiency,0):"—")}</td>
 <td class="num">${r1s}</td><td class="num">${d1m!=null&&Number.isFinite(d1m)?m2nmP(d1m):"—"}</td><td class="num">${l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
 <td>${deltaS}</td>
 </tr>`);
@@ -1178,7 +1185,7 @@ p.muted{ color: #666; font-size: 10px; }
 <tr><td>Derived wind FROM (°)</td><td class="num">${r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?String(Math.round(Number(r0.wind_direction))):"—"}</td><td class="num">${r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?String(Math.round(Number(r1.wind_direction))):"—"}</td></tr>
 </tbody></table>
 
-<h2>2 — Upwind (by tack)</h2>
+<h2>2 — Upwind (VMG to wind, by tack)</h2>
 ${tackTable("Upwind",t0s?.upwind,t1s?.upwind)}
 
 <h2>3 — Reach (by tack)</h2>
@@ -1188,21 +1195,21 @@ ${tackTable("Reach",t0s?.reach,t1s?.reach)}
 ${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
 
 <h2>5 — Performance by leg</h2>
-<p class="foot">Legs: outbound to inbound gates. <strong>Distance from line</strong> (START leg): signed distance from committee line to bow (GPS + user offset); negative = course side (red in app). <strong>Rnd</strong>: in–out mark path. P/S at gates. Re-run Analyse to refresh.</p>
+<p class="foot">Legs: outbound to inbound gates. <strong>VMC</strong> = speed toward next mark (chord A→B). <strong>Chord nm/h</strong> = mark separation ÷ leg time. <strong>Distance from line</strong> (START): bow vs committee line. <strong>Rnd</strong>: in–out mark path. Re-run Analyse to refresh.</p>
 <table>
 <thead>
 <tr>
 <th class="num" rowspan="2">Leg</th><th rowspan="2">From → To</th><th rowspan="2">Type</th>
-<th class="c1" colspan="5">${escapeHtml(lab0)}</th>
-<th class="c2" colspan="5">${escapeHtml(lab1)}</th>
+<th class="c1" colspan="6">${escapeHtml(lab0)}</th>
+<th class="c2" colspan="6">${escapeHtml(lab1)}</th>
 <th rowspan="2">Time gain/loss</th>
 </tr>
 <tr>
-<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
-<th class="num">VMG</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
 </tr>
 </thead>
-<tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"14\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
+<tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"16\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
 </table>
 </body></html>`;
 }
@@ -2289,12 +2296,17 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     const dur=legPts[legPts.length-1].time-legPts[0].time;
     const eff=dist>0?(straightDist/dist*100):100;
     const legBearing=bear(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
+    let markChordBearingDeg=null,markChordM=null;
+    if(wA&&wB&&Number.isFinite(wA.lat)&&Number.isFinite(wA.lon)&&Number.isFinite(wB.lat)&&Number.isFinite(wB.lon)){
+      markChordBearingDeg=bear(wA.lat,wA.lon,wB.lat,wB.lon);
+      markChordM=hav(wA.lat,wA.lon,wB.lat,wB.lon);
+    }
 
     legs.push({
       from:roundings[i].mark,to:roundings[i+1].mark,
       lap:roundings[i].lap,
       startIdx,endIdx,
-      distance:dist,straightDistance:straightDist,
+      distance:dist,straightDistance:straightDist,markChordBearingDeg,markChordM,
       duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
       efficiency:eff,legBearing,
       type:"leg",
@@ -2456,6 +2468,33 @@ function acuteTwaFromWindDeg(cog,wdFrom){
   const r=((Number(cog)-wdFrom+360)%360);
   return r>180?360-r:r;
 }
+/** Acute angle (°) between COG and a reference bearing (0–180). */
+function acuteAngleToBearingDeg(cogDeg,refBearingDeg){
+  if(!Number.isFinite(cogDeg)||!Number.isFinite(refBearingDeg))return null;
+  const r=((Number(cogDeg)-refBearingDeg+360)%360);
+  return r>180?360-r:r;
+}
+/** Component of speed toward true wind: SOG (kts) × cos(TWA) vs wind from. */
+function vmgToWindKts(sogKts,cogDeg,windFromDeg){
+  if(!Number.isFinite(sogKts)||!Number.isFinite(cogDeg)||!Number.isFinite(windFromDeg))return null;
+  const twa=acuteTwaFromWindDeg(cogDeg,windFromDeg);
+  return sogKts*Math.cos(twa*D);
+}
+/** VMC (kts) along bearing mark A → mark B (chord): SOG × cos(acute(COG, chord)). */
+function vmcToMarkBearingKts(sogKts,cogDeg,markChordBearingDeg){
+  if(!Number.isFinite(sogKts)||!Number.isFinite(cogDeg)||!Number.isFinite(markChordBearingDeg))return null;
+  const va=acuteAngleToBearingDeg(cogDeg,markChordBearingDeg);
+  if(va==null||!Number.isFinite(va))return null;
+  return sogKts*Math.cos(va*D);
+}
+/** Trapezoid-style weight (sec) for time-weighted sample means at `idx`. */
+function pointTimeWeightSec(pts,idx){
+  if(!pts?.length||idx<0||idx>=pts.length)return 0;
+  const t=pts[idx].time;
+  const tPrev=idx>0?pts[idx-1].time:t;
+  const tNext=idx<pts.length-1?pts[idx+1].time:t;
+  return Math.max(1e-3,0.5*(tNext-tPrev));
+}
 
 function circularMeanStdDeg(cogs){
   if(!cogs||!cogs.length)return{mean:null,std:null,n:0};
@@ -2485,7 +2524,8 @@ function tackStatsForCompareStore(t){
     n:x.n??0,
     avgSpeed:x.avgSpeed??null,
     speedStd:x.speedStd??null,
-    avgVMG:x.avgVMG??null,
+    avgVMG:x.avgVmgToWind??x.avgVMG??null,
+    avgVmgToWind:x.avgVmgToWind??x.avgVMG??null,
     avgCourse:x.avgCourse??null,
     twaFromWind:x.twaFromWind??null,
     twaStd:x.twaStd??null,
@@ -2501,7 +2541,7 @@ function tackStatsForCompareStore(t){
 }
 
 /**
- * Speed / COG / VMG stats for legs of a given type, split by tack (port vs starboard vs wind FROM).
+ * Speed / COG / VMG to wind for legs of a given type, split by tack (port vs starboard).
  * @param {"upwind"|"reach"|"downwind"} legType
  */
 function computeTackLegStatsByType(en,legs,wd,legType,roundingMask=null){
@@ -2513,22 +2553,25 @@ function computeTackLegStatsByType(en,legs,wd,legType,roundingMask=null){
       if(skip(i))continue;
       const p=en[i],s=ms2k(p.ss||0);
       if(s<0.3)continue;
+      const vmg=vmgToWindKts(s,p.cog,wd);
+      if(vmg==null||!Number.isFinite(vmg))continue;
+      const w=pointTimeWeightSec(en,i);
+      const o={s,cog:p.cog,vmg,w};
       const r=((p.cog-wd+360)%360);
-      const va=r>180?360-r:r;
-      const vmg=ms2k(p.ss||0)*Math.cos(va*D);
-      const o={s,cog:p.cog,vmg};
       if(r>180)stbd.push(o);else port.push(o);
     }
   }
   const pack=(arr)=>{
-    if(!arr.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null,avgVMG:null,twaFromWind:null,twaStd:null,windRelLabel:null};
-    const spds=arr.map(x=>x.s),cogs=arr.map(x=>x.cog),vmgs=arr.map(x=>x.vmg);
+    if(!arr.length)return{n:0,avgSpeed:null,speedStd:null,avgCourse:null,courseStd:null,avgVmgToWind:null,avgVMG:null,twaFromWind:null,twaStd:null,windRelLabel:null};
+    const spds=arr.map(x=>x.s),cogs=arr.map(x=>x.cog),vmgs=arr.map(x=>x.vmg),weights=arr.map(x=>x.w||0);
     const twaSamples=arr.map(x=>acuteTwaFromWindDeg(x.cog,wd));
     const avgSpeed=spds.reduce((a,b)=>a+b,0)/spds.length;
     const speedStd=sampleStdDev(spds);
     const{mean:avgCourse,std:courseStd}=circularMeanStdDeg(cogs);
     const twaStd=twaSamples.length>=2?sampleStdDev(twaSamples):null;
-    const avgVMG=vmgs.length?Math.abs(vmgs.reduce((a,b)=>a+b,0)/vmgs.length):null;
+    const wSum=weights.reduce((a,b)=>a+b,0);
+    const avgVmgToWind=wSum>0?vmgs.reduce((s,v,j)=>s+v*weights[j],0)/wSum:(vmgs.length?vmgs.reduce((a,b)=>a+b,0)/vmgs.length:null);
+    const avgVMG=avgVmgToWind;
     let twaFromWind=null,windRelLabel=null;
     if(avgCourse!=null&&Number.isFinite(avgCourse)){
       const acute=acuteTwaFromWindDeg(avgCourse,wd);
@@ -2536,7 +2579,7 @@ function computeTackLegStatsByType(en,legs,wd,legType,roundingMask=null){
       const signedFromWind=((avgCourse-wd+540)%360)-180;
       windRelLabel=`COG ${Math.round(avgCourse)}° (${signedFromWind>=0?"+":""}${Math.round(signedFromWind)}° from wind) · ${Math.round(acute)}° TWA`;
     }
-    return{n:arr.length,avgSpeed,speedStd,avgCourse,courseStd,avgVMG,twaFromWind,twaStd,windRelLabel};
+    return{n:arr.length,avgSpeed,speedStd,avgCourse,courseStd,avgVmgToWind,avgVMG,twaFromWind,twaStd,windRelLabel};
   };
   const P=pack(port),S=pack(stbd);
   const tot=P.n+S.n;
@@ -2742,25 +2785,30 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const trackSegmentFC=buildTrackSegmentFeatureCollection(en,roundingPointMask);
 
   const hasMansForVMG=manoeuvreEvents.some(m=>!m.excludeFromStatsAndVMG);
-  const vmgMode=hasMansForVMG?"magnitude":"targeted";
+  const vmcMode=hasMansForVMG?"magnitude":"targeted";
+  const vmgMode=vmcMode;
 
   legs=legs.map(l=>{
-    const targetBearing=l.type==="upwind"?wd:l.type==="downwind"?((wd+180)%360):l.legBearing;
-    const sampleLegVmgs=(skipRounding)=>{
-      const vmgs=[];
+    const courseBrg=Number.isFinite(l.markChordBearingDeg)?l.markChordBearingDeg:l.legBearing;
+    const sampleLegVmcs=(skipRounding)=>{
+      const out=[];
       for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
         if(skipRounding&&roundingPointMask[i])continue;
         const p=en[i];
-        const r=((p.cog-targetBearing+360)%360),va=r>180?360-r:r;
-        const signed=ms2k(p.ss||0)*Math.cos(va*D);
-        vmgs.push(vmgMode==="magnitude"?Math.abs(signed):signed);
+        const signed=vmcToMarkBearingKts(ms2k(p.ss||0),p.cog,courseBrg);
+        if(signed==null||!Number.isFinite(signed))continue;
+        out.push(vmcMode==="magnitude"?Math.abs(signed):signed);
       }
-      return vmgs;
+      return out;
     };
-    let vmgs=sampleLegVmgs(true);
-    if(!vmgs.length)vmgs=sampleLegVmgs(false);
-    const avgVMG=vmgs.length?vmgs.reduce((a,b)=>a+b,0)/vmgs.length:0;
-    return{...l,avgVMG,vmgTarget:Math.round(targetBearing)};
+    let vmcs=sampleLegVmcs(true);
+    if(!vmcs.length)vmcs=sampleLegVmcs(false);
+    const avgVmc=vmcs.length?vmcs.reduce((a,b)=>a+b,0)/vmcs.length:null;
+    const durSec=l.duration>0?l.duration:(l.endIdx!=null&&l.startIdx!=null&&en[l.endIdx]&&en[l.startIdx])
+      ?en[l.endIdx].time-en[l.startIdx].time:0;
+    let chordProgressKts=null;
+    if(Number.isFinite(l.markChordM)&&l.markChordM>0&&durSec>0)chordProgressKts=(m2nm(l.markChordM)*3600)/durSec;
+    return{...l,avgVmc,avgVMG:avgVmc,chordProgressKts,vmcChordBearingDeg:Number.isFinite(courseBrg)?Math.round(courseBrg):null};
   });
 
   const streaks={};
@@ -2881,7 +2929,7 @@ function ManCard({m,index}){
           {hasR&&<>Within <strong style={{color:C.trkRound}}>{MARK_MANOEUVRE_AT_MARK_M} m</strong> of <strong style={{color:C.trkRound}}>{m.nearestMarkName||"a mark"}</strong>{m.nearestMarkDistM!=null?` (~${m.nearestMarkDistM.toFixed(1)} m)`:""}. </>}
           {hasIdx&&<>Turn centre within <strong style={{color:C.trkRound}}>{MARK_MANOEUVRE_NEAR_ROUNDING_PTS} GPS points</strong> of a detected mark rounding. </>}
           {(!hasR&&!hasIdx)&&<>Excluded as mark-rounding manoeuvre. </>}
-          Excluded from racing tack/gybe stats, leg VMG averages, and magnitude VMG mode.
+          Excluded from racing tack/gybe stats, leg VMC averages, and magnitude VMC mode.
         </div>}
       <div style={{fontSize:11,color:C.acc,fontWeight:600,marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{angNm} {ang}°</div>
       <div style={{fontSize:10,color:C.txD,marginTop:2}}>{(m.preS||0).toFixed(1)}→{Number.isFinite(m.minS)?m.minS.toFixed(1):"—"} kts · {Number.isFinite(m.rt)?`${m.rt}s speed recov`:"—"}</div>
@@ -4259,7 +4307,7 @@ function App(){
     const title=(r?.activity_name&&String(r.activity_name).trim())||(savedSummaryId&&savedSummaryId.startsWith("file-")?"Uploaded track":`#${savedSummaryId}`);
     const s=r?.stats;
     const leg=r?.leg_summary;
-    const mv=meanNumeric((leg||[]).map(l=>l.avgVMG));
+    const mv=meanNumeric((leg||[]).map(l=>(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:l.avgVMG)));
     const tack=r?.tack_scores,gyb=r?.gybe_scores;
     const avgTk=(arr)=>{const q=(arr||[]).filter(t=>!t.excluded&&Number.isFinite(t.q));return q.length?Math.round(q.reduce((a,t)=>a+t.q,0)/q.length):null;};
     const avgGy=(arr)=>{const q=(arr||[]).filter(g=>!g.excluded&&Number.isFinite(g.q));return q.length?Math.round(q.reduce((a,g)=>a+g.q,0)/q.length):null;};
@@ -4300,7 +4348,7 @@ function App(){
               {one("Avg tack %",dispAtk!=null?`${dispAtk}`:"—")}
               {one("Avg gybe %",dispGy!=null?`${dispGy}`:"—")}
               {one("Legs (n)",leg?.length!=null?`${leg.length}`:"—")}
-              {one("Mean leg VMG",mv!=null?mv.toFixed(2):"—")}
+              {one("Mean leg VMC",mv!=null?mv.toFixed(2):"—")}
               {one("Wind shift (°)",fmt(s?.windShiftRange,v=>v.toFixed(1)))}
             </tbody>
           </table>
@@ -4327,6 +4375,8 @@ function App(){
     const fmtPDeg=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
     const wind0=r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?Math.round(Number(r0.wind_direction)):"—";
     const w1fix=r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?Math.round(Number(r1.wind_direction)):"—";
+    const legVmcKts=(l)=>l&&(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null));
+    const legChordKts=(l)=>l&&l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts:null;
     const rowSpd=(t,pfx)=>{
       if(!t||!t[pfx]||!t[pfx].n)return"—";
       const o=t[pfx];
@@ -4358,9 +4408,9 @@ function App(){
               <td style={tdN}>{rowSpd(ts1,"port")}</td>
             </tr>
             <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
-              <td style={tdL}>Avg VMG (kts)</td>
-              <td style={tdN}>{ts0?.port?.avgVMG!=null?fmtF(ts0.port.avgVMG,2):"—"}</td>
-              <td style={tdN}>{ts1?.port?.avgVMG!=null?fmtF(ts1.port.avgVMG,2):"—"}</td>
+              <td style={tdL}>VMG to wind (kts)</td>
+              <td style={tdN}>{ts0?.port?fmtF(ts0.port.avgVmgToWind??ts0.port.avgVMG,2):"—"}</td>
+              <td style={tdN}>{ts1?.port?fmtF(ts1.port.avgVmgToWind??ts1.port.avgVMG,2):"—"}</td>
             </tr>
             <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
               <td style={tdL}>Mean COG (var)</td>
@@ -4379,9 +4429,9 @@ function App(){
               <td style={tdN}>{rowSpd(ts1,"stbd")}</td>
             </tr>
             <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
-              <td style={tdL}>Avg VMG (kts)</td>
-              <td style={tdN}>{ts0?.stbd?.avgVMG!=null?fmtF(ts0.stbd.avgVMG,2):"—"}</td>
-              <td style={tdN}>{ts1?.stbd?.avgVMG!=null?fmtF(ts1.stbd.avgVMG,2):"—"}</td>
+              <td style={tdL}>VMG to wind (kts)</td>
+              <td style={tdN}>{ts0?.stbd?fmtF(ts0.stbd.avgVmgToWind??ts0.stbd.avgVMG,2):"—"}</td>
+              <td style={tdN}>{ts1?.stbd?fmtF(ts1.stbd.avgVmgToWind??ts1.stbd.avgVMG,2):"—"}</td>
             </tr>
             <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
               <td style={tdL}>Mean COG (var)</td>
@@ -4479,7 +4529,7 @@ function App(){
           </table>
         </div>
 
-        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>2 · Upwind performance (by tack)</div>
+        <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>2 · Upwind (VMG to wind, by tack)</div>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,marginBottom:20}}>
           <TackTypeBlock name="Upwind" ts0={t0s?.upwind} ts1={t1s?.upwind}/>
         </div>
@@ -4495,25 +4545,27 @@ function App(){
         </div>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
-        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each <strong style={{color:C.txt}}>leg</strong> = track from the <strong style={{color:C.txt}}>outbound</strong> gate at the <em>from</em> mark (line ⊥ to that leg&rsquo;s chord) to the <strong style={{color:C.txt}}>inbound</strong> gate at the <em>to</em> mark. <strong style={{color:C.txt}}>Distance from line</strong> (START leg only): signed distance from the committee line to the <strong style={{color:C.txt}}>bow</strong> (GPS + offset); negative and highlighted if on the course side of the line. <strong style={{color:C.txt}}>Rnd</strong> = in–out mark path (m) at the <em>from</em> mark. <strong style={{color:C.txt}}>Dist</strong> = leg along-track (nm) — re-run analysis to refresh.</p>
+        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each <strong style={{color:C.txt}}>leg</strong> = track from the <strong style={{color:C.txt}}>outbound</strong> gate at the <em>from</em> mark to the <strong style={{color:C.txt}}>inbound</strong> gate at the <em>to</em> mark. <strong style={{color:C.txt}}>VMC</strong> = speed made good toward the <em>next mark</em> (chord A→B), averaged on the leg (magnitude vs signed per global mode). <strong style={{color:C.txt}}>Chord</strong> = mark-to-mark distance ÷ time (closed-course rate, nm/h). <strong style={{color:C.txt}}>Distance from line</strong> (START only): bow vs committee line. <strong style={{color:C.txt}}>Rnd</strong> = in–out path at the <em>from</em> mark. <strong style={{color:C.txt}}>Track</strong> = along-track (nm).</p>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:820}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:920}}>
             <thead>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
                 <th rowSpan={2} style={th2}>Leg</th>
                 <th rowSpan={2} style={th2}>From → To</th>
                 <th rowSpan={2} style={th2}>Type</th>
-                <th colSpan={5} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
-                <th colSpan={5} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
+                <th colSpan={6} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
+                <th colSpan={6} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
                 <th rowSpan={2} style={th2}>Time gain/loss</th>
               </tr>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
-                <th style={th2}>VMG</th>
+                <th style={th2}>VMC</th>
+                <th style={th2}>Chord</th>
                 <th style={th2}>Eff%</th>
                 <th style={th2}>Rnd / line (m)</th>
                 <th style={th2}>Track (nm)</th>
                 <th style={th2}>Time</th>
-                <th style={th2}>VMG</th>
+                <th style={th2}>VMC</th>
+                <th style={th2}>Chord</th>
                 <th style={th2}>Eff%</th>
                 <th style={th2}>Rnd / line (m)</th>
                 <th style={th2}>Track (nm)</th>
@@ -4541,12 +4593,14 @@ function App(){
                     <td style={tdN}>{(l0&&l0.legNo)||(l1&&l1.legNo)||i+1}</td>
                     <td style={tdL}>{(l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—"}</td>
                     <td style={tdL}>{(l0&&l0.type)||(l1&&l1.type)||"—"}</td>
-                    <td style={tdN}>{l0&&l0.avgVMG!=null?fmtF(l0.avgVMG,2):"—"}</td>
+                    <td style={tdN}>{legVmcKts(l0)!=null?fmtF(legVmcKts(l0),2):"—"}</td>
+                    <td style={tdN}>{legChordKts(l0)!=null?fmtF(legChordKts(l0),2):"—"}</td>
                     <td style={tdN}>{l0&&l0.efficiency!=null?fmtF(l0.efficiency,0):"—"}</td>
                     <td style={tdN}>{preLegOrRnd(l0)}</td>
                     <td style={tdN}>{d0m!=null&&Number.isFinite(d0m)?m2nm(d0m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
-                    <td style={tdN}>{l1&&l1.avgVMG!=null?fmtF(l1.avgVMG,2):"—"}</td>
+                    <td style={tdN}>{legVmcKts(l1)!=null?fmtF(legVmcKts(l1),2):"—"}</td>
+                    <td style={tdN}>{legChordKts(l1)!=null?fmtF(legChordKts(l1),2):"—"}</td>
                     <td style={tdN}>{l1&&l1.efficiency!=null?fmtF(l1.efficiency,0):"—"}</td>
                     <td style={tdN}>{preLegOrRnd(l1)}</td>
                     <td style={tdN}>{d1m!=null&&Number.isFinite(d1m)?m2nm(d1m).toFixed(2):"—"}</td>
@@ -4801,7 +4855,7 @@ function App(){
             <Stat label="Gybes (racing)" value={a.stats.gybeCount} color={C.gybe} icon="↘"/>
           </div>
           {(a.stats.tackCountMarkAdjacent>0||a.stats.gybeCountMarkAdjacent>0)&&<div style={{fontSize:10,color:C.txD,marginTop:-8,marginBottom:12,lineHeight:1.5}}>
-            Mark-rounding manoeuvres (turn within <strong>{MARK_MANOEUVRE_AT_MARK_M} m</strong> of a course mark and/or within <strong>{MARK_MANOEUVRE_NEAR_ROUNDING_PTS} GPS points</strong> of a detected rounding): <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.tackCountMarkAdjacent||0}</span> tack{(a.stats.tackCountMarkAdjacent||0)!==1?"s":""}, <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.gybeCountMarkAdjacent||0}</span> gybe{(a.stats.gybeCountMarkAdjacent||0)!==1?"s":""} — excluded from these counts, quality charts, leg VMG averages, and magnitude VMG mode.
+            Mark-rounding manoeuvres (turn within <strong>{MARK_MANOEUVRE_AT_MARK_M} m</strong> of a course mark and/or within <strong>{MARK_MANOEUVRE_NEAR_ROUNDING_PTS} GPS points</strong> of a detected rounding): <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.tackCountMarkAdjacent||0}</span> tack{(a.stats.tackCountMarkAdjacent||0)!==1?"s":""}, <span style={{color:C.trkRound,fontWeight:700}}>{a.stats.gybeCountMarkAdjacent||0}</span> gybe{(a.stats.gybeCountMarkAdjacent||0)!==1?"s":""} — excluded from these counts, quality charts, leg VMC averages, and magnitude VMC mode.
           </div>}
           <div style={{fontSize:11,color:C.txM,marginBottom:12}}>
             {a.windStats?.range!=null&&<>Wind range {a.windStats.range.toFixed(1)}° ({a.windStats.trend})</>}
@@ -4939,7 +4993,7 @@ function App(){
               Auto estimate: {a.windEst.dir}° ({(a.windEst.conf*100).toFixed(0)}% conf)
             </div>}
             <div style={{marginTop:8,fontSize:10,color:C.txD,lineHeight:1.6}}>
-              Leg VMG mode: <span style={{color:C.txt}}>{a.vmgMode==="magnitude"?"Magnitude (racing manoeuvres present)":"Targeted signed (no racing manoeuvres)"}</span> · per-leg VMG excludes mark-rounding track (orange on map). Timeline: manoeuvre labels match map (port/starboard crossing = red/green); <span style={{color:C.trkRound}}>*</span> = excluded mark-rounding manoeuvre (<span style={{color:C.trkRound}}>orange</span>).
+              Leg <strong>VMC</strong> mode (vs chord to next mark): <span style={{color:C.txt}}>{a.vmgMode==="magnitude"?"Magnitude (racing manoeuvres present)":"Targeted signed (no racing manoeuvres)"}</span> · per-leg VMC excludes mark-rounding track (orange on map). <strong>Chord</strong> = mark A→B distance ÷ leg time (nm/h). Timeline: manoeuvre labels match map (port/starboard crossing = red/green); <span style={{color:C.trkRound}}>*</span> = excluded mark-rounding manoeuvre (<span style={{color:C.trkRound}}>orange</span>).
             </div>
           </div>
 
@@ -4956,7 +5010,7 @@ function App(){
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
                     Speed variability<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.speedStd,2)} kts σ</span></div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
-                    VMG (avg)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgVMG,2)} kts</span></div>
+                    VMG to wind (avg)<br/><span style={{...mono,color:C.txt,fontSize:14}}>{v(u.avgVmgToWind??u.avgVMG,2)} kts</span></div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
                     Angle from wind (mean COG ± vs wind from)<br/><span style={{...mono,color:C.txt,fontSize:12,lineHeight:1.35,display:"block",marginTop:4}}>{u.windRelLabel||"—"}</span></div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:1.9,marginTop:8}}>
@@ -4967,7 +5021,7 @@ function App(){
             };
             return(<div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
               <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Upwind · port vs starboard</div>
-              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>GPS samples on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>. Samples in <strong style={{color:C.trkRound}}>mark-rounding</strong> segments (same mask as orange track) are excluded. VMG = |speed×cos(TWA)| vs wind. Angle line: mean COG with signed offset from wind (±°) and acute TWA. COG σ = circular spread (°).</div>
+              <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:12}}>GPS samples on <strong style={{color:C.txt}}>upwind</strong> legs (mark-based course), split by tack vs wind from <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{effWind}°</strong>. Samples in <strong style={{color:C.trkRound}}>mark-rounding</strong> segments (same mask as orange track) are excluded. <strong>VMG to wind</strong> = SOG×cos(TWA) toward wind, time-weighted mean. Angle line: mean COG with signed offset from wind (±°) and acute TWA. COG σ = circular spread (°).</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                 {row("Upwind · port tack",C.port,uw.port)}
                 {row("Upwind · starboard tack",C.stbd,uw.stbd)}
@@ -5066,14 +5120,15 @@ function App(){
         {/* LEGS */}
         {tab==="legs"&&<>
           {a.legs.length>0?<>
-            <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:8,padding:"6px 12px",marginBottom:4}}>
-              <div style={{width:60}}>From→To</div>
-              <div style={{width:55}}>Type</div>
-              <div style={{flex:1}}>Dist</div>
-              <div style={{width:50}}>Time</div>
-              <div style={{width:50}}>Spd</div>
-              <div style={{width:42}}>VMG</div>
-              <div style={{width:38}}>Eff</div>
+            <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:6,padding:"6px 8px",marginBottom:4}}>
+              <div style={{width:56}}>From→To</div>
+              <div style={{width:50}}>Type</div>
+              <div style={{flex:1,minWidth:80}}>Dist</div>
+              <div style={{width:44}}>Time</div>
+              <div style={{width:40}}>Spd</div>
+              <div style={{width:36}}>VMC</div>
+              <div style={{width:40}}>Chord</div>
+              <div style={{width:32}}>Eff</div>
             </div>
             {a.legs.map((l,i)=>{
               const tc=l.type==="upwind"?C.up:l.type==="downwind"?C.dn:C.txM;
@@ -5081,10 +5136,11 @@ function App(){
                 <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
                 <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
                 <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)?(<>Distance from line <span style={{color:Math.round(l.startLineDistanceM)<0?C.wrn:C.acc,fontWeight:600}}>{Math.round(l.startLineDistanceM)}m</span> · </>):(l.roundingM!=null&&Number.isFinite(l.roundingM)&&l.roundingM>0.05?<>Rnd <span style={{color:C.acc}}>{Math.round(l.roundingM)}m</span>{l.roundingStraightM!=null&&Number.isFinite(l.roundingStraightM)&&l.roundingStraightM>0.05?<> <span style={{color:C.txM}}>(st {Math.round(l.roundingStraightM)}m)</span></>:null} · </>:null)}Trk {m2nm(l.distance).toFixed(2)}nm</div>
-                <div style={{width:50,color:C.txM}}>{fT(l.duration)}</div>
-                <div style={{width:50,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
-                <div style={{width:42,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVMG.toFixed(1)}</div>
-                <div style={{width:38,color:C.txM}}>{l.efficiency.toFixed(0)}%</div>
+                <div style={{width:44,color:C.txM}}>{fT(l.duration)}</div>
+                <div style={{width:40,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
+                <div style={{width:36,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc.toFixed(1):(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG.toFixed(1):"—")}</div>
+                <div style={{width:40,color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts.toFixed(1):"—"}</div>
+                <div style={{width:32,color:C.txM}}>{l.efficiency.toFixed(0)}%</div>
               </div>);
             })}
 
@@ -5092,14 +5148,18 @@ function App(){
               {["upwind","downwind","reach"].map(type=>{
                 const tl=a.legs.filter(l=>l.type===type);if(!tl.length)return null;
                 const as2=tl.reduce((s,l)=>s+l.avgSpeed,0)/tl.length;
-                const av=tl.reduce((s,l)=>s+l.avgVMG,0)/tl.length;
+                const vmcVals=tl.map(l=>(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:l.avgVMG)).filter(x=>x!=null&&Number.isFinite(x));
+                const av=vmcVals.length?vmcVals.reduce((s,x)=>s+x,0)/vmcVals.length:0;
+                const ac=tl.filter(l=>l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts));
+                const avChord=ac.length?ac.reduce((s,l)=>s+l.chordProgressKts,0)/ac.length:0;
                 const ae=tl.reduce((s,l)=>s+l.efficiency,0)/tl.length;
                 const tc2=type==="upwind"?C.up:type==="downwind"?C.dn:C.txM;
                 return(<div key={type} style={{flex:1,background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`}}>
                   <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",color:tc2,marginBottom:8}}>{type} ({tl.length})</div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:2}}>
-                    Avg: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{as2.toFixed(1)}kts</span><br/>
-                    VMG: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{av.toFixed(1)}kts</span><br/>
+                    Avg spd: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{as2.toFixed(1)}kts</span><br/>
+                    Avg VMC: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{av.toFixed(1)}kts</span><br/>
+                    {ac.length>0?<>Mean chord: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{avChord.toFixed(1)}nm/h</span><br/></>:null}
                     Eff: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{ae.toFixed(0)}%</span>
                   </div>
                 </div>);
