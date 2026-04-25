@@ -3276,7 +3276,7 @@ function App(){
     setRenameBusy(false);
   },[session,sAth,renameDraft]);
 
-  const loadStravaActivity=useCallback(async(act, nextView = "course-input")=>{
+  const loadStravaActivity=useCallback(async(act, nextView = "course-setup")=>{
     if(!session?.strava?.linked)return;
     setProcessing(true);setSetupSaveMsg(null);
     const preSaved=savedByActId[String(act.id)];
@@ -3338,7 +3338,7 @@ function App(){
       setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
       setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
       setRaceStartText(DEFAULT_RACE_START_TEXT);
-      setView("course-input");
+      setView("course-setup");
     }catch(e){console.error(e);alert("Failed to parse: "+e.message)}
     setProcessing(false);
   },[]);
@@ -3765,7 +3765,7 @@ function App(){
       setView("saved-summary");
       return;
     }
-    await loadStravaActivity(act,"course-input");
+    await loadStravaActivity(act,"course-setup");
   },[openAnalysisFromSavedRow,loadStravaActivity]);
 
   const openSetupFromList=useCallback(async (act, saved, isUploadOnly)=>{
@@ -3813,7 +3813,7 @@ function App(){
     setTimelineScroll(0);
   },[actId]);
 
-  const effWind=windOvr!==null?windOvr:(view==="course-setup"||view==="course-input"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
+  const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
 
   const courseMapStartFinish=useMemo(()=>{
     if(!sfLineEnds)return null;
@@ -4331,8 +4331,8 @@ function App(){
     </div>);
   }
 
-  /* ─── COURSE INPUT (form before map) ─── */
-  if(view==="course-input"){
+  /* ─── SETUP (course + map + detection) ─── */
+  if(view==="course-setup"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
         <button type="button" onClick={()=>session?.strava?.linked?setView("activities"):setView("home")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Back</button>
@@ -4340,16 +4340,8 @@ function App(){
         <div style={{width:40}}/>
       </div>
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
-        <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>Course & wind</div>
-        <p style={{fontSize:12,color:C.txM,margin:"0 0 16px",lineHeight:1.55}}>Choose the course, laps, start time, optional windward mark, and rough wind. Then open the map to move marks, committee line, and run analysis.</p>
-
-        {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track</div>
-          <div style={{fontSize:12,color:C.txM,lineHeight:1.5}}>
-            Duration: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
-            {croppedMeta&&<span> · After auto-crop: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
-          </div>
-        </div>}
+        <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>Setup</div>
+        <p style={{fontSize:12,color:C.txM,margin:"0 0 16px",lineHeight:1.55}}>Choose course, laps, start and windward mark; set antenna to bow. Use the map for marks and the start line, the dial for wind FROM, then run analysis.</p>
 
         <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
           <div style={{flex:2,minWidth:180}}>
@@ -4395,17 +4387,7 @@ function App(){
           <p style={{fontSize:10,color:C.txD,margin:"6px 0 0",maxWidth:520,lineHeight:1.5}}>The wind estimate favours track segments and manoeuvres that head toward this mark (upwind leg). List is lap 1 marks in order. Pick a mark only if it matches the day’s course.</p>
         </div>
 
-        <div style={{maxWidth:360,marginBottom:20}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Rough wind (FROM ° · meteorological)</div>
-          <WindRose
-            wd={effWind}
-            onChange={setWindOvr}
-            compact
-            hint={setupMapAnalysis?.windEst?`Auto ${setupMapAnalysis.windEst.dir}° (${(setupMapAnalysis.windEst.conf*100).toFixed(0)}% conf)${windTuning&&windTuning.windward?" · windward-weighted":""} — dial overrides`:"Set rough wind if known, or leave for auto (track-based)"}
-          />
-        </div>
-
-        <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14,marginBottom:20}}>
+        <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14,marginBottom:16}}>
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>User / GPS</div>
           <label style={{fontSize:12,color:C.txt,display:"block",marginBottom:6}}>Antenna to bow (m)</label>
           <input
@@ -4418,48 +4400,6 @@ function App(){
             style={{width:120,padding:"8px 10px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:14,fontFamily:"'JetBrains Mono',monospace"}}
           />
           <p style={{fontSize:10,color:C.txD,margin:"8px 0 0",lineHeight:1.5}}>Forward distance from GPS tracker to the bow, along COG, for committee-line distance and start leg. Default 2&nbsp;m. Saved in this browser. Changing it re-runs the wind-aware analysis on the next calculation.</p>
-        </div>
-
-        <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
-          Continue to setup
-        </button>
-      </div>
-    </div>);
-  }
-
-  /* ─── COURSE SETUP (map) ─── */
-  if(view==="course-setup"){
-    return(<div style={{background:C.bg,minHeight:"100vh"}}>
-      <div style={hdr}>
-        <button type="button" onClick={()=>setView("course-input")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Course & wind</button>
-        <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName}</div>
-        <div style={{width:40}}/>
-      </div>
-      <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
-        <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Setup</div>
-        <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginBottom:16,fontSize:12,color:C.txM,background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:"10px 14px"}}>
-          <span>Course: <strong style={{color:C.txt}}>{courseLetter||"—"}</strong></span>
-          <span>·</span>
-          <span>{laps} lap{laps===1?"":"s"}</span>
-          <span>·</span>
-          <span>Start {raceStartText||"—"}</span>
-          {windwardMarkName?<>
-            <span>·</span>
-            <span>Windward <strong style={{color:C.acc}}>{windwardMarkName}</strong></span>
-          </>:null}
-          <span>·</span>
-          <span style={{display:"inline-flex",alignItems:"center",gap:6}}>GPS→bow
-            <input
-              type="number"
-              min={0}
-              max={25}
-              step={0.1}
-              value={gpsToBowM}
-              onChange={e=>{const n=parseFloat(e.target.value);if(Number.isFinite(n)&&n>=0&&n<=25)setGpsToBowM(n);}}
-              style={{width:56,padding:"4px 6px",background:C.bg,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}
-            />m
-          </span>
-          <button type="button" onClick={()=>setView("course-input")} style={{...btn("transparent",C.acc,C.acc),padding:"4px 10px",fontSize:11,marginLeft:"auto"}}>Edit</button>
         </div>
 
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
@@ -4637,9 +4577,9 @@ function App(){
       <div style={{maxWidth:560,margin:"0 auto",padding:"32px 20px"}}>
         <div style={{fontSize:18,fontWeight:700,color:C.txt,marginBottom:10}}>Analysis unavailable</div>
         <p style={{fontSize:13,color:C.txM,lineHeight:1.6,marginBottom:16}}>
-          There is no valid analysis to show. This usually means there are fewer than 20 GPS points in the cropped window, or the track is still loading. Open the map, check auto-crop, and run <strong style={{color:C.txt}}>Analyse Track</strong> again.
+          There is no valid analysis to show. This usually means there are fewer than 20 GPS points in the cropped window, or the track is still loading. Open <strong style={{color:C.txt}}>Setup</strong>, check auto-crop, and run <strong style={{color:C.txt}}>Analyse Track</strong> again.
         </p>
-        <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),padding:"12px 20px",fontSize:14}}>Back to map</button>
+        <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),padding:"12px 20px",fontSize:14}}>Back to setup</button>
       </div>
     </div>);
   }
@@ -4651,7 +4591,7 @@ function App(){
 
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
-        <button onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Course</button>
+        <button onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Setup</button>
         <div style={{fontSize:13,fontWeight:600,color:C.txt,maxWidth:"50%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{actName}{courseLetter?` · Course ${courseLetter}`:""}{laps>1?` · ${laps}L`:""}</div>
         <div style={{width:40}}/>
       </div>
@@ -4980,7 +4920,7 @@ function App(){
                 </div>);
               })}
             </div>
-          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Gates not found for the full mark sequence (in/out perpendiculars and P/S). Widen the crop, check the track, or mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Course Setup</button></div>}
+          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Gates not found for the full mark sequence (in/out perpendiculars and P/S). Widen the crop, check the track, or mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Setup</button></div>}
         </>}
 
         {/* SPEED */}
