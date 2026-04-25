@@ -143,6 +143,16 @@ const supabase = {
     if (!r.ok) console.error("[Supabase] INSERT", table, r.status, data);
     return data;
   },
+  async delete(table, query) {
+    const r = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      method: "DELETE",
+      headers: this.headers(),
+      Prefer: "return=minimal",
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) console.error("[Supabase] DELETE", table, r.status, data);
+    return { ok: r.ok, status: r.status, data };
+  },
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -843,6 +853,13 @@ async function loadAnalysisRow(stravaId, activityId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+/** Remove saved analysis row (RLS: own rows only). */
+async function deleteAnalysisRow(stravaId, activityId) {
+  const sid = Number(stravaId);
+  const aid = encodeURIComponent(String(activityId));
+  return supabase.delete("analyses", `strava_id=eq.${sid}&activity_id=eq.${aid}`);
+}
+
 /** Update display name only (row must already exist in `analyses`). */
 async function renameActivityName(stravaId, activityId, newName) {
   const sid = Number(stravaId);
@@ -1079,9 +1096,15 @@ ${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
 </body></html>`;
 }
 
+/** Strava “Sail” and “Windsurf” only (see Strava activity types). */
+function isStravaSailingOrWindsurf(a){
+  const t=String(a?.type||"");
+  return t==="Sail"||t==="Windsurf";
+}
+
 /** Strava feed + Supabase-only rows (e.g. GPX/FIT uploads with id `file-…`). */
 function mergeActivitiesWithSaved(acts,savedByActId){
-  const stravaActs=Array.isArray(acts)?acts:[];
+  const stravaActs=Array.isArray(acts)?acts.filter(isStravaSailingOrWindsurf):[];
   const inStrava=new Set(stravaActs.map(a=>String(a.id)));
   const merged=stravaActs.map(a=>({...a,__src:"strava"}));
   const bag=savedByActId&&typeof savedByActId==="object"?savedByActId:{};
@@ -3253,17 +3276,23 @@ function App(){
     setRenameBusy(false);
   },[session,sAth,renameDraft]);
 
-  const analyseStrava=useCallback(async(act)=>{
+  const loadStravaActivity=useCallback(async(act, nextView = "course-input")=>{
     if(!session?.strava?.linked)return;
     setProcessing(true);setSetupSaveMsg(null);
     const preSaved=savedByActId[String(act.id)];
     setActName((preSaved?.activity_name&&String(preSaved.activity_name).trim())||act.name);
     setActId(String(act.id));setActDate(act.start_date||act.start_date_local||"");
+    const startRef=act.start_date||act.start_date_local;
+    if(!startRef){alert("Activity has no start time.");setProcessing(false);return;}
+    const startMs=new Date(startRef).getTime();
+    if(!Number.isFinite(startMs)){alert("Invalid activity start time.");setProcessing(false);return;}
     try{
       const streams=await fetchStreams(act.id);
       if(streams.latlng&&streams.time){
-        const pts=streams.time.data.map((t,i)=>({time:new Date(act.start_date).getTime()/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
+        const pts=streams.time.data.map((t,i)=>({time:startMs/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
         setRawPoints(pts);
+        setAnalysis(null);
+        setDetSettings(DETECTION_DEFAULTS);
         setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);setWindwardMarkName("");
         setCropStartText("00:00:00");setCropDurationText("");
         setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
@@ -3281,13 +3310,18 @@ function App(){
             applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
             applySfLineEndsFromRow(row.course_setup,setSfLineEndAText,setSfLineEndBText);
             applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
+            const maybeSnap=parseAnalysisSnapshotField(row.analysis_snapshot);
+            if(maybeSnap&&maybeSnap.detSettings&&typeof maybeSnap.detSettings==="object")
+              setDetSettings({...DETECTION_DEFAULTS,...maybeSnap.detSettings});
           }
         }
-        setView("course-input");
-      }
+        setView(nextView);
+      }else{alert("No GPS stream for this activity.");}
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
   },[session,sAth,savedByActId]);
+
+  const openStravaSetup=useCallback((act)=>loadStravaActivity(act,"course-setup"),[loadStravaActivity]);
 
   // Handle file upload
   const handleFile=useCallback(async(file)=>{
@@ -3647,6 +3681,105 @@ function App(){
     return true;
   },[session,sAth]);
 
+  /** Map + detection: hydrated from snapshot if present, else Strava streams for numeric activity id. */
+  const openCourseSetupFromSavedRow=useCallback(async (rowIn)=>{
+    if(!rowIn?.activity_id){
+      alert("Invalid saved activity.");
+      return false;
+    }
+    const aid=String(rowIn.activity_id);
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    let row=rowIn;
+    let snap=parseAnalysisSnapshotField(row.analysis_snapshot);
+    if((!snap||!Array.isArray(snap.points)||snap.points.length<2)&&sid!=null){
+      try{
+        const fresh=await loadAnalysisRow(sid,aid);
+        if(fresh){
+          row=fresh;
+          snap=parseAnalysisSnapshotField(row.analysis_snapshot);
+        }
+      }catch(e){ console.warn("loadAnalysisRow for setup:",e); }
+    }
+    if(snap&&Array.isArray(snap.points)&&snap.points.length>=2){
+      setActId(aid);
+      setActName(row.activity_name&&String(row.activity_name).trim()||"Uploaded track");
+      setActDate(row.activity_date||row.updated_at||"");
+      setCourseLetter(row.course_letter?String(row.course_letter):"");
+      setLaps(row.laps!=null?Math.max(1,parseInt(row.laps,10)||1):1);
+      setMarkOverrides(row.mark_overrides&&typeof row.mark_overrides==="object"?row.mark_overrides:{});
+      if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
+      else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
+      applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
+      applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
+      if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
+      else setDetSettings(DETECTION_DEFAULTS);
+      setRawPoints(snap.points);
+      setTimeout(()=>{ applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText); },0);
+      setAnalysis(null);
+      setTab("overview");
+      setView("course-setup");
+      setSavedSummaryId(null);
+      return true;
+    }
+    if(/^\d+$/.test(aid)){
+      if(!session?.strava?.linked){
+        alert("Link Strava to open map setup for this activity.");
+        return false;
+      }
+      await openStravaSetup({id:Number(aid),name:row.activity_name||`#${aid}`,start_date:row.activity_date,start_date_local:row.activity_date});
+      return true;
+    }
+    alert("No stored track for this entry. Re-upload the GPX or FIT, then run analysis once to save a track snapshot for offline setup.");
+    return false;
+  },[session,sAth,openStravaSetup]);
+
+  const deleteActivityRow=useCallback(async (act, hasSaved)=>{
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    if(sid==null){
+      alert("Sign in to delete saved data.");
+      return;
+    }
+    if(!hasSaved){
+      alert("There is no saved analysis to delete for this track.");
+      return;
+    }
+    if(!window.confirm("Delete this track’s saved analysis from SailStats? This cannot be undone."))return;
+    try{
+      const sess=await apiGetSession();
+      if(sess?.ok&&sess.supabase_access_token)supabaseUserJwt=sess.supabase_access_token;
+    }catch(_){}
+    const res=await deleteAnalysisRow(sid, String(act.id));
+    if(res.ok){
+      setSavedByActId((prev)=>{ const n={...prev}; delete n[String(act.id)]; return n; });
+      refreshSavedAnalyses();
+    }else{
+      const msg=res.data&&res.data.message?String(res.data.message):"";
+      alert(msg||"Could not delete. Check the console for details.");
+    }
+  },[session,sAth,refreshSavedAnalyses]);
+
+  const viewAnalysisFromList=useCallback(async (act, saved, isUploadOnly)=>{
+    if(isUploadOnly){
+      if(saved&&await openAnalysisFromSavedRow(saved))return;
+      setSavedSummaryId(String(act.id));
+      setView("saved-summary");
+      return;
+    }
+    await loadStravaActivity(act,"course-input");
+  },[openAnalysisFromSavedRow,loadStravaActivity]);
+
+  const openSetupFromList=useCallback(async (act, saved, isUploadOnly)=>{
+    if(isUploadOnly){
+      if(!saved){
+        alert("No saved data for this upload.");
+        return;
+      }
+      await openCourseSetupFromSavedRow(saved);
+      return;
+    }
+    await openStravaSetup(act);
+  },[openCourseSetupFromSavedRow,openStravaSetup]);
+
   // Re-run when wind changes
   const curAnalysis=useMemo(()=>{
     if(!analysis||!croppedPoints)return analysis;
@@ -3812,9 +3945,11 @@ function App(){
           <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
         {compareMode&&<div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
+        {session?.strava?.linked&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}>From Strava we import <strong style={{color:C.txt}}>Sail</strong> and <strong style={{color:C.txt}}>Windsurf</strong> activities only.</div>}
         {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center"}}>Loading...</div>}
         {processing&&<div style={{color:C.acc,padding:30,textAlign:"center"}}>Processing...</div>}
-        {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; open for saved stats or use <strong>Compare</strong>.</div>}
+        {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:10,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; use the buttons below or <strong>Compare</strong>.</div>}
+        {!loadingActs && !processing && session?.strava?.linked && activitiesListMerged.length===0 &&<div style={{color:C.txM,fontSize:12,padding:"16px 0",lineHeight:1.5}}>No <strong style={{color:C.txt}}>Sail</strong> or <strong style={{color:C.txt}}>Windsurf</strong> activities in your recent Strava list, and no saved uploads yet. Upload a GPX/FIT or record a Sail/Windsurf activity in Strava.</div>}
         {activitiesListMerged.map(act=>{
           const sidStr=String(act.id);
           const saved=act.__fromSupabaseOnly?act.__savedRow:savedByActId[sidStr];
@@ -3822,6 +3957,8 @@ function App(){
           const hasSaved=!!saved;
           const picked=comparePick.includes(sidStr);
           const rowKey=act.__fromSupabaseOnly?`sb-${sidStr}`:sidStr;
+          const isUpload=!!act.__fromSupabaseOnly;
+          const onRowStripClick=()=>{ if(compareMode)toggleComparePick(act.id); };
           return(
             <div key={rowKey} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
               {compareMode&&<label style={{display:"flex",alignItems:"center",paddingLeft:4,cursor:"pointer"}}>
@@ -3834,35 +3971,37 @@ function App(){
                     <button type="button" disabled={renameBusy} onClick={()=>submitRename(act)} style={{...btn(`${C.acc}22`,C.acc,C.acc),padding:"8px 14px",fontSize:11}}>{renameBusy?"…":"Save"}</button>
                     <button type="button" onClick={()=>{setRenameActId(null);}} style={{...btn("transparent",C.txM,C.bdr),padding:"8px 12px",fontSize:11}}>Cancel</button>
                   </div>
-                ):act.__fromSupabaseOnly?(
-                  <div style={{display:"flex",width:"100%",alignItems:"stretch"}}>
-                    <button type="button" onClick={async()=>{
-                      if(compareMode){toggleComparePick(act.id);return;}
-                      if(act.__savedRow&&await openAnalysisFromSavedRow(act.__savedRow))return;
-                      setSavedSummaryId(String(act.id));setView("saved-summary");
-                    }} title="Open or select for compare" style={{display:"flex",flex:1,alignItems:"center",gap:12,background:"transparent",padding:"12px 8px 12px 14px",border:"none",textAlign:"left",cursor:"pointer",minWidth:0}}>
-                      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>📁</div>
+                ):(
+                  <div>
+                    <div
+                      role={compareMode?"button":undefined}
+                      onClick={onRowStripClick}
+                      onKeyDown={compareMode?(e)=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();toggleComparePick(act.id);} }:undefined}
+                      tabIndex={compareMode?0:-1}
+                      style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px 8px 14px",width:"100%",background:"transparent",border:"none",textAlign:"left",cursor:compareMode?"pointer":"default",minWidth:0}}
+                    >
+                      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
+                        {isUpload?"📁":(act.type?.includes("Sail")?"⛵":act.type?.includes("Wind")?"🏄":act.type?.includes("Ride")?"🚴":"📍")}
+                      </div>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
-                        <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,null)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span></div>
+                        <div style={{fontSize:10,color:C.txM,marginTop:2}}>
+                          {isUpload?formatCompareRowSubtitle(saved,null):formatCompareRowSubtitle(saved,act)}
+                          {act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}
+                          {act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}
+                          {hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}
+                          {isUpload?<span style={{color:C.txD,marginLeft:6}}>· file / no Strava</span>:""}
+                        </div>
                       </div>
-                    </button>
-                    {!compareMode&&<button type="button" onClick={async (e)=>{e.stopPropagation();if(act.__savedRow&&await openAnalysisFromSavedRow(act.__savedRow))return;setSavedSummaryId(String(act.id));setView("saved-summary");}} title="Open full analysis (charts & map) or saved summary" style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,background:"transparent",border:"none",borderLeft:`1px solid ${C.bdr}`,padding:"8px 12px 8px 14px",cursor:"pointer",color:C.acc,fontSize:12,fontWeight:700,fontFamily:"'Outfit',sans-serif",whiteSpace:"nowrap"}}>Analysis <span style={{color:C.txD,fontSize:16,fontWeight:400}} aria-hidden>›</span></button>}
+                    </div>
+                    {!compareMode&&(
+                      <div style={{display:"flex",flexWrap:"wrap",gap:8,padding:"4px 12px 12px 14px",alignItems:"center"}}>
+                        <button type="button" disabled={!hasSaved} onClick={()=>deleteActivityRow(act,hasSaved)} title={hasSaved?"Delete saved analysis from SailStats":"No saved data to delete"} style={{...btn("transparent",hasSaved?C.wrn:C.txD,hasSaved?C.wrn:C.bdr),padding:"6px 12px",fontSize:11,opacity:hasSaved?1:0.4,cursor:hasSaved?"pointer":"not-allowed"}}>Delete</button>
+                        <button type="button" onClick={()=>openSetupFromList(act,saved,isUpload)} style={{...btn("transparent",C.acc,C.acc),padding:"6px 12px",fontSize:11,borderWidth:1}}>Setup</button>
+                        <button type="button" onClick={()=>viewAnalysisFromList(act,saved,isUpload)} style={{...btn(`${C.acc}20`,C.acc,C.acc),padding:"6px 12px",fontSize:11}}>View analysis</button>
+                      </div>
+                    )}
                   </div>
-                ):(
-                  <button type="button" onClick={()=>{
-                    if(compareMode){toggleComparePick(act.id);return;}
-                    analyseStrava(act);
-                  }} title="Open activity" style={{display:"flex",width:"100%",alignItems:"center",gap:12,background:"transparent",padding:"12px 14px",border:"none",textAlign:"left",cursor:"pointer"}}>
-                    <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,background:`${C.blu}22`,flexShrink:0}}>
-                      {act.type?.includes("Sail")?"⛵":act.type?.includes("Ride")?"🚴":"📍"}
-                    </div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:13,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{displayName}</div>
-                      <div style={{fontSize:10,color:C.txM,marginTop:2}}>{formatCompareRowSubtitle(saved,act)}{act.elapsed_time!=null&&Number.isFinite(act.elapsed_time)?` · ${fT(act.elapsed_time)}`:""}{act.distance!=null&&Number.isFinite(act.distance)?` · ${m2nm(act.distance).toFixed(1)}nm`:""}{hasSaved?<span style={{color:C.acc,marginLeft:6}}>· saved</span>:""}</div>
-                    </div>
-                    <div style={{color:C.txD,fontSize:16,flexShrink:0}}>›</div>
-                  </button>
                 )}
               </div>
               {!compareMode&&hasSaved&&String(renameActId)!==String(act.id)&&(
@@ -4282,7 +4421,7 @@ function App(){
         </div>
 
         <button type="button" onClick={()=>setView("course-setup")} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"14px",fontSize:16,fontWeight:700,borderRadius:10}}>
-          Continue to map
+          Continue to setup
         </button>
       </div>
     </div>);
@@ -4297,7 +4436,7 @@ function App(){
         <div style={{width:40}}/>
       </div>
       <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px"}}>
-        <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Map & detection</div>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Setup</div>
         <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginBottom:16,fontSize:12,color:C.txM,background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,padding:"10px 14px"}}>
           <span>Course: <strong style={{color:C.txt}}>{courseLetter||"—"}</strong></span>
           <span>·</span>
@@ -4491,7 +4630,7 @@ function App(){
   if(view==="analysis"&&!curAnalysis){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
-        <button type="button" onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Map & detection</button>
+        <button type="button" onClick={()=>setView("course-setup")} style={{background:"none",border:"none",color:C.txM,fontSize:13}}>← Setup</button>
         <div style={{fontSize:14,fontWeight:600,color:C.txt}}>{actName||"Activity"}</div>
         <div style={{width:40}}/>
       </div>
