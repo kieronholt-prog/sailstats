@@ -568,17 +568,6 @@ function distPointToSegmentM(lat,lon,aLat,aLon,bLat,bLon){
   const qx=A.x+t*abx,qy=A.y+t*aby;
   return Math.hypot(p.x-qx,p.y-qy);
 }
-/** Along-track cumulative distance (m) to closest point on segment A–B; also min perpendicular gap (m). */
-function distanceAlongTrackToSegment(pts,aLat,aLon,bLat,bLon){
-  if(!pts?.length)return{alongM:0,distToMarkM:Infinity};
-  let cum=0,bestD=Infinity,bestAlong=0;
-  for(let i=0;i<pts.length;i++){
-    const d=distPointToSegmentM(pts[i].lat,pts[i].lon,aLat,aLon,bLat,bLon);
-    if(i>0)cum+=pts[i].dist||hav(pts[i-1].lat,pts[i-1].lon,pts[i].lat,pts[i].lon);
-    if(d<bestD){bestD=d;bestAlong=cum;}
-  }
-  return{alongM:bestAlong,distToMarkM:bestD};
-}
 
 function lineSideValue(lat,lon,aLat,aLon,bLat,bLon){
   const refLat=(aLat+bLat)/2,refLon=(aLon+bLon)/2;
@@ -3531,13 +3520,6 @@ function App(){
     };
   },[effectiveMarks,sfLineEnds]);
 
-  /** Distance from track to committee line (segment if custom, else mark point). */
-  const distToStartLine=useMemo(()=>{
-    if(!croppedPoints||croppedPoints.length<2)return null;
-    if(!sfLineEnds)return null;
-    return distanceAlongTrackToSegment(croppedPoints,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon);
-  },[croppedPoints,sfLineEnds]);
-
   const raceStartSecParsed=useMemo(()=>{
     const p=parseHMS(raceStartText);
     return p==null?0:Math.max(0,p);
@@ -4693,16 +4675,6 @@ function App(){
             />
           </div>
         </div>
-        <div style={{background:C.card,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Start / Finish line (drag SFA/SFB on map)</div>
-          {sfLineEnds&&<div style={{fontSize:10,color:C.txD,lineHeight:1.55}}>
-            Start reference: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{formatHMS(raceStartSecParsed)}</span> after first GPS point<br/>
-            Track point time nearest start time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.txt}}>{startFinishStats?.startPointTime?formatWallClock(startFinishStats.startPointTime):"—"}</span><br/>
-            Distance from line at start time: <span style={{fontFamily:"'JetBrains Mono',monospace",color:(startFinishStats?.startOnCourseSide===true?C.port:startFinishStats?.startOnCourseSide===false?C.stbd:C.acc)}}>{Number.isFinite(startFinishStats?.signedStartDist)?`${Math.round(startFinishStats.signedStartDist)} m`:(Number.isFinite(startFinishStats?.startDist)?`${Math.round(startFinishStats.startDist)} m`:"—")}</span><br/>
-            Start crossing (closest point on START → Mark 1 leg): <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.startCross?`${formatWallClock(startFinishStats.startCross.time)||"—"}`:"Start leg not found"}</span><br/>
-            Finish time (closest point on final Mark → FINISH leg): <span style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{startFinishStats?.finishCross?`${formatWallClock(startFinishStats.finishCross.time)||"—"}`:"Finish leg not found"}</span>
-          </div>}
-        </div>
 
         <div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Tack / Gybe detection</div>
@@ -4739,10 +4711,6 @@ function App(){
           </div>
           <div style={{fontSize:10,color:C.txD,marginTop:6}}>Defaults: Tack min turn 60°, Gybe min turn 45°. Tack spacing default is 4s to capture close tacks.</div>
         </div>
-
-        {croppedPoints&&croppedPoints.length>=2&&distToStartLine&&<div style={{fontSize:10,color:C.txD,lineHeight:1.5,padding:"8px 10px",background:`${C.bg}aa`,borderRadius:8,border:`1px solid ${C.bdr}`,marginBottom:16}}>
-          White dashed line = SFA→SFB. Closest approach on track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{Math.round(distToStartLine.distToMarkM)} m</strong> · along track: <strong style={{fontFamily:"'JetBrains Mono',monospace",color:C.acc}}>{m2nm(distToStartLine.alongM).toFixed(2)} nm</strong>.
-        </div>}
 
         {/* Analyse button */}
         <div style={{display:"flex",gap:10}}>
