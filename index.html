@@ -3890,18 +3890,48 @@ function App(){
             </>}
             <button type="button" onClick={signOutAll} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Sign out</button>
           </>:<>
-            <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Email</label>
-            <input type="email" autoComplete="username" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} placeholder="you@example.com" style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}/>
-            <label style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Password</label>
-            <input type="password" autoComplete={showRegister?"new-password":"current-password"} value={authPassword} onChange={e=>setAuthPassword(e.target.value)} placeholder="••••••••" style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}/>
-            {authErr&&<div style={{fontSize:12,color:C.wrn,marginBottom:10}}>{authErr}</div>}
-            {showRegister?<>
-              <button type="button" disabled={authBusy} onClick={signUp} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Create account"}</button>
-              <button type="button" onClick={()=>{setShowRegister(false);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Back to sign in</button>
-            </>:<>
-              <button type="button" disabled={authBusy} onClick={signIn} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Sign in"}</button>
-              <button type="button" onClick={()=>{setShowRegister(true);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Create account</button>
-            </>}
+            <form
+              autoComplete="on"
+              onSubmit={(e)=>{
+                e.preventDefault();
+                if(authBusy)return;
+                if(showRegister)signUp();
+                else signIn();
+              }}
+              style={{margin:0}}
+            >
+              <label htmlFor="sailstats-email" style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Email</label>
+              <input
+                id="sailstats-email"
+                name="email"
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                value={authEmail}
+                onChange={e=>setAuthEmail(e.target.value)}
+                placeholder="you@example.com"
+                style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}
+              />
+              <label htmlFor="sailstats-password" style={{fontSize:10,color:C.txM,display:"block",marginBottom:4}}>Password</label>
+              <input
+                id="sailstats-password"
+                name="password"
+                type="password"
+                autoComplete={showRegister?"new-password":"current-password"}
+                value={authPassword}
+                onChange={e=>setAuthPassword(e.target.value)}
+                placeholder="••••••••"
+                style={{width:"100%",marginBottom:10,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.bdr}`,background:C.bg,color:C.txt,fontSize:14}}
+              />
+              {authErr&&<div style={{fontSize:12,color:C.wrn,marginBottom:10}}>{authErr}</div>}
+              {showRegister?<>
+                <button type="submit" disabled={authBusy} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Create account"}</button>
+                <button type="button" onClick={()=>{setShowRegister(false);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Back to sign in</button>
+              </>:<>
+                <button type="submit" disabled={authBusy} style={{...btn(C.acc,"#0a1628"),width:"100%",padding:"12px",marginBottom:8}}>{authBusy?"…":"Sign in"}</button>
+                <button type="button" onClick={()=>{setShowRegister(true);setAuthErr("")}} style={{...btn("transparent",C.txM,C.bdr),width:"100%",padding:"10px",fontSize:12}}>Create account</button>
+              </>}
+            </form>
           </>}
         </div>
 
