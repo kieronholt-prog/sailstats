@@ -295,9 +295,21 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
 }
 /**
+ * Two display rays are the same infinite line through the mark (ignore half-line direction).
+ * Depends on `adiff` (defined below in file; function-hoisted at runtime).
+ */
+function gateDisplayRaysColinear(rayADeg,rayBDeg){
+  if(rayADeg==null||rayBDeg==null||!Number.isFinite(rayADeg)||!Number.isFinite(rayBDeg))return false;
+  const d0=Math.abs(adiff(rayADeg,rayBDeg));
+  return d0<0.75||Math.abs(d0-180)<0.75;
+}
+/**
  * GeoJSON line features for “in” (magenta) and “out” (cyan) at each mark.
  * In (magenta): U±135 when `useUpwindEntryGateBearing` (upwind or named windward), else ⟂ to prev→mark chord.
- * Out (cyan): always ⟂ to this→next mark chord (same half-space logic as `detectMarkInboundOutboundGates` sideOut).
+ * Out (cyan): ⟂ to mark→next chord (matches `detectMarkInboundOutboundGates` sideOut), except **leaving to S/F**
+ * on the final mark of the sequence: use the U-gate tangent (same construction as U in-gate) so the line is in
+ * the U±135 family, not ⟂ to mark–mid S/F. When in- and out-rays are colinear (e.g. S/F–mark–next collinear),
+ * only the magenta in half-line is drawn (no duplicate cyan).
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
@@ -345,9 +357,16 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     }
     if(nextW&&prev){
       const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
-      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
-      const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
-      if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+      const lastMarkToFinish=!!sfMid&&mi===fullSeq.length-1;
+      const apU=Number.isFinite(wdf)&&tack?upwindEntryGateBearingTwd(tack,wdf):null;
+      let outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
+      if(lastMarkToFinish&&apU!=null)
+        outRayBr=((apU+(tack==='P'?-90:90)+360)%360+180)%360;
+      const skipOutColin=inRayBr!=null&&gateDisplayRaysColinear(inRayBr,outRayBr);
+      if(!skipOutColin){
+        const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
+        if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+      }
     }else if(nextW){
       const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
       if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
