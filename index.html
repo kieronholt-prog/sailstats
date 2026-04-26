@@ -281,6 +281,38 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
 }
 /**
+ * **Out** gate: only the ray of the ⊥(mark→next) line in the small-angle wedge between
+ * the inbound (prev→mark) and outbound (mark→next) legs — the side of a reach–reach.
+ * (The same infinite line has a spurious 180° opposite; detection below ignores those crossings too.)
+ */
+function segmentOutboundGateRayInWedge(latM,lonM,latP,latN,lonN,halfLenM=200){
+  const dMN=enuMeters(latM,lonM,latN,lonN);
+  const lMN=Math.hypot(dMN.x,dMN.y);
+  if(lMN<0.1)return null;
+  const mToP=enuMeters(latM,lonM,latP,latP);
+  const lP=Math.hypot(mToP.x,mToP.y);
+  if(lP<0.1)return null;
+  const tnx=-dMN.y/lMN, tny=dMN.x/lMN;
+  const fromP={x:-mToP.x/lP,y:-mToP.y/lP};
+  const toN={x:dMN.x/lMN,y:dMN.y/lMN};
+  const sum={x:fromP.x+toN.x,y:fromP.y+toN.y};
+  const lS=Math.hypot(sum.x,sum.y);
+  let pick=1;
+  if(lS>=1e-6){
+    const nx=sum.x/lS,ny=sum.y/lS;
+    const d1=tnx*nx+tny*ny;
+    pick=d1>=0?1:-1;
+  }else{
+    const d1=tnx*toN.x+tny*toN.y;
+    pick=d1>=0?1:-1;
+  }
+  const f=Math.max(10,halfLenM);
+  const o=Math.min(5,f*0.03);
+  const ex=enuMetersToLatLon(latM,lonM,pick*tnx*f,pick*tny*f);
+  const inM=enuMetersToLatLon(latM,lonM,-pick*tnx*o,-pick*tny*o);
+  return[[inM.lon,inM.lat],[ex.lon,ex.lat]];
+}
+/**
  * GeoJSON line features for “in” (magenta) and “out” (cyan) gates at each mark in the expanded course
  * (committee midpoint used for S/F). Matches rounding detection, not the upwind “mean COG” leg variant.
  */
@@ -315,7 +347,10 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
       const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
       if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
     }
-    if(nextW){
+    if(nextW&&prev){
+      const seg2=segmentOutboundGateRayInWedge(curr.lat,curr.lon,prev.lat,nextW.lat,nextW.lon,halfLenM);
+      if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+    }else if(nextW){
       const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
       if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
     }
@@ -449,6 +484,35 @@ function firstValidPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon){
   return-1;
 }
 /**
+ * M→P · d̂ where d̂ = unit(M→N) — “how far from M the point is along the down-leg toward next (m)”.
+ * Rejects the spurious “back” half of the infinite outbound gate line on reach–reach marks.
+ */
+function alongChordFromMToN(latM,lonM,latP,lonP,latN,lonN){
+  const p=enuMeters(latM,lonM,latP,lonP);
+  const d=enuMeters(latM,lonM,latN,lonN);
+  const l=Math.hypot(d.x,d.y);
+  if(l<0.1)return 0;
+  return(p.x*d.x+p.y*d.y)/l;
+}
+const OUTBOUND_MIN_ALONG_M=0.2;
+/**
+ * Outbound: same as `firstValidPerpCrossing`, but the track **after** the crossing (point b) must already
+ * lie in the “toward next mark” open half w.r.t. the ⊥(mark–next) line (measured as along-arc toward N).
+ */
+function firstValidOutboundPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon,latN,lonN){
+  const sF=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd,pts.length-1);
+  for(let j=Math.max(1,sF+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s0=sideAt(a),s1=sideAt(b);
+    if(!segmentSignCrosses(s0,s1))continue;
+    if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
+    if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<=OUTBOUND_MIN_ALONG_M)continue;
+    return j;
+  }
+  return-1;
+}
+/**
  * Inbound gate: line through mark ⊥ to (prev → mark). Outbound gate: line through mark ⊥ to (mark → next).
  * Rounded only if both are crossed; tack (P| S) = mark to port|starboard of bow at that crossing. tack null: any.
  */
@@ -462,7 +526,7 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
   const sideOut=pp=>sideOfPerpAtA(curr.lat,curr.lon,next.lat,next.lon,pp.lat,pp.lon);
   const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideIn,tack,curr.lat,curr.lon);
   if(eIn<0)return{ok:false};
-  const eOut=firstValidPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon);
+  const eOut=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
   if(eOut<0||eOut<=eIn)return{ok:false};
   if(eOut-eIn+1<2)return{ok:false};
   const trackM=sumPathDist(pts,eIn,eOut);
@@ -4996,8 +5060,8 @@ function App(){
             <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
               <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
               <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
-              <span style={{color:"#06b6d4"}}> ―</span> Out-gate (out) ·
-              <span style={{color:C.txD}}>Upwind leg VMG can use perp to mean leg COG (see doc) — not shown here.</span>
+              <span style={{color:"#06b6d4"}}> ―</span> Out-gate (one ray in the turn wedge, not the opposite half-line) ·
+              <span style={{color:C.txD}}>Upwind leg can use perp to mean leg COG in the engine — not shown here.</span>
             </div>
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
