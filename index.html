@@ -284,6 +284,10 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
  * **Out** gate: only the ray of the ⊥(mark→next) line in the small-angle wedge between
  * the inbound (prev→mark) and outbound (mark→next) legs — the side of a reach–reach.
  * (The same infinite line has a spurious 180° opposite; detection below ignores those crossings too.)
+ * Pick `pick∈{±1}` so the ray matches the half-line you'd cross when *entering* the next-mark + side
+ * (same idea as s0<0→s1>0 on `sideOfPerpAtA`): t̂ and inbound should lie on the same side of
+ * the outbound mark→next line — i.e. `b×a` and `b×(pick*t̂)` have the same sign, with bisector
+ * fallback when a∥b.
  */
 function segmentOutboundGateRayInWedge(latM,lonM,latP,latN,lonN,halfLenM=200){
   const dMN=enuMeters(latM,lonM,latN,lonN);
@@ -293,18 +297,21 @@ function segmentOutboundGateRayInWedge(latM,lonM,latP,latN,lonN,halfLenM=200){
   const lP=Math.hypot(mToP.x,mToP.y);
   if(lP<0.1)return null;
   const tnx=-dMN.y/lMN, tny=dMN.x/lMN;
-  const fromP={x:-mToP.x/lP,y:-mToP.y/lP};
-  const toN={x:dMN.x/lMN,y:dMN.y/lMN};
-  const sum={x:fromP.x+toN.x,y:fromP.y+toN.y};
-  const lS=Math.hypot(sum.x,sum.y);
+  const a={x:-mToP.x/lP,y:-mToP.y/lP};
+  const b={x:dMN.x/lMN,y:dMN.y/lMN};
+  const cBA=b.x*a.y-b.y*a.x;
+  const cBT0=b.x*tny-b.y*tnx;
   let pick=1;
-  if(lS>=1e-6){
-    const nx=sum.x/lS,ny=sum.y/lS;
-    const d1=tnx*nx+tny*ny;
-    pick=d1>=0?1:-1;
+  if(cBA*cBA>1e-20){
+    pick=(cBT0*cBA>=0)?1:-1;
   }else{
-    const d1=tnx*toN.x+tny*toN.y;
-    pick=d1>=0?1:-1;
+    const sum={x:a.x+b.x,y:a.y+b.y};
+    const lS=Math.hypot(sum.x,sum.y);
+    if(lS>=1e-6){
+      const nx=sum.x/lS,ny=sum.y/lS;
+      pick=(tnx*nx+tny*ny)>=0?1:-1;
+    }else
+      pick=(cBT0>=0)?1:-1;
   }
   const f=Math.max(10,halfLenM);
   const o=Math.min(5,f*0.03);
@@ -494,10 +501,15 @@ function alongChordFromMToN(latM,lonM,latP,lonP,latN,lonN){
   if(l<0.1)return 0;
   return(p.x*d.x+p.y*d.y)/l;
 }
-const OUTBOUND_MIN_ALONG_M=0.2;
+const OUTBOUND_MIN_ALONG_B_M=0.5;
+const OUTBOUND_MIN_ALONG_AT_CROSS_M=0.15;
+/** Loose fallback: same s0<0 && s1>0 and side-of-gate; only `along` thresholds are smaller. */
+const OUTBOUND_LOOSE_MIN_ALONG_AT_CROSS_M=0.05;
+const OUTBOUND_LOOSE_MIN_ALONG_B_M=0.2;
 /**
- * Outbound: same as `firstValidPerpCrossing`, but the track **after** the crossing (point b) must already
- * lie in the “toward next mark” open half w.r.t. the ⊥(mark–next) line (measured as along-arc toward N).
+ * `sideOfPerpAtA(M,N,P) = p·(N−M)`; next mark is on the **positive** side. A valid *exit* crossing
+ * **enters** that half (s0<0, s1>0) — not the opposite flip (s0>0, s1<0) which is leaving “toward next”.
+ * Stops a spurious “third” detection on the same infinite line. Also enforces `along` at interpolated crossing + b.
  */
 function firstValidOutboundPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon,latN,lonN){
   const sF=Math.max(0,Math.floor(iStart|0));
@@ -506,8 +518,43 @@ function firstValidOutboundPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon,la
     const a=pts[j-1],b=pts[j];
     const s0=sideAt(a),s1=sideAt(b);
     if(!segmentSignCrosses(s0,s1))continue;
+    if(!(s0<0&&s1>0))continue;
     if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
-    if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<=OUTBOUND_MIN_ALONG_M)continue;
+    const den=s0-s1;
+    let cx=b.lat,cb=b.lon;
+    if(Number.isFinite(den)&&Math.abs(den)>=1e-15){
+      const t=s0/den;
+      if(t>0&&t<1){
+        cx=a.lat+(b.lat-a.lat)*t;
+        cb=a.lon+(b.lon-a.lon)*t;
+      }
+    }
+    if(alongChordFromMToN(mLat,mLon,cx,cb,latN,lonN)<OUTBOUND_MIN_ALONG_AT_CROSS_M)continue;
+    if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<OUTBOUND_MIN_ALONG_B_M)continue;
+    return j;
+  }
+  return-1;
+}
+function firstValidOutboundPerpCrossingLoose(pts,iStart,jEnd,sideAt,tack,mLat,mLon,latN,lonN){
+  const sF=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd,pts.length-1);
+  for(let j=Math.max(1,sF+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s0=sideAt(a),s1=sideAt(b);
+    if(!segmentSignCrosses(s0,s1))continue;
+    if(!(s0<0&&s1>0))continue;
+    if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
+    const den=s0-s1;
+    let cx=b.lat,cb=b.lon;
+    if(Number.isFinite(den)&&Math.abs(den)>=1e-15){
+      const t=s0/den;
+      if(t>0&&t<1){
+        cx=a.lat+(b.lat-a.lat)*t;
+        cb=a.lon+(b.lon-a.lon)*t;
+      }
+    }
+    if(alongChordFromMToN(mLat,mLon,cx,cb,latN,lonN)<OUTBOUND_LOOSE_MIN_ALONG_AT_CROSS_M)continue;
+    if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<OUTBOUND_LOOSE_MIN_ALONG_B_M)continue;
     return j;
   }
   return-1;
@@ -526,7 +573,8 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
   const sideOut=pp=>sideOfPerpAtA(curr.lat,curr.lon,next.lat,next.lon,pp.lat,pp.lon);
   const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideIn,tack,curr.lat,curr.lon);
   if(eIn<0)return{ok:false};
-  const eOut=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
+  let eOut=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
+  if(eOut<0)eOut=firstValidOutboundPerpCrossingLoose(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
   if(eOut<0||eOut<=eIn)return{ok:false};
   if(eOut-eIn+1<2)return{ok:false};
   const trackM=sumPathDist(pts,eIn,eOut);
