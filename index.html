@@ -296,7 +296,8 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
 }
 /**
  * GeoJSON line features for “in” (magenta) and “out” (cyan) at each mark.
- * Upwind **U±135** in-gate when (15° to upwind **or** named windward mark) and tack+wind; else chord, S: +90°, P: −90° from base.
+ * In (magenta): U±135 when `useUpwindEntryGateBearing` (upwind or named windward), else ⟂ to prev→mark chord.
+ * Out (cyan): always ⟂ to this→next mark chord (same half-space logic as `detectMarkInboundOutboundGates` sideOut).
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
@@ -344,16 +345,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     }
     if(nextW&&prev){
       const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
-      const nextMarkNm=String(fullSeq[mi+1]?.name||"");
-      const outU135=!!tack&&chOut!=null&&Number.isFinite(wdf)
-        &&useUpwindEntryGateBearing(chOut,wdf,nextMarkNm,windwardMarkName);
-      let outRayBr;
-      if(tack&&inU135)
-        outRayBr=(inRayBr+180)%360;
-      else if(tack&&outU135)
-        outRayBr=((upwindEntryGateBearingTwd(tack,wdf)+(tack==='P'?-90:90)+360)%360+180)%360;
-      else
-        outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
+      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
       const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
       if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
     }else if(nextW){
