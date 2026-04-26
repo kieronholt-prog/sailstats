@@ -295,21 +295,9 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
 }
 /**
- * Two display rays are the same infinite line through the mark (ignore half-line direction).
- * Depends on `adiff` (defined below in file; function-hoisted at runtime).
- */
-function gateDisplayRaysColinear(rayADeg,rayBDeg){
-  if(rayADeg==null||rayBDeg==null||!Number.isFinite(rayADeg)||!Number.isFinite(rayBDeg))return false;
-  const d0=Math.abs(adiff(rayADeg,rayBDeg));
-  return d0<0.75||Math.abs(d0-180)<0.75;
-}
-/**
- * GeoJSON line features for “in” (magenta) and “out” (cyan) at each mark.
- * In (magenta): U±135 when `useUpwindEntryGateBearing` (upwind or named windward), else ⟂ to prev→mark chord.
- * Out (cyan): ⟂ to mark→next chord (matches `detectMarkInboundOutboundGates` sideOut), except **leaving to S/F**
- * on the final mark of the sequence: use the U-gate tangent (same construction as U in-gate) so the line is in
- * the U±135 family, not ⟂ to mark–mid S/F. When in- and out-rays are colinear (e.g. S/F–mark–next collinear),
- * only the magenta in half-line is drawn (no duplicate cyan).
+ * GeoJSON line features for “in” (magenta) and “out” (cyan) at each mark, plus `gLbl` point features
+ * (tag, `g`) on the outboard end of each half-line for debugging. Out (cyan) is ⟂ to mark→next chord
+ * (same as `sideOut` in detection). Optional `+180` on the ray is display-only to pick the in-wedge half-line.
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
@@ -322,7 +310,9 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
   }:null;
   const wpFromRow=row=>(row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)
     ?{lat:row.lat,lon:row.lon}:null);
+  const shortN=n=>n&&String(n).length>10?String(n).slice(0,9)+"\u2006\u2026":String(n);
   const feats=[];
+  let gNum=0;
   for(let mi=0;mi<fullSeq.length;mi++){
     const m=fullSeq[mi];
     const curr=wpFromRow(m);
@@ -345,31 +335,55 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     const baseIn=inU135&&tack?upwindEntryGateBearingTwd(tack,wdf):chIn;
     /** Rays in the "forward" along-gate half-line; +180 flips the displayed half to match the boat's inbound/outbound wedge. */
     const inRayBr=chIn==null?null:(((inU135&&baseIn==null?chIn:baseIn)+(tack==='P'?-90:90)+360)%360+180)%360;
+    const prRow=mi>0?fullSeq[mi-1]:null;
+    const nxRow=mi+1<fullSeq.length?fullSeq[mi+1]:null;
+    const lastInSeq=mi===fullSeq.length-1;
+    const outToSf=lastInSeq&&!!sfMid;
+    const legFrom=mi>0?shortN(prRow&&String(prRow.name)==="START"?"S/F":(prRow?.name??"?")):shortN("S/F");
     if(prev){
       if(nextW){
         if(inRayBr==null)continue;
         const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,inRayBr,halfLenM);
-        if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+        if(seg){
+          const gi=++gNum;
+          const inMode=inU135?"U":"ch";
+          const tag=`#${gi} in ${inMode} ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}`;
+          feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:seg}});
+          feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:seg[1]}});
+        }
       }else{
         const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
-        if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+        if(seg){
+          const gi=++gNum;
+          const inMode="ch";
+          const tag=`#${gi} in ${inMode} \u00b7B\u27f3 ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0}`;
+          feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:seg}});
+          const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
+          feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[midLon,midLa]}});
+        }
       }
     }
     if(nextW&&prev){
       const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
-      const lastMarkToFinish=!!sfMid&&mi===fullSeq.length-1;
-      const apU=Number.isFinite(wdf)&&tack?upwindEntryGateBearingTwd(tack,wdf):null;
-      let outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
-      if(lastMarkToFinish&&apU!=null)
-        outRayBr=((apU+(tack==='P'?-90:90)+360)%360+180)%360;
-      const skipOutColin=inRayBr!=null&&gateDisplayRaysColinear(inRayBr,outRayBr);
-      if(!skipOutColin){
-        const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
-        if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
+      const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
+      if(seg2){
+        const go=++gNum;
+        const legToOut=outToSf?shortN("S/F"):shortN(nxRow?.name??"?");
+        const tag=`#${go} out ch ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi} chOut${Math.round(chOut*10)/10}°`;
+        feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legFrom:shortN(name),legTo:legToOut,outMode:"ch",chOut:Math.round(chOut*10)/10,tack:tack??"",tag},geometry:{type:"LineString",coordinates:seg2}});
+        feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:seg2[1]}});
       }
     }else if(nextW){
       const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
-      if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+      if(seg2){
+        const go=++gNum;
+        const toNm2=outToSf?shortN("S/F"):shortN(nxRow?.name??"S/F");
+        const tag=`#${go} out ch \u00b7A\u27f3 ${shortN(name)}\u2192${toNm2} \u00b7L${Number(m.lap)|0}`;
+        feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legTo:toNm2,outMode:"ch",tag},geometry:{type:"LineString",coordinates:seg2}});
+        const mLon=(seg2[0][0]+seg2[1][0])/2,mLa=(seg2[0][1]+seg2[1][1])/2;
+        feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[mLon,mLa]}});
+      }
     }
   }
   return{type:"FeatureCollection",features:feats};
@@ -3535,6 +3549,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         map.addSource("leg-gates",{type:"geojson",data:fc});
         if(!map.getLayer("leg-gate-in"))map.addLayer({id:"leg-gate-in",type:"line",source:"leg-gates",filter:["==",["get","kind"],"in"],paint:{"line-color":"#c026d3","line-width":2.2,"line-opacity":0.92,"line-dasharray":[0.1,0.1,1.2,0.1]}});
         if(!map.getLayer("leg-gate-out"))map.addLayer({id:"leg-gate-out",type:"line",source:"leg-gates",filter:["==",["get","kind"],"out"],paint:{"line-color":"#06b6d4","line-width":2.2,"line-opacity":0.92,"line-dasharray":[1.1,0.7]}});
+        if(!map.getLayer("leg-gate-txt"))map.addLayer({id:"leg-gate-txt",type:"symbol",source:"leg-gates",filter:["==",["get","kind"],"gLbl"],layout:{"text-field":["get","tag"],"text-size":9,"text-offset":[0,0.75],"text-allow-overlap":true,"text-optional":true,"text-max-width":22},paint:{"text-color":"#f2ecff","text-halo-color":"#0a1020","text-halo-width":1.2}});
       }catch(e){console.warn("[CourseMap] leg gates",e);}
     };
     if(map.getSource("leg-gates")){apply();return;}
@@ -5214,8 +5229,9 @@ function App(){
             <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
               <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
               <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
-              <span style={{color:"#06b6d4"}}> ―</span> Out-gate (one ray in the turn wedge, not the opposite half-line) ·
-              <span style={{color:C.txD}}>Upwind leg can use perp to mean leg COG in the engine — not shown here.</span>
+              <span style={{color:"#06b6d4"}}> ―</span> Out-gate (chord-⊥ to mark→next; one ray) ·
+              <span style={{color:C.txD}}>Numbered <code style={{fontSize:9}}>#N</code> tags (U=upwind in-basis, ch=chord) · </span>
+              <span style={{color:C.txD}}>Upwind det. uses same COG as engine — not shown on lines.</span>
             </div>
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
