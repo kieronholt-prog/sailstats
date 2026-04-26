@@ -315,8 +315,9 @@ function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
  * Map gates (magenta in / cyan out) — state machine when a mark counts as **windward** (field, name `Windward`, or upwind leg per below):
  * - **This = windward:** in = 135° from wind FROM (P/S); out = ⟂ to mark→next (chord +90, +display flip)
  * - **This ≠ W, next = windward (leeward → windward):** in = ⟂ to prev→mark; out = U±45 (vs U±135 in full detection) + display flip
- * - **Out before in (geometry):** if the out-gate line is **closer** to the **previous** mark than the in-gate line
- *   (lateral distance from prev to each infinite line at this mark), both in and out use ⟂ **prev → this** (same `ch` line).
+ * - **chAlign (joint ⟂ prev→this):** only when lateral m from the **previous** mark to the **in**-gate line is **less** than
+ *   to the **out**-gate line (`dIn < dOut`, ε). (Using `dOut < dIn` misfired on normal in-then-out roundings, where the in-gate
+ *   (last leg finish) is met before the out-gate (next leg start).) Both gates then use the same `ch` line.
  * - **Neither this nor next = windward:** in & out = chord ±90
  * Windward = user field, or name `Windward`, or track to/through mark is upwind (`isUpwindLegBearingVsWindDeg`).
  * If none apply, in/out are chord. Detection unchanged; map is illustrative.
@@ -387,7 +388,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     if(nextW&&prev&&inRayBr!=null&&outRayPre!=null&&chIn!=null){
       const dIn=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,inRayBr);
       const dOut=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,outRayPre);
-      if(Number.isFinite(dIn)&&Number.isFinite(dOut)&&dOut+CH_ALIGN_EPS<dIn){
+      if(Number.isFinite(dIn)&&Number.isFinite(dOut)&&dIn+CH_ALIGN_EPS<dOut){
         chAlignToPrev=true;
         const al=((chIn+ts+360)%360+180)%360;
         inRayBr=al;
