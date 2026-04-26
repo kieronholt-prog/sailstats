@@ -303,10 +303,20 @@ function nudgeGLabelM(lat,lon,idx){
   const oE=((g%6)-2.5)*1.0,oN=((Math.floor(g/6)%4)-1.5)*0.9;
   return enuMetersToLatLon(lat,lon,oE,oN);
 }
+/** Lateral distance (m) in local ENU from P to the infinite line through C along bearing `lineBearingTwd` (°T). */
+function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
+  if(!Number.isFinite(lineBearingTwd))return NaN;
+  const v=enuMeters(latC,lonC,latP,lonP);
+  const θ=Number(lineBearingTwd)*D;
+  const tx=Math.sin(θ),ty=Math.cos(θ);
+  return Math.abs(v.x*ty-v.y*tx);
+}
 /**
  * Map gates (magenta in / cyan out) — state machine when a mark counts as **windward** (field, name `Windward`, or upwind leg per below):
  * - **This = windward:** in = 135° from wind FROM (P/S); out = ⟂ to mark→next (chord +90, +display flip)
  * - **This ≠ W, next = windward (leeward → windward):** in = ⟂ to prev→mark; out = U±45 (vs U±135 in full detection) + display flip
+ * - **Out before in (geometry):** if the out-gate line is **closer** to the **previous** mark than the in-gate line
+ *   (lateral distance from prev to each infinite line at this mark), both in and out use ⟂ **prev → this** (same `ch` line).
  * - **Neither this nor next = windward:** in & out = chord ±90
  * Windward = user field, or name `Windward`, or track to/through mark is upwind (`isUpwindLegBearingVsWindDeg`).
  * If none apply, in/out are chord. Detection unchanged; map is illustrative.
@@ -362,6 +372,31 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
         inMode="ch";
       }
     }
+    let outRayPre=null,outModePre="ch",apUPre=null;
+    if(nextW&&prev){
+      apUPre=Number.isFinite(wdf)&&tack?mapLeewardToWindwardOutGateBearingTwd(tack,wdf):null;
+      outRayPre=((chOut+ts+360)%360+180)%360;
+      outModePre="ch";
+      if(!isWm&&isNextWm&&apUPre!=null){
+        outRayPre=((apUPre+ts+360)%360+180)%360;
+        outModePre="U45";
+      }
+    }
+    const CH_ALIGN_EPS=0.1;
+    let chAlignToPrev=false;
+    if(nextW&&prev&&inRayBr!=null&&outRayPre!=null&&chIn!=null){
+      const dIn=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,inRayBr);
+      const dOut=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,outRayPre);
+      if(Number.isFinite(dIn)&&Number.isFinite(dOut)&&dOut+CH_ALIGN_EPS<dIn){
+        chAlignToPrev=true;
+        const al=((chIn+ts+360)%360+180)%360;
+        inRayBr=al;
+        outRayPre=al;
+        inMode="ch";
+        outModePre="ch";
+        apUPre=null;
+      }
+    }
     /** +180: display which half-line to draw along the same infinite gate. */
     const lastInSeq=mi===fullSeq.length-1;
     const outToSf=lastInSeq&&!!sfMid;
@@ -372,7 +407,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
         const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,inRayBr,halfLenM);
         if(seg){
           const gi=++gNum;
-          const tag=`#${gi} in ${inMode} ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}`;
+          const tag=`#${gi} in ${inMode} ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${chAlignToPrev?" chAlign":""}`;
           feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:seg}});
           {const p=nudgeGLabelM(seg[1][1],seg[1][0],gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
         }
@@ -389,20 +424,16 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
       }
     }
     if(nextW&&prev){
-      const apU=Number.isFinite(wdf)&&tack?mapLeewardToWindwardOutGateBearingTwd(tack,wdf):null;
-      let outRayBr=((chOut+ts+360)%360+180)%360;
-      let outMode="ch";
-      if(!isWm&&isNextWm&&apU!=null){
-        outRayBr=((apU+ts+360)%360+180)%360;
-        outMode="U45";
-      }
+      const outRayBr=outRayPre;
+      const outMode=outModePre;
+      const apU=apUPre;
       const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
       if(seg2){
         const go=++gNum;
         const legToOut=outToSf?shortN("S/F"):shortN(nxRow?.name??"?");
         const uBit=outMode==="U45"&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
         const chBit=` chOut${Math.round(chOut*10)/10}°`;
-        const tag=`#${go} out ${outMode} ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}`;
+        const tag=`#${go} out ${outMode} ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}${chAlignToPrev?" chAlign":""}`;
         feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legFrom:shortN(name),legTo:legToOut,outMode,chOut:Math.round(chOut*10)/10,apU:apU!=null?Math.round(apU*10)/10:null,tack:tack??"",tag},geometry:{type:"LineString",coordinates:seg2}});
         {const p=nudgeGLabelM(seg2[1][1],seg2[1][0],go);feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
       }
@@ -472,14 +503,14 @@ function upwindEntryGateBearingTwd(tack,windFromDeg){
   return(U+135)%360;
 }
 /**
- * Map gates only: leeward mark, next is windward — outbound ray uses U±45 (same P/S as `upwindEntryGateBearingTwd`, which uses 135° for detection).
+ * Map gates only: leeward mark, next is windward — outbound ray uses U±45 (P: U−45, S: U+45; reversed from 135° detection).
  */
 function mapLeewardToWindwardOutGateBearingTwd(tack,windFromDeg){
   if(!Number.isFinite(windFromDeg))return null;
   const U=upwindBearingTwdFromWindFromDeg(windFromDeg);
-  if(tack==="P")return(U+45)%360;
-  if(tack==="S"||tack==null||tack==="")return(U-45+360)%360;
-  return(U+45)%360;
+  if(tack==="P")return(U-45+360)%360;
+  if(tack==="S"||tack==null||tack==="")return(U+45)%360;
+  return(U-45+360)%360;
 }
 function isWindwardMarkNameMatch(currentMarkName,windwardMarkName){
   if(!currentMarkName||!windwardMarkName)return false;
