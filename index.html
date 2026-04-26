@@ -274,7 +274,7 @@ function segmentOneRayBearingTwd(latM,lonM,rayBearingDeg,halfLenM=200){
 }
 /**
  * **Legacy** full line through B ⟂ to prev→mark (only if no `nextW` in debug layer).
- * Map gate layer: `buildMarkGateDebugFC` uses W135 in and leeward U45 out; full detection still uses U±135 where applicable.
+ * Map gate layer: `buildMarkGateDebugFC` uses W135 in, leeward port out = wind FROM + 135°, stbd U45 path; full detection still uses U±135 where applicable.
  */
 function segmentGateThroughBPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   const b=enuMeters(latA,lonA,latB,lonB);
@@ -314,7 +314,7 @@ function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
 /**
  * Map gates (magenta in / cyan out) — state machine when a mark counts as **windward** (field, name `Windward`, or upwind leg per below):
  * - **This = windward:** in = 135° from wind FROM (P/S); out = ⟂ to mark→next (chord +90, +display flip)
- * - **This ≠ W, next = windward (leeward → windward):** in = ⟂ to prev→mark; out = U±45 (vs U±135 in full detection) + display flip
+ * - **This ≠ W, next = windward (leeward → windward):** in = ⟂ to prev→mark; out = **port:** °T = wind FROM + 135; **stbd:** U+45 + `ts` + display flip
  * - **chAlign (joint ⟂ prev→this):** only when lateral m from the **previous** mark to the **in**-gate line is **less** than
  *   to the **out**-gate line (`dIn < dOut`, ε). (Using `dOut < dIn` misfired on normal in-then-out roundings, where the in-gate
  *   (last leg finish) is met before the out-gate (next leg start).) Both gates then use the same `ch` line.
@@ -375,12 +375,21 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     }
     let outRayPre=null,outModePre="ch",apUPre=null;
     if(nextW&&prev){
-      apUPre=Number.isFinite(wdf)&&tack?mapLeewardToWindwardOutGateBearingTwd(tack,wdf):null;
       outRayPre=((chOut+ts+360)%360+180)%360;
       outModePre="ch";
-      if(!isWm&&isNextWm&&apUPre!=null){
-        outRayPre=((apUPre+ts+360)%360+180)%360;
-        outModePre="U45";
+      if(!isWm&&isNextWm&&Number.isFinite(wdf)&&tack){
+        if(tack==='P'){
+          /** Leeward, port: out-gate ray (mark → along line) = meteorological wind FROM + 135°. */
+          apUPre=(wdf+135+360)%360;
+          outRayPre=apUPre;
+          outModePre="L135";
+        }else{
+          apUPre=mapLeewardToWindwardOutGateBearingTwd(tack,wdf);
+          if(apUPre!=null){
+            outRayPre=((apUPre+ts+360)%360+180)%360;
+            outModePre="U45";
+          }
+        }
       }
     }
     const CH_ALIGN_EPS=0.1;
@@ -432,7 +441,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
       if(seg2){
         const go=++gNum;
         const legToOut=outToSf?shortN("S/F"):shortN(nxRow?.name??"?");
-        const uBit=outMode==="U45"&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
+        const uBit=(outMode==="U45"||outMode==="L135")&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
         const chBit=` chOut${Math.round(chOut*10)/10}°`;
         const tag=`#${go} out ${outMode} ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}${chAlignToPrev?" chAlign":""}`;
         feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legFrom:shortN(name),legTo:legToOut,outMode,chOut:Math.round(chOut*10)/10,apU:apU!=null?Math.round(apU*10)/10:null,tack:tack??"",tag},geometry:{type:"LineString",coordinates:seg2}});
@@ -504,14 +513,14 @@ function upwindEntryGateBearingTwd(tack,windFromDeg){
   return(U+135)%360;
 }
 /**
- * Map gates only: leeward mark, next is windward — outbound ray uses U±45 (P: U−45, S: U+45; reversed from 135° detection).
+ * Map gates only: leeward, next is **starboard** (not port) — base bearing U+45 before `+ts+180` in `buildMarkGateDebugFC`.
+ * Port is handled there as wind FROM + 135° (no S/P `ts` on that leg).
  */
 function mapLeewardToWindwardOutGateBearingTwd(tack,windFromDeg){
   if(!Number.isFinite(windFromDeg))return null;
+  if(tack==='P')return null;
   const U=upwindBearingTwdFromWindFromDeg(windFromDeg);
-  if(tack==="P")return(U-45+360)%360;
-  if(tack==="S"||tack==null||tack==="")return(U+45)%360;
-  return(U-45+360)%360;
+  return(U+45)%360;
 }
 function isWindwardMarkNameMatch(currentMarkName,windwardMarkName){
   if(!currentMarkName||!windwardMarkName)return false;
@@ -5318,8 +5327,8 @@ function App(){
             <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
               <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
               <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
-              <span style={{color:"#06b6d4"}}> ―</span> Out: <code style={{fontSize:9}}>ch</code> at a windward mark; <code style={{fontSize:9}}>U45</code> when this mark is leeward (next is windward) ·
-              <span style={{color:C.txD}}> <code style={{fontSize:9}}>#N</code> in <code style={{fontSize:9}}>W135</code>|<code style={{fontSize:9}}>ch</code> · <code style={{fontSize:9}}>#N</code> out <code style={{fontSize:9}}>ch</code>|<code style={{fontSize:9}}>U45</code> · windward = Setup field, name <code style={{fontSize:9}}>Windward</code>, or upwind track to/next mark (vs wind FROM) · nudged · map ≠ full detection · </span>
+              <span style={{color:"#06b6d4"}}> ―</span> Out: <code style={{fontSize:9}}>ch</code> at a windward mark; leeward (next is windward) <code style={{fontSize:9}}>L135</code> port · <code style={{fontSize:9}}>U45</code> stbd ·
+              <span style={{color:C.txD}}> <code style={{fontSize:9}}>#N</code> in <code style={{fontSize:9}}>W135</code>|<code style={{fontSize:9}}>ch</code> · <code style={{fontSize:9}}>#N</code> out <code style={{fontSize:9}}>ch</code>|<code style={{fontSize:9}}>L135</code>|<code style={{fontSize:9}}>U45</code> · windward = Setup field, name <code style={{fontSize:9}}>Windward</code>, or upwind track to/next mark (vs wind FROM) · nudged · map ≠ full detection · </span>
               <span style={{color:C.txD}}>Upwind det. uses same COG as engine — not shown on lines.</span>
             </div>
           </div>
