@@ -254,6 +254,74 @@ function enuMeters(lat0,lon0,lat,lon){
   const c=Math.cos(lat0*D);
   return{x:(lon-lon0)*D*RE*c,y:(lat-lat0)*D*RE};
 }
+/** Local ENU offset (m) at lat0,lon0 → WGS84 (small distances, same as enu inverse). */
+function enuMetersToLatLon(lat0,lon0,xM,yM){
+  return{lat:lat0+yM/111320,lon:lon0+xM/(111320*Math.cos(lat0*D))};
+}
+/**
+ * Inbound / outbound mark gates as drawn on the map — same lines as `detectMarkInboundOutboundGates` uses
+ * (through mark B ⊥ chord prev→mark, and through mark A ⊥ chord mark→next).
+ */
+function segmentGateThroughBPerpChord(latA,lonA,latB,lonB,halfLenM=180){
+  const b=enuMeters(latA,lonA,latB,lonB);
+  const L0=Math.hypot(b.x,b.y);
+  if(L0<0.1)return null;
+  const ux=-(b.y/L0),uy=(b.x/L0);
+  const p1=enuMetersToLatLon(latA,lonA,b.x+ux*halfLenM,b.y+uy*halfLenM);
+  const p2=enuMetersToLatLon(latA,lonA,b.x-ux*halfLenM,b.y-uy*halfLenM);
+  return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
+}
+function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
+  const b=enuMeters(latA,lonA,latB,lonB);
+  const L0=Math.hypot(b.x,b.y);
+  if(L0<0.1)return null;
+  const ux=-(b.y/L0),uy=(b.x/L0);
+  const p1=enuMetersToLatLon(latA,lonA,ux*halfLenM,uy*halfLenM);
+  const p2=enuMetersToLatLon(latA,lonA,-ux*halfLenM,-uy*halfLenM);
+  return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
+}
+/**
+ * GeoJSON line features for “in” (magenta) and “out” (cyan) gates at each mark in the expanded course
+ * (committee midpoint used for S/F). Matches rounding detection, not the upwind “mean COG” leg variant.
+ */
+function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
+  const markPositions=lapMarks||[];
+  if(!markPositions.length)return{type:"FeatureCollection",features:[]};
+  const fullSeq=expandCourseMarks(preamble,markPositions,Math.max(1,Number(laps)||1));
+  if(fullSeq.length<2)return{type:"FeatureCollection",features:[]};
+  const sfMid=sfEnds?.endA&&sfEnds?.endB?{
+    lat:(sfEnds.endA.lat+sfEnds.endB.lat)/2,
+    lon:(sfEnds.endA.lon+sfEnds.endB.lon)/2
+  }:null;
+  const wpFromRow=row=>(row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)
+    ?{lat:row.lat,lon:row.lon}:null);
+  const feats=[];
+  for(let mi=0;mi<fullSeq.length;mi++){
+    const m=fullSeq[mi];
+    const curr=wpFromRow(m);
+    if(!curr)continue;
+    const name=String(m.name||"?");
+    let prev=null;
+    if(mi>0){
+      const pr=fullSeq[mi-1];
+      prev=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
+    }else if(sfMid)prev=sfMid;
+    let nextW=null;
+    if(mi+1<fullSeq.length){
+      const nx=fullSeq[mi+1];
+      nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
+    }else if(sfMid)nextW=sfMid;
+    if(prev){
+      const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
+      if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+    }
+    if(nextW){
+      const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
+      if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
+    }
+  }
+  return{type:"FeatureCollection",features:feats};
+}
 /**
  * Gate line through A, perpendicular to chord A→B (centre A to centre B in metres, local ENU at A).
  * Zero when (P−A)·(B−A)=0 — the line through A perpendicular to the mark-to-mark chord (not the chord line).
@@ -519,6 +587,32 @@ function cropTrackPoints(pts,startOffsetSec,durationSec){
   const end=dur==null?t1:Math.min(start+dur,t1);
   if(end<=start)return s.slice(0,Math.min(25,s.length));
   return s.filter(p=>p.time>=start&&p.time<=end);
+}
+
+/**
+ * Insert points along long segments (sparse / gappy Strava) so perp “gate” crossings are less likely
+ * to be missed between samples. On by default; linear interp on lat/lon/time.
+ */
+function densifyGpsTrack(pts, opts){
+  const maxStepM=Math.max(2,Number(opts?.maxStepM) || 5);
+  const maxTimeSec=Math.max(0.3,Number(opts?.maxTimeSec) || 2);
+  if(!pts||pts.length<2)return pts?[...pts]:[];
+  const sorted=[...pts].sort((a,b)=>a.time-b.time);
+  const out=[sorted[0]];
+  for(let i=0;i<sorted.length-1;i++){
+    const a=sorted[i],b=sorted[i+1];
+    const d=hav(a.lat,a.lon,b.lat,b.lon);
+    const dt=Math.max(0,b.time-a.time);
+    const partsD=d<=0.1?1:Math.max(1,Math.ceil(d/maxStepM));
+    const partsT=dt<=0.0001?1:Math.max(1,Math.ceil(dt/maxTimeSec));
+    const parts=Math.max(partsD,partsT,1);
+    for(let k=1;k<parts;k++){
+      const u=k/parts;
+      out.push({time:a.time+dt*u,lat:a.lat+(b.lat-a.lat)*u,lon:a.lon+(b.lon-a.lon)*u});
+    }
+    out.push(b);
+  }
+  return out;
 }
 
 /** HH:MM:SS from seconds (always two-digit hours). */
@@ -3090,7 +3184,7 @@ function WindRose({wd,onChange,compact,hint}){
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
-function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC}){
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC,legGatesFC}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const markersRef=useRef([]);
@@ -3242,6 +3336,24 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
   },[startFinishLine,mapLoaded]);
 
   useEffect(()=>{
+    const map=mapRef.current;if(!map||!mapLoaded)return;
+    const fc=legGatesFC&&legGatesFC.features&&legGatesFC.features.length
+      ?legGatesFC
+      :{type:"FeatureCollection",features:[]};
+    const apply=()=>{
+      try{
+        if(typeof map.isStyleLoaded==="function"&&!map.isStyleLoaded())return;
+        if(map.getSource("leg-gates")){map.getSource("leg-gates").setData(fc);return;}
+        map.addSource("leg-gates",{type:"geojson",data:fc});
+        if(!map.getLayer("leg-gate-in"))map.addLayer({id:"leg-gate-in",type:"line",source:"leg-gates",filter:["==",["get","kind"],"in"],paint:{"line-color":"#c026d3","line-width":2.2,"line-opacity":0.92,"line-dasharray":[0.1,0.1,1.2,0.1]}});
+        if(!map.getLayer("leg-gate-out"))map.addLayer({id:"leg-gate-out",type:"line",source:"leg-gates",filter:["==",["get","kind"],"out"],paint:{"line-color":"#06b6d4","line-width":2.2,"line-opacity":0.92,"line-dasharray":[1.1,0.7]}});
+      }catch(e){console.warn("[CourseMap] leg gates",e);}
+    };
+    if(typeof map.isStyleLoaded==="function"&&map.isStyleLoaded())requestAnimationFrame(apply);
+    else map.once("idle",apply);
+  },[legGatesFC,mapLoaded]);
+
+  useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     if(trackPoints&&trackPoints.length>1){
       const fc=trackSegmentFC&&trackSegmentFC.features?.length>=1?trackSegmentFC:buildTrackSegmentFeatureCollection(trackPoints,new Array(trackPoints.length).fill(false));
@@ -3309,6 +3421,11 @@ function App(){
   const [savedSummaryId,setSavedSummaryId]=useState(null);
   const [savedSummaryRow,setSavedSummaryRow]=useState(null);
   const [rawPoints,setRawPoints]=useState(null);
+  /** When true, interpolate extra samples on long gaps / long segments (helps Strava 1–2 Hz + gate hits). */
+  const [trackDensify,setTrackDensify]=useState(()=>{
+    try{return localStorage.getItem("sailstats_densify")!=="0";}catch(_){ return true; }
+  });
+  const [showMarkGates,setShowMarkGates]=useState(true);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
   const [windOvr,setWindOvr]=useState(null);
@@ -3355,6 +3472,15 @@ function App(){
   useEffect(()=>{
     try{localStorage.setItem(LS_BOAT_TYPE_KEY,boatType||"");}catch(_){}
   },[boatType]);
+  useEffect(()=>{
+    try{localStorage.setItem("sailstats_densify",trackDensify?"1":"0");}catch(_){}
+  },[trackDensify]);
+
+  const workPoints=useMemo(()=>{
+    if(!rawPoints||rawPoints.length<2)return rawPoints;
+    if(!trackDensify)return rawPoints;
+    return densifyGpsTrack(rawPoints,{maxStepM:5,maxTimeSec:2});
+  },[rawPoints,trackDensify]);
 
   const applyWorkerSession=useCallback((d)=>{
     if(!d||!d.ok||!d.supabase_access_token)return false;
@@ -3372,11 +3498,12 @@ function App(){
   },[]);
 
   const trackMeta=useMemo(()=>{
-    if(!rawPoints||rawPoints.length<2)return null;
-    const s=[...rawPoints].sort((a,b)=>a.time-b.time);
+    if(!workPoints||workPoints.length<2)return null;
+    const s=[...workPoints].sort((a,b)=>a.time-b.time);
     const t0=s[0].time,t1=s[s.length-1].time;
-    return{t0,t1,spanSec:t1-t0,n:s.length};
-  },[rawPoints]);
+    const rawN=rawPoints?.length||s.length;
+    return{t0,t1,spanSec:t1-t0,n:s.length,rawN,densifyOn:!!trackDensify&&s.length>rawN};
+  },[workPoints,rawPoints,trackDensify]);
 
   const cropStartSecParsed=useMemo(()=>{
     if(!trackMeta)return 0;
@@ -3394,9 +3521,9 @@ function App(){
   },[cropDurationText]);
 
   const croppedPoints=useMemo(()=>{
-    if(!rawPoints||rawPoints.length<2)return rawPoints;
-    return cropTrackPoints(rawPoints,cropStartSecParsed,cropDurationSecParsed);
-  },[rawPoints,cropStartSecParsed,cropDurationSecParsed]);
+    if(!workPoints||workPoints.length<2)return workPoints;
+    return cropTrackPoints(workPoints,cropStartSecParsed,cropDurationSecParsed);
+  },[workPoints,cropStartSecParsed,cropDurationSecParsed]);
 
   const croppedMeta=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<2)return null;
@@ -3762,10 +3889,10 @@ function App(){
 
   /** Full-track analysis used for start/finish and auto-crop detection. */
   const fullTrackAnalysis=useMemo(()=>{
-    if(!rawPoints||rawPoints.length<20)return null;
+    if(!workPoints||workPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(rawPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
-  },[rawPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
+    return runAnalysis(workPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
+  },[workPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   /** Cropped analysis used for displayed manoeuvres/statistics. */
   const setupMapAnalysis=useMemo(()=>{
@@ -3775,8 +3902,8 @@ function App(){
   },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   const startFinishStats=useMemo(()=>{
-    if(!rawPoints||rawPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
-    const pts=fullTrackAnalysis.points||rawPoints;
+    if(!workPoints||workPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
+    const pts=fullTrackAnalysis.points||workPoints;
     const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
     const startPt=startIdx>=0?pts[startIdx]:null;
     const bow=startPt?gpsPositionToBow(pts,startIdx,Number(gpsToBowM)||0):null;
@@ -3803,11 +3930,11 @@ function App(){
       if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
     return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
-  },[rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM]);
+  },[workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM]);
 
   useEffect(()=>{
-    if(!rawPoints||rawPoints.length<2||!startFinishStats)return;
-    const t0=rawPoints[0].time;
+    if(!workPoints||workPoints.length<2||!startFinishStats)return;
+    const t0=workPoints[0].time;
     const startRef=startFinishStats.startPointTime;
     if(!Number.isFinite(startRef))return;
     const cropStartAbs=Math.max(t0,startRef-15);
@@ -3818,11 +3945,11 @@ function App(){
     const nextDur=cropDurSec!=null?formatHMS(cropDurSec):"";
     if(cropStartText!==nextStart)setCropStartText(nextStart);
     if(cropDurationText!==nextDur)setCropDurationText(nextDur);
-  },[rawPoints,startFinishStats,cropStartText,cropDurationText]);
+  },[workPoints,startFinishStats,cropStartText,cropDurationText]);
 
   // Run analysis with current settings
   const doAnalysis=useCallback(async()=>{
-    if(!rawPoints||!croppedPoints||croppedPoints.length<20){if(rawPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
+    if(!workPoints||!croppedPoints||croppedPoints.length<20){if(workPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
     const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
@@ -3855,7 +3982,7 @@ function App(){
     }
     setProcessing(false);
   },[
-    rawPoints,
+    workPoints,
     croppedPoints,
     windOvr,
     courseMarkSeq,
@@ -4101,13 +4228,18 @@ function App(){
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
 
   const overviewStartBadges=useMemo(()=>{
-    if(!curAnalysis||!rawPoints?.length||!sfLineEnds)return null;
-    const si=nearestPointIndexByClockTime(rawPoints,raceStartSecParsed);
-    if(si<0||!rawPoints[si])return null;
-    const tSig=rawPoints[si].time;
+    if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
+    const si=nearestPointIndexByClockTime(workPoints,raceStartSecParsed);
+    if(si<0||!workPoints[si])return null;
+    const tSig=workPoints[si].time;
     const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
     return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM);
-  },[curAnalysis,rawPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis]);
+  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis]);
+
+  const markGateMapFC=useMemo(()=>{
+    if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
+    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,200);
+  },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
@@ -4809,8 +4941,18 @@ function App(){
         {trackMeta&&<div style={{background:C.card,borderRadius:10,padding:14,border:`1px solid ${C.bdr}`,marginBottom:16}}>
           <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Track crop (auto)</div>
           <div style={{fontSize:12,color:C.txM,lineHeight:1.5}}>
-            Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts)
+            Full recording: <strong style={{color:C.txt}}>{formatHMS(trackMeta.spanSec)}</strong> ({trackMeta.n} pts{trackMeta.densifyOn&&<span> · <span style={{color:C.acc}}>densified for analysis</span> (file {trackMeta.rawN} pts)</span>})
             {croppedMeta&&<span> · Auto-cropped: <strong style={{color:C.acc}}>{formatHMS(croppedMeta.durSec)}</strong> ({croppedMeta.n} pts)</span>}
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center",marginTop:10}}>
+            <label style={{fontSize:12,color:C.txt,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
+              <input type="checkbox" checked={trackDensify} onChange={e=>setTrackDensify(e.target.checked)}/>
+              Densify track (~5m / 2s) to help gappy / Strava GPS match gate lines
+            </label>
+            <label style={{fontSize:12,color:C.txt,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
+              <input type="checkbox" checked={showMarkGates} onChange={e=>setShowMarkGates(e.target.checked)}/>
+              Show mark in / out gate lines
+            </label>
           </div>
           <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
             Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
@@ -4849,8 +4991,14 @@ function App(){
               manoeuvres={setupMapAnalysis?{tacks:setupMapAnalysis.tacks,gybes:setupMapAnalysis.gybes}:null}
               startFinishLine={courseMapStartFinish}
               trackSegmentFC={setupMapAnalysis?.trackSegmentFC||null}
+              legGatesFC={markGateMapFC}
             />
-            <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}><span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Mark rounding (see Manoeuvres for rules) · All course marks draggable on map</div>
+            <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
+              <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
+              <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
+              <span style={{color:"#06b6d4"}}> ―</span> Out-gate (out) ·
+              <span style={{color:C.txD}}>Upwind leg VMG can use perp to mean leg COG (see doc) — not shown here.</span>
+            </div>
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
             <WindRose
