@@ -304,11 +304,12 @@ function nudgeGLabelM(lat,lon,idx){
   return enuMetersToLatLon(lat,lon,oE,oN);
 }
 /**
- * Map gates (magenta in / cyan out) — state machine when `windwardMarkName` is set:
+ * Map gates (magenta in / cyan out) — state machine when a mark counts as **windward** (field, name `Windward`, or upwind leg per below):
  * - **This = windward:** in = 45° from wind FROM (P/S); out = ⟂ to mark→next (chord +90, +display flip)
  * - **This ≠ W, next = windward:** in = ⟂ to prev→mark; out = U±135 (upwind leg entry) + display flip
  * - **Neither this nor next = windward:** in & out = chord ±90
- * If `windwardMarkName` is empty, in/out are both chord. Detection code unchanged; map is illustrative.
+ * Windward = user field, or name `Windward`, or track to/through mark is upwind (`isUpwindLegBearingVsWindDeg`).
+ * If none apply, in/out are chord. Detection unchanged; map is illustrative.
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
@@ -345,9 +346,9 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     const prRow=mi>0?fullSeq[mi-1]:null;
     const nxRow=mi+1<fullSeq.length?fullSeq[mi+1]:null;
     const wwm=String(windwardMarkName||"").trim();
-    const hasWw=wwm.length>0;
-    const isWm=hasWw&&isWindwardMarkNameMatch(name,wwm);
-    const isNextWm=hasWw&&!!nxRow&&isWindwardMarkNameMatch(String(nxRow.name||""),wwm);
+    const chOut=nextW?bear(curr.lat,curr.lon,nextW.lat,nextW.lon):null;
+    const isWm=isWindwardMarkForMapGates(name,wwm,chIn,wdf);
+    const isNextWm=!!nxRow&&nextW?isWindwardMarkForMapGates(String(nxRow.name||""),wwm,chOut,wdf):false;
     const ts=tack==='P'?-90:90;
     let inMode="ch";
     let inRayBr=null;
@@ -388,7 +389,6 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
       }
     }
     if(nextW&&prev){
-      const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
       const apU=Number.isFinite(wdf)&&tack?upwindEntryGateBearingTwd(tack,wdf):null;
       let outRayBr=((chOut+ts+360)%360+180)%360;
       let outMode="ch";
@@ -474,6 +474,21 @@ function upwindEntryGateBearingTwd(tack,windFromDeg){
 function isWindwardMarkNameMatch(currentMarkName,windwardMarkName){
   if(!currentMarkName||!windwardMarkName)return false;
   return String(currentMarkName).trim()===String(windwardMarkName).trim();
+}
+/** Bespoke course: mark name is literally "Windward" (case-insensitive). */
+function isNamedWindwardMark(markName){
+  return String(markName||"").trim().toLowerCase()==="windward";
+}
+/**
+ * For **map** gate rules: mark is "windward" if name matches user field, or name is `Windward`, or
+ * `legTowardMarkDeg` (track toward this or toward next) is in the upwind sector vs met wind FROM
+ * (same as `isUpwindLegBearingVsWindDeg` — 60° cone around upwind in sailing coords).
+ */
+function isWindwardMarkForMapGates(markName,windwardFieldName,legTowardMarkDeg,windFromDeg){
+  if(isNamedWindwardMark(markName))return true;
+  if(windwardFieldName&&String(windwardFieldName).trim()&&isWindwardMarkNameMatch(markName,windwardFieldName))return true;
+  if(Number.isFinite(legTowardMarkDeg)&&Number.isFinite(windFromDeg)&&isUpwindLegBearingVsWindDeg(legTowardMarkDeg,windFromDeg))return true;
+  return false;
 }
 /**
  * Upwind / windward in-gate: use 135°-from-upwind when tack+wind and (|approach−upwind|≤15° or mark is the named windward mark).
@@ -5261,8 +5276,8 @@ function App(){
             <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
               <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
               <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
-              <span style={{color:"#06b6d4"}}> ―</span> Out: <code style={{fontSize:9}}>ch</code> at windward; <code style={{fontSize:9}}>U135</code> when this mark isn&apos;t W but next is ·
-              <span style={{color:C.txD}}> <code style={{fontSize:9}}>#N</code> in <code style={{fontSize:9}}>W45</code>|<code style={{fontSize:9}}>ch</code> · <code style={{fontSize:9}}>#N</code> out <code style={{fontSize:9}}>ch</code>|<code style={{fontSize:9}}>U135</code> · nudged · map ≠ full detection · </span>
+              <span style={{color:"#06b6d4"}}> ―</span> Out: <code style={{fontSize:9}}>ch</code> at a windward mark; <code style={{fontSize:9}}>U135</code> when this mark isn&apos;t windward but the next is ·
+              <span style={{color:C.txD}}> <code style={{fontSize:9}}>#N</code> in <code style={{fontSize:9}}>W45</code>|<code style={{fontSize:9}}>ch</code> · <code style={{fontSize:9}}>#N</code> out <code style={{fontSize:9}}>ch</code>|<code style={{fontSize:9}}>U135</code> · windward = Setup field, name <code style={{fontSize:9}}>Windward</code>, or upwind track to/next mark (vs wind FROM) · nudged · map ≠ full detection · </span>
               <span style={{color:C.txD}}>Upwind det. uses same COG as engine — not shown on lines.</span>
             </div>
           </div>
