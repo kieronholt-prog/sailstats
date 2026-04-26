@@ -259,8 +259,22 @@ function enuMetersToLatLon(lat0,lon0,xM,yM){
   return{lat:lat0+yM/111320,lon:lon0+xM/(111320*Math.cos(lat0*D))};
 }
 /**
- * Inbound / outbound mark gates as drawn on the map — same lines as `detectMarkInboundOutboundGates` uses
- * (through mark B ⊥ chord prev→mark, and through mark A ⊥ chord mark→next).
+ * One **ray** from the mark, bearing °T, length ≈`halfLenM` (m) forward and small inset the other way.
+ * Aligns with gate logic: S → base+90, P → base−90 from chord or from U±135 upwind line.
+ */
+function segmentOneRayBearingTwd(latM,lonM,rayBearingDeg,halfLenM=200){
+  const f=Math.max(10,halfLenM);
+  const o=Math.min(5,f*0.03);
+  const θ=Number(rayBearingDeg)*D;
+  const forw={x:Math.sin(θ)*f,y:Math.cos(θ)*f};
+  const back={x:Math.sin(θ+Math.PI)*o,y:Math.cos(θ+Math.PI)*o};
+  const ex=enuMetersToLatLon(latM,lonM,forw.x,forw.y);
+  const in0=enuMetersToLatLon(latM,lonM,back.x,back.y);
+  return[[in0.lon,in0.lat],[ex.lon,ex.lat]];
+}
+/**
+ * **Legacy** full line through B ⟂ to prev→mark (only if no `nextW` in debug layer).
+ * Inbound / outbound mark gates on the map — match `detectMarkInboundOutboundGates` (U±135 / chord+S/P, wind).
  */
 function segmentGateThroughBPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   const b=enuMeters(latA,lonA,latB,lonB);
@@ -281,49 +295,10 @@ function segmentGateThroughAPerpChord(latA,lonA,latB,lonB,halfLenM=180){
   return[[p1.lon,p1.lat],[p2.lon,p2.lat]];
 }
 /**
- * **Out** gate: only the ray of the ⊥(mark→next) line in the small-angle wedge between
- * the inbound (prev→mark) and outbound (mark→next) legs — the side of a reach–reach.
- * (The same infinite line has a spurious 180° opposite; detection below ignores those crossings too.)
- * Pick `pick∈{±1}` so the ray matches the half-line you'd cross when *entering* the next-mark + side
- * (same idea as s0<0→s1>0 on `sideOfPerpAtA`): t̂ and inbound should lie on the same side of
- * the outbound mark→next line — i.e. `b×a` and `b×(pick*t̂)` have the same sign, with bisector
- * fallback when a∥b.
+ * GeoJSON line features for “in” (magenta) and “out” (cyan) at each mark.
+ * Upwind **U±135** in-gate when (15° to upwind **or** named windward mark) and tack+wind; else chord, S: +90°, P: −90° from base.
  */
-function segmentOutboundGateRayInWedge(latM,lonM,latP,latN,lonN,halfLenM=200){
-  const dMN=enuMeters(latM,lonM,latN,lonN);
-  const lMN=Math.hypot(dMN.x,dMN.y);
-  if(lMN<0.1)return null;
-  const mToP=enuMeters(latM,lonM,latP,latP);
-  const lP=Math.hypot(mToP.x,mToP.y);
-  if(lP<0.1)return null;
-  const tnx=-dMN.y/lMN, tny=dMN.x/lMN;
-  const a={x:-mToP.x/lP,y:-mToP.y/lP};
-  const b={x:dMN.x/lMN,y:dMN.y/lMN};
-  const cBA=b.x*a.y-b.y*a.x;
-  const cBT0=b.x*tny-b.y*tnx;
-  let pick=1;
-  if(cBA*cBA>1e-20){
-    pick=(cBT0*cBA>=0)?1:-1;
-  }else{
-    const sum={x:a.x+b.x,y:a.y+b.y};
-    const lS=Math.hypot(sum.x,sum.y);
-    if(lS>=1e-6){
-      const nx=sum.x/lS,ny=sum.y/lS;
-      pick=(tnx*nx+tny*ny)>=0?1:-1;
-    }else
-      pick=(cBT0>=0)?1:-1;
-  }
-  const f=Math.max(10,halfLenM);
-  const o=Math.min(5,f*0.03);
-  const ex=enuMetersToLatLon(latM,lonM,pick*tnx*f,pick*tny*f);
-  const inM=enuMetersToLatLon(latM,lonM,-pick*tnx*o,-pick*tny*o);
-  return[[inM.lon,inM.lat],[ex.lon,ex.lat]];
-}
-/**
- * GeoJSON line features for “in” (magenta) and “out” (cyan) gates at each mark in the expanded course
- * (committee midpoint used for S/F). Matches rounding detection, not the upwind “mean COG” leg variant.
- */
-function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
+function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
   if(!markPositions.length)return{type:"FeatureCollection",features:[]};
   const fullSeq=expandCourseMarks(preamble,markPositions,Math.max(1,Number(laps)||1));
@@ -350,12 +325,26 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
       const nx=fullSeq[mi+1];
       nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
     }else if(sfMid)nextW=sfMid;
+    const tack=m.tack??null;
+    const wdf=Number(windFromDeg);
+    const chIn=prev?bear(prev.lat,prev.lon,curr.lat,curr.lon):null;
+    const inU135=!!tack&&chIn!=null&&Number.isFinite(wdf)&&useUpwindEntryGateBearing(chIn,wdf,String(m.name||""),windwardMarkName);
+    const baseIn=inU135&&tack?upwindEntryGateBearingTwd(tack,wdf):chIn;
+    const inRayBr=chIn==null?null:((inU135&&baseIn==null?chIn:baseIn)+(tack==='P'?-90:90)+360)%360;
     if(prev){
-      const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
-      if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+      if(nextW){
+        if(inRayBr==null)continue;
+        const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,inRayBr,halfLenM);
+        if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+      }else{
+        const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
+        if(seg)feats.push({type:"Feature",properties:{kind:"in",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg}});
+      }
     }
     if(nextW&&prev){
-      const seg2=segmentOutboundGateRayInWedge(curr.lat,curr.lon,prev.lat,nextW.lat,nextW.lon,halfLenM);
+      const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
+      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360);
+      const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
       if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
     }else if(nextW){
       const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
@@ -384,40 +373,79 @@ function sideOfPerpAtB(latA,lonA,latB,lonB,latP,lonP){
   if(Math.hypot(b.x,b.y)<0.1)return 0;
   return (p.x-b.x)*b.x+(p.y-b.y)*b.y;
 }
-/**
- * Gate through A, ⊥ to boat COG: line through A with normal in direction of travel (E,N) — (P−A)·û = 0 on the beam.
- */
-function sideOfPerpAtABearing(latA,lonA,bearingDeg,latP,lonP){
-  const θ=Number(bearingDeg)*D;
-  const ux=Math.sin(θ),uy=Math.cos(θ);
-  const p=enuMeters(latA,lonA,latP,lonP);
-  return p.x*ux+p.y*uy;
-}
-function sideOfPerpAtBBearing(latB,lonB,bearingDeg,latP,lonP){
-  const θ=Number(bearingDeg)*D;
-  const ux=Math.sin(θ),uy=Math.cos(θ);
-  const p=enuMeters(latB,lonB,latP,lonP);
-  return p.x*ux+p.y*uy;
-}
-/** Circular mean of valid COG on [i0..i1]; if too sparse, return great-circle bearing of endpoints. */
-function meanCogOnTrackSegment(pts,i0,i1){
-  if(!pts?.length)return null;
-  const a=Math.max(0,Math.min(i0|0,pts.length-1));
-  const b=Math.max(a,Math.min(i1|0,pts.length-1));
-  const cogs=[];
-  for(let i=a;i<=b;i++){
-    const c=pts[i].cog;
-    if(Number.isFinite(c))cogs.push(c);
-  }
-  if(cogs.length>=3)return circularMeanStdDeg(cogs).mean;
-  if(b>a)return bear(pts[a].lat,pts[a].lon,pts[b].lat,pts[b].lon);
-  return null;
-}
 /** Same upwind test as classifyLegs: rel=(legBearing−wd+360)%360, upwind if rel<60 or rel>300. */
 function isUpwindLegBearingVsWindDeg(legBearing,wdFrom){
   if(!Number.isFinite(legBearing)||!Number.isFinite(wdFrom))return false;
   const rel=((legBearing-wdFrom+360)%360);
   return rel<60||rel>300;
+}
+const NEAR_UPWIND_DEG=15;
+/** `windFrom` meteorological: direction **to** the wind = `(windFrom+180)%360`. */
+function upwindBearingTwdFromWindFromDeg(wdF){
+  return((Number(wdF)+180)%360);
+}
+/**
+ * `legBearing` along approach (e.g. last→this mark) within ±NEAR_UPWIND_DEG of the **upwind** bearing
+ * `(windFrom+180)%360` (into wind) — one trigger for the **U±135** leg entry gate. Also see `useUpwindEntryGateBearing` + named windward mark.
+ */
+function isNearUpwindApproach15Deg(legBearing,windFromDeg){
+  if(!Number.isFinite(legBearing)||!Number.isFinite(windFromDeg))return false;
+  const u=upwindBearingTwdFromWindFromDeg(windFromDeg);
+  return Math.abs(adiff(legBearing,u))<=NEAR_UPWIND_DEG;
+}
+/**
+ * “Leg entry” / upwind in-gate **along-approach** direction (°T, clockwise from N). Let
+ * `U = (windFrom+180)%360` (into wind). Stbd: `U−135`; Port: `U+135`.
+ */
+function upwindEntryGateBearingTwd(tack,windFromDeg){
+  if(!Number.isFinite(windFromDeg))return null;
+  const U=upwindBearingTwdFromWindFromDeg(windFromDeg);
+  if(tack==="P")return(U+135)%360;
+  if(tack==="S"||tack==null||tack==="")return(U-135+360)%360;
+  return(U+135)%360;
+}
+function isWindwardMarkNameMatch(currentMarkName,windwardMarkName){
+  if(!currentMarkName||!windwardMarkName)return false;
+  return String(currentMarkName).trim()===String(windwardMarkName).trim();
+}
+/**
+ * Upwind / windward in-gate: use 135°-from-upwind when tack+wind and (|approach−upwind|≤15° or mark is the named windward mark).
+ */
+function useUpwindEntryGateBearing(legBearing,windFromDeg,markName,windwardMarkName){
+  if(!Number.isFinite(windFromDeg)||!Number.isFinite(legBearing))return false;
+  if(isNearUpwindApproach15Deg(legBearing,windFromDeg))return true;
+  if(windwardMarkName&&isWindwardMarkNameMatch(markName,windwardMarkName))return true;
+  return false;
+}
+function tackSignGates(tack){
+  if(tack==="P")return-1;
+  return 1;
+}
+/**
+ * ENU (E,N) offset in m: `sin(θ), cos(θ)` for bearing **θ** °T. Length `scaleM` (m) in that direction.
+ */
+function enuVecFromBearingMetersTwd(bearingDeg,scaleM){
+  const θ=Number(bearingDeg)*D;
+  const f=Number(scaleM);
+  if(!Number.isFinite(f)||f<0.1)return{x:0,y:0};
+  return{x:Math.sin(θ)*f,y:Math.cos(θ)*f};
+}
+/**
+ * `sideOfPerpAtA`: line through A, ⟂ to chord along `b` in A’s ENU. Here `b` = normal (A→B) in m at A.
+ */
+function sideValuePerpAtAChordEnuA(latA,lonA,latP,lonP,bEnuX,bEnuY){
+  const p=enuMeters(latA,lonA,latP,latP);
+  if(Math.hypot(bEnuX,bEnuY)<0.1)return 0;
+  return p.x*bEnuX+p.y*bEnuY;
+}
+/**
+ * Line through B, ⟂ to chord, normal in A’s ENU = bNorm (same as sideOfPerpAtB for real chord).
+ * `bB` = (B−A) in A’s; `bNorm` = gate normal in A (any length, non-zero).
+ */
+function sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,latP,lonP,bBEnuX,bBEnuY,bNormX,bNormY){
+  const p=enuMeters(latA,lonA,latP,latP);
+  if(Math.hypot(bNormX,bNormY)<0.1)return 0;
+  return(p.x-bBEnuX)*bNormX+(p.y-bBEnuY)*bNormY;
 }
 const LEG_CHORD_MIN_M=3;
 function segmentSignCrosses(s0,s1){
@@ -501,15 +529,17 @@ function alongChordFromMToN(latM,lonM,latP,lonP,latN,lonN){
   if(l<0.1)return 0;
   return(p.x*d.x+p.y*d.y)/l;
 }
-const OUTBOUND_MIN_ALONG_B_M=0.5;
-const OUTBOUND_MIN_ALONG_AT_CROSS_M=0.15;
-/** Loose fallback: same s0<0 && s1>0 and side-of-gate; only `along` thresholds are smaller. */
-const OUTBOUND_LOOSE_MIN_ALONG_AT_CROSS_M=0.05;
-const OUTBOUND_LOOSE_MIN_ALONG_B_M=0.2;
+/** After outbound crossing, boat must be “forward” toward next mark along M→N (m); rejects the spurious
+ * same-line crossing on the “back” sector. (Do **not** use `along` *at* the gate line: on the ⊥, projection
+ * onto M→N is 0, so a threshold at the interpolated crossing rejected every real exit — bug introduced in the
+ * spurious-line fix.) */
+const OUTBOUND_MIN_ALONG_B_M=0.15;
+const OUTBOUND_LOOSE_MIN_ALONG_B_M=0.08;
 /**
  * `sideOfPerpAtA(M,N,P) = p·(N−M)`; next mark is on the **positive** side. A valid *exit* crossing
  * **enters** that half (s0<0, s1>0) — not the opposite flip (s0>0, s1<0) which is leaving “toward next”.
- * Stops a spurious “third” detection on the same infinite line. Also enforces `along` at interpolated crossing + b.
+ * Stops a spurious “third” detection on the same infinite line. Also requires forward `along` at segment end `b` only
+ * (see constants above).
  */
 function firstValidOutboundPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon,latN,lonN){
   const sF=Math.max(0,Math.floor(iStart|0));
@@ -520,16 +550,6 @@ function firstValidOutboundPerpCrossing(pts,iStart,jEnd,sideAt,tack,mLat,mLon,la
     if(!segmentSignCrosses(s0,s1))continue;
     if(!(s0<0&&s1>0))continue;
     if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
-    const den=s0-s1;
-    let cx=b.lat,cb=b.lon;
-    if(Number.isFinite(den)&&Math.abs(den)>=1e-15){
-      const t=s0/den;
-      if(t>0&&t<1){
-        cx=a.lat+(b.lat-a.lat)*t;
-        cb=a.lon+(b.lon-a.lon)*t;
-      }
-    }
-    if(alongChordFromMToN(mLat,mLon,cx,cb,latN,lonN)<OUTBOUND_MIN_ALONG_AT_CROSS_M)continue;
     if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<OUTBOUND_MIN_ALONG_B_M)continue;
     return j;
   }
@@ -544,33 +564,43 @@ function firstValidOutboundPerpCrossingLoose(pts,iStart,jEnd,sideAt,tack,mLat,mL
     if(!segmentSignCrosses(s0,s1))continue;
     if(!(s0<0&&s1>0))continue;
     if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
-    const den=s0-s1;
-    let cx=b.lat,cb=b.lon;
-    if(Number.isFinite(den)&&Math.abs(den)>=1e-15){
-      const t=s0/den;
-      if(t>0&&t<1){
-        cx=a.lat+(b.lat-a.lat)*t;
-        cb=a.lon+(b.lon-a.lon)*t;
-      }
-    }
-    if(alongChordFromMToN(mLat,mLon,cx,cb,latN,lonN)<OUTBOUND_LOOSE_MIN_ALONG_AT_CROSS_M)continue;
     if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<OUTBOUND_LOOSE_MIN_ALONG_B_M)continue;
     return j;
   }
   return-1;
 }
 /**
- * Inbound gate: line through mark ⊥ to (prev → mark). Outbound gate: line through mark ⊥ to (mark → next).
- * Rounded only if both are crossed; tack (P| S) = mark to port|starboard of bow at that crossing. tack null: any.
+ * Inbound: mark B ⟂ to normal along prev→mark, or to **U±135** when `useUpwindEntryGateBearing` (15° to upwind
+ * or named windward mark) and tack. Outbound: ⟂ to M→Next with
+ * S/P = multiply side by +1/−1 (same infinite line, opposite “half-space” for crossings).
+ * Rounded only if both are crossed; perpCrossingSatisfiesMarkTack unchanged.
  */
-function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
+function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windFromDeg=null,currentMarkName=null,windwardMarkName=null){
   const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
   const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
   if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{ok:false};
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
-  const sideIn=pp=>sideOfPerpAtB(prev.lat,prev.lon,curr.lat,curr.lon,pp.lat,pp.lon);
-  const sideOut=pp=>sideOfPerpAtA(curr.lat,curr.lon,next.lat,next.lon,pp.lat,pp.lon);
+  const ts=tackSignGates(tack);
+  const chIn=bear(prev.lat,prev.lon,curr.lat,curr.lon);
+  const wdf=Number(windFromDeg);
+  const useU135=!!tack&&Number.isFinite(wdf)&&useUpwindEntryGateBearing(chIn,wdf,currentMarkName,windwardMarkName);
+  const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
+  const bPrevMark=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
+  const bBIn=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
+  let bInNormX,bInNormY;
+  if(useU135&&apU!=null){
+    const s=enuVecFromBearingMetersTwd(apU,Math.max(c1,1));
+    bInNormX=s.x;bInNormY=s.y;
+  }else{
+    bInNormX=bPrevMark.x*ts;bInNormY=bPrevMark.y*ts;
+  }
+  const sideIn=pp=>{
+    const v=sideValuePerpAtBChordEnuA(prev.lat,prev.lon,curr.lat,curr.lon,pp.lat,pp.lon,bBIn.x,bBIn.y,bInNormX,bInNormY);
+    return useU135?v*ts:v;
+  };
+  const bOut0=enuMeters(curr.lat,curr.lon,next.lat,next.lon);
+  const sideOut=pp=>sideValuePerpAtAChordEnuA(curr.lat,curr.lon,pp.lat,pp.lon,bOut0.x*ts,bOut0.y*ts);
   const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideIn,tack,curr.lat,curr.lon);
   if(eIn<0)return{ok:false};
   let eOut=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
@@ -582,31 +612,44 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack){
   return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
 }
 /**
- * Leg = track from first crossing of the ⊥ at A to the gate at A, to first crossing of ⊥ at B to the gate at B.
- * Default gates are ⊥ to chord A↔B; when the same upwind test as classifyLegs on a leg-bearing proxy
- * (track from search to fbEnd, else chord A↔B) passes, and mean leg COG is available, both gates are ⊥ to mean leg COG.
- * A,B are mark centres, or the start/finish line midpoint (committee line) when from/to is START/FINISH.
- * START leg: distance from S/F to bow (GPS + gpsToBowM along COG) — see startLineDistanceSignedM (signed).
- * Other from-marks: legacy mark_path_m along ⊥ when not using perp_in_out from roundings.
+ * Leg = track from first crossing of the ⊥ at A to the second ⊥ at B.
+ * Gates: (1) if `useUpwindEntryGateBearing(leg, wind, toMark, windward)` and both tacks, ⊥ to **U±135** at A and B;
+ * (2) else chord A→B, normal **×S/P** (+1 stbd, −1 port). A,B: mark centroids or S/F mid. No COG for perp.
+ * START: committee/bow (COG) only for **distance to line**, not the ⊥ geometry.
  */
-function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM,windFromDeg=null){
+function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM,windFromDeg=null,tackFrom=null,tackTo=null,toMarkName=null,windwardMarkName=null){
   const c=hav(latA,lonA,latB,lonB);
   if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
   const s0=Math.max(0,searchFrom|0),idxEnd=fbEnd|0;
-  const legMeanC=meanCogOnTrackSegment(pts,s0,idxEnd);
   const wdF=Number(windFromDeg);
-  let legBearingProxy=null;
-  if(idxEnd>s0&&pts[s0]&&pts[idxEnd])
-    legBearingProxy=bear(pts[s0].lat,pts[s0].lon,pts[idxEnd].lat,pts[idxEnd].lon);
-  if(legBearingProxy==null||!Number.isFinite(legBearingProxy))
-    legBearingProxy=bear(latA,lonA,latB,lonB);
-  const wantCogGates=isUpwindLegBearingVsWindDeg(legBearingProxy,wdF)&&Number.isFinite(legMeanC);
-  const sideA=wantCogGates
-    ?(p)=>sideOfPerpAtABearing(latA,lonA,legMeanC, p.lat,p.lon)
-    :(p)=>sideOfPerpAtA(latA,lonA, latB,lonB, p.lat,p.lon);
-  const sideB=wantCogGates
-    ?(p)=>sideOfPerpAtBBearing(latB,lonB,legMeanC, p.lat,p.lon)
-    :(p)=>sideOfPerpAtB(latA,lonA, latB,lonB, p.lat,p.lon);
+  const chLeg=bear(latA,lonA,latB,lonB);
+  let useU135=!!tackFrom&&!!tackTo&&Number.isFinite(wdF)&&useUpwindEntryGateBearing(chLeg,wdF,toMarkName,windwardMarkName);
+  const bChord=enuMeters(latA,lonA,latB,lonB);
+  const bB=enuMeters(latA,lonA,latB,lonB);
+  const tsA=tackSignGates(tackFrom);
+  const tsB=tackSignGates(tackTo);
+  let bNormAx,bNormAy,bNormBx,bNormBy;
+  if(useU135){
+    const apA=upwindEntryGateBearingTwd(tackFrom,wdF),apB=upwindEntryGateBearingTwd(tackTo,wdF);
+    if(apA!=null&&apB!=null){
+      const sA=enuVecFromBearingMetersTwd(apA,Math.max(c,1));
+      const sB=enuVecFromBearingMetersTwd(apB,Math.max(c,1));
+      bNormAx=sA.x;bNormAy=sA.y;
+      bNormBx=sB.x;bNormBy=sB.y;
+      if(Math.hypot(bNormAx,bNormAy)<0.1||Math.hypot(bNormBx,bNormBy)<0.1)useU135=false;
+    }else
+      useU135=false;
+  }
+  if(!useU135){
+    bNormAx=bChord.x*tsA;bNormAy=bChord.y*tsA;
+    bNormBx=bChord.x*tsB;bNormBy=bChord.y*tsB;
+  }
+  const sideA=useU135
+    ?(p)=>sideValuePerpAtAChordEnuA(latA,lonA,p.lat,p.lon,bNormAx,bNormAy)*tsA
+    :(p)=>sideValuePerpAtAChordEnuA(latA,lonA,p.lat,p.lon,bNormAx,bNormAy);
+  const sideB=useU135
+    ?(p)=>sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,p.lat,p.lon,bB.x,bB.y,bNormBx,bNormBy)*tsB
+    :(p)=>sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,p.lat,p.lon,bB.x,bB.y,bNormBx,bNormBy);
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
@@ -2512,7 +2555,7 @@ function computeRoundingPointMask(pts,details,baselines){
   return mask;
 }
 
-function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2,windFromDeg=null){
+function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2,windFromDeg=null,windwardMarkName=null){
   const legs=[];
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
   if(fullSeq.length<2)return{legs,roundings:[]};
@@ -2542,7 +2585,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
     }else if(sfMid)nextW=sfMid;
     if(!prev||!nextW)return{legs,roundings:[]};
-    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null);
+    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName);
     if(!g2.ok)return{legs,roundings:[]};
     const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
     roundings.push({
@@ -2587,7 +2630,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     let startIdx=si,endIdx=ei,roundingM=0,roundingStraightM=null,legPathDef="closest",roundingKind=null;
     let startLineDistanceM=null;
     if(wA&&wB){
-      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg);
+      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg,r0.tack??null,r1.tack??null,String(r1.mark||""),windwardMarkName);
       startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;roundingStraightM=null;
       if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
       if(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)startIdx=r0.exitIdx;
@@ -3006,7 +3049,7 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
-function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null,gpsToBowM=2){
+function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null,gpsToBowM=2,windwardMarkName=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
   const deduped=sorted.filter((p,i)=>i===0||p.time!==sorted[i-1].time);
@@ -3030,7 +3073,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const markLocList=allCourseMarkLocations(markPositions,preamble,laps);
   let legDetection=null;
   if(expandCourseMarks(preamble,markPositions||[],laps).length>=2)
-    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM,wd);
+    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM,wd,windwardMarkName);
   const roundingIdxs=legDetection?.roundings?.map(r=>r.idx).filter(i=>Number.isFinite(i)&&i>=0)??[];
   for(const m of manoeuvreEvents){
     const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
@@ -3159,6 +3202,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   return{
     points:en,
     windDir:wd,
+    legGatesWindwardMark:(windwardMarkName==null||windwardMarkName==="")?null:String(windwardMarkName).trim(),
     windEst,
     windTrace,
     windStats,
@@ -4003,15 +4047,15 @@ function App(){
   const fullTrackAnalysis=useMemo(()=>{
     if(!workPoints||workPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(workPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
-  },[workPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
+    return runAnalysis(workPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
+  },[workPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
   /** Cropped analysis used for displayed manoeuvres/statistics. */
   const setupMapAnalysis=useMemo(()=>{
     if(!croppedPoints||croppedPoints.length<20)return null;
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
-  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
+    return runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
+  },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
   const startFinishStats=useMemo(()=>{
     if(!workPoints||workPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
@@ -4064,7 +4108,7 @@ function App(){
     if(!workPoints||!croppedPoints||croppedPoints.length<20){if(workPoints)alert("Track too short after crop — widen the time window or reset crop.");return;}
     setProcessing(true);
     const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
+    const result=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
     if(!result){
       setProcessing(false);
       alert("Analysis could not run — need at least 20 GPS points in the cropped track. Widen the crop or check the file.");
@@ -4331,13 +4375,15 @@ function App(){
     if(croppedPoints.length<20)return analysis;
     const windChg=windOvr!==null&&windOvr!==analysis.windDir;
     const bowChg=Number(gpsToBowM)!==Number(analysis.gpsToBowM??DEFAULT_GPS_TO_BOW_M);
-    if(windChg||bowChg){
+    const wm0=String(windwardMarkName||"").trim();
+    const wm1=String(analysis.legGatesWindwardMark||"").trim();
+    if(windChg||bowChg||wm0!==wm1){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
-      const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM);
+      const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
       if(recalc!=null)return recalc;
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
   const overviewStartBadges=useMemo(()=>{
     if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
@@ -4350,8 +4396,10 @@ function App(){
 
   const markGateMapFC=useMemo(()=>{
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
-    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,200);
-  },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps]);
+    const wn=windOvr!=null&&Number.isFinite(windOvr)?windOvr:curAnalysis?.windDir;
+    const wwm=String(windwardMarkName||"").trim()||null;
+    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,200,wn!=null?Number(wn):null,wwm);
+  },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps,windOvr,curAnalysis?.windDir,windwardMarkName]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
