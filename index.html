@@ -330,7 +330,8 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     const chIn=prev?bear(prev.lat,prev.lon,curr.lat,curr.lon):null;
     const inU135=!!tack&&chIn!=null&&Number.isFinite(wdf)&&useUpwindEntryGateBearing(chIn,wdf,String(m.name||""),windwardMarkName);
     const baseIn=inU135&&tack?upwindEntryGateBearingTwd(tack,wdf):chIn;
-    const inRayBr=chIn==null?null:((inU135&&baseIn==null?chIn:baseIn)+(tack==='P'?-90:90)+360)%360;
+    /** Rays in the "forward" along-gate half-line; +180 flips the displayed half to match the boat's inbound/outbound wedge. */
+    const inRayBr=chIn==null?null:(((inU135&&baseIn==null?chIn:baseIn)+(tack==='P'?-90:90)+360)%360+180)%360;
     if(prev){
       if(nextW){
         if(inRayBr==null)continue;
@@ -343,7 +344,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     }
     if(nextW&&prev){
       const chOut=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
-      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360);
+      const outRayBr=((chOut+(tack==='P'?-90:90)+360)%360+180)%360;
       const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
       if(seg2)feats.push({type:"Feature",properties:{kind:"out",mark:name,lap:Number(m.lap)||0},geometry:{type:"LineString",coordinates:seg2}});
     }else if(nextW){
@@ -1023,7 +1024,7 @@ const WSC_COURSES={
   "P":{name:"P — SC",marks:[["PILE 2","S"],["WARSASH SC","P"],["HAMBLE PT","P"],["PILE 5","P"]],type:"SC"},
   "Q":{name:"Q — SC (HW)",marks:[["LAID MK C","P"],["WARSASH SC","P"],["PILE 2","P"]],marksPreamble:[["PILE 2","S"]],type:"SC"},
   "R":{name:"R — MC (HW)",marks:[["PILE 2","S"],["WARSASH SC","S"],["PILE 10","S"]],type:"MC"},
-  "S":{name:"S — MC",marks:[["WILLIAM","S"],["LAID MK D","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
+  "S":{name:"S — MC",marks:[["WILLIAM","S"],["LAID MK D","S"],["HAMBLE PT","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
   "T":{name:"T — MC",marks:[["BALD HEAD","P"],["CORONATION","P"],["WILLIAM","P"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
   "U":{name:"U — MC",marks:[["WILLIAM","S"],["CORONATION","S"],["HAMBLE PT","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"MC"},
   "V":{name:"V — LC",marks:[["CHIEFTAIN TR","S"],["FUMESY","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
@@ -2350,6 +2351,16 @@ function expandCourseMarks(preamble,lapMarks,laps){
   }
   return fullSeq;
 }
+/** Fingerprint of expanded mark order + S/F for invalidating leg/gate analysis when anything moves. */
+function courseGeometrySignature(preambleWithPos,lapWithPos,nLaps,sfEnds){
+  const nL=Math.max(1,Number(nLaps)||1);
+  const pre=preambleWithPos&&preambleWithPos.length?preambleWithPos:[];
+  const lap=lapWithPos||[];
+  const seq=expandCourseMarks(pre,lap,nL);
+  const sPart=seq.map(m=>([m.name,Number(m.lat).toFixed(5),Number(m.lon).toFixed(5),m.tack??"",m.lap|0].join("\t"))).join("\n");
+  const sf=sfEnds?.endA&&sfEnds?.endB?`${Number(sfEnds.endA.lat).toFixed(5)},${Number(sfEnds.endA.lon).toFixed(5)},${Number(sfEnds.endB.lat).toFixed(5)},${Number(sfEnds.endB.lon).toFixed(5)}`:"";
+  return `${sPart}|L${nL}|${sf}`;
+}
 
 function closestIndexToLine(pts,endA,endB,fromIdx,toIdx){
   let bestIdx=-1,bestDist=Infinity;
@@ -3202,6 +3213,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   return{
     points:en,
     windDir:wd,
+    courseGeometrySignature:courseGeometrySignature(preamble,markPositions,laps,startFinishLine),
     legGatesWindwardMark:(windwardMarkName==null||windwardMarkName==="")?null:String(windwardMarkName).trim(),
     windEst,
     windTrace,
@@ -3920,30 +3932,47 @@ function App(){
     setProcessing(false);
   },[]);
 
-  // Get effective mark positions for selected course
+  // Get effective mark positions for selected course; roundTack = single P/S in expanded order, or null if mixed
   const effectiveMarks=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return{};
     const course=WSC_COURSES[courseLetter];
-    const rowsInOrder=[...(course.marksPreamble||[]),...(course.marks||[])].map(parseMarkSpec).filter(r=>r.name);
-    const tackFirst={};
-    rowsInOrder.forEach(r=>{ if(!Object.prototype.hasOwnProperty.call(tackFirst,r.name)) tackFirst[r.name]=r.tack; });
-    const uniqueNames=[...new Set(rowsInOrder.map(r=>r.name))];
+    const posForName=name=>{
+      const base=WSC_MARKS[name];
+      if(!base)return null;
+      const ovr=markOverrides[name];
+      return{lat:ovr?ovr.lat:base.lat,lon:ovr?ovr.lon:base.lon};
+    };
+    const preRows=(course.marksPreamble||[]).map(parseMarkSpec).filter(r=>r.name);
+    const mainRows=(course.marks||[]).map(parseMarkSpec).filter(r=>r.name);
+    const preWith=preRows.map(r=>{ const p=posForName(r.name); return p?{name:r.name,lat:p.lat,lon:p.lon,tack:r.tack}:null; }).filter(Boolean);
+    const mainWith=mainRows.map(r=>{ const p=posForName(r.name); return p?{name:r.name,lat:p.lat,lon:p.lon,tack:r.tack}:null; }).filter(Boolean);
+    const fullSeq=expandCourseMarks(preWith.length?preWith:[],mainWith,Math.max(1,Number(laps)||1));
+    const tackSetByName={};
+    for(const row of fullSeq){
+      if(!row.name||!row.tack)continue;
+      if(!tackSetByName[row.name])tackSetByName[row.name]=new Set();
+      tackSetByName[row.name].add(row.tack);
+    }
+    const uniqueNames=[...new Set([...preRows,...mainRows].map(r=>r.name))];
     const marks={};
     uniqueNames.forEach(name=>{
       const base=WSC_MARKS[name];
       if(!base)return;
       const ovr=markOverrides[name];
+      const ts=tackSetByName[name];
+      let roundTack=null;
+      if(ts&&ts.size===1)roundTack=[...ts][0];
       marks[name]={
         lat:ovr?ovr.lat:base.lat,
         lon:ovr?ovr.lon:base.lon,
         fixed:false,
         desc:base.desc||"",
         name,
-        roundTack:tackFirst[name]||null,
+        roundTack,
       };
     });
     return marks;
-  },[courseLetter,markOverrides]);
+  },[courseLetter,markOverrides,laps]);
 
   const windTuning=useMemo(()=>{
     const n=windwardMarkName&&String(windwardMarkName).trim();
@@ -4369,7 +4398,13 @@ function App(){
     await openStravaSetup(act);
   },[openCourseSetupFromSavedRow,openStravaSetup]);
 
-  // Re-run when wind changes
+  const courseGeomSig=useMemo(()=>courseGeometrySignature(
+    coursePreambleSeq&&coursePreambleSeq.length?coursePreambleSeq:[],
+    courseMarkSeq||[],
+    laps,
+    sfLineEnds
+  ),[coursePreambleSeq,courseMarkSeq,laps,sfLineEnds]);
+
   const curAnalysis=useMemo(()=>{
     if(!analysis||!croppedPoints)return analysis;
     if(croppedPoints.length<20)return analysis;
@@ -4377,13 +4412,14 @@ function App(){
     const bowChg=Number(gpsToBowM)!==Number(analysis.gpsToBowM??DEFAULT_GPS_TO_BOW_M);
     const wm0=String(windwardMarkName||"").trim();
     const wm1=String(analysis.legGatesWindwardMark||"").trim();
-    if(windChg||bowChg||wm0!==wm1){
+    const geomChg=String(analysis.courseGeometrySignature??"") !== String(courseGeomSig);
+    if(windChg||bowChg||wm0!==wm1||geomChg){
       const markArr=courseMarkSeq.length>0?courseMarkSeq:null;
       const recalc=runAnalysis(croppedPoints,windOvr,markArr,laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
       if(recalc!=null)return recalc;
     }
     return analysis;
-  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
+  },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName,courseGeomSig]);
 
   const overviewStartBadges=useMemo(()=>{
     if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
@@ -4399,7 +4435,7 @@ function App(){
     const wn=windOvr!=null&&Number.isFinite(windOvr)?windOvr:curAnalysis?.windDir;
     const wwm=String(windwardMarkName||"").trim()||null;
     return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,200,wn!=null?Number(wn):null,wwm);
-  },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps,windOvr,curAnalysis?.windDir,windwardMarkName]);
+  },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps,windOvr,curAnalysis?.windDir,windwardMarkName,courseGeomSig]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
   const timelineDomain=useMemo(()=>{
