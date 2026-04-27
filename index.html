@@ -148,6 +148,31 @@ let supabaseUserJwt=null;
 function supabaseFailed(res) {
   return res && typeof res === "object" && !Array.isArray(res) && (res.code != null || res.message != null || res.error != null || res.hint != null);
 }
+/** Human-readable PostgREST / Postgres error for UI (RLS, network JSON, etc.). */
+function formatPostgrestError(data) {
+  if (data == null) return "No response from server.";
+  if (typeof data === "string") return data.length > 220 ? data.slice(0, 220) + "…" : data;
+  if (Array.isArray(data)) {
+    if (data.length && typeof data[0] === "object") return formatPostgrestError(data[0]);
+    return "Unexpected response array.";
+  }
+  if (typeof data === "object") {
+    const msg = data.message || data.error || data.hint || "";
+    const det = data.details != null ? String(data.details) : "";
+    let s = "";
+    if (data.code != null) s += String(data.code) + ": ";
+    s += String(msg || det || "").trim() || JSON.stringify(data);
+    if (det && msg && !String(msg).includes(det)) s += ` (${det.slice(0, 80)})`;
+    return s.length > 280 ? s.slice(0, 280) + "…" : s;
+  }
+  return String(data);
+}
+function formatPatchFailure(pr) {
+  if (!pr) return "Empty response from server.";
+  const h = pr.status != null ? `HTTP ${pr.status}` : "Request failed";
+  const d = formatPostgrestError(pr.data);
+  return d && d !== "No response from server." ? `${h}: ${d}` : h;
+}
 
 /** Valid Postgres timestamptz or null (never invalid strings). */
 function toIsoTimestamptz(v) {
@@ -311,6 +336,71 @@ function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
   const tx=Math.sin(θ),ty=Math.cos(θ);
   return Math.abs(v.x*ty-v.y*tx);
 }
+/** Signed lateral (m) to infinite line through M along `lineBearingTwd` (°T). Same line as `lateralDistMToLineAtCFromP` (unsigned). */
+function signedLateralMetersToLineFromMAlongBearingTwd(latM,lonM,latP,lonP,lineBearingTwd){
+  if(!Number.isFinite(lineBearingTwd))return NaN;
+  const v=enuMeters(latM,lonM,latP,latP);
+  const θ=Number(lineBearingTwd)*D;
+  const tx=Math.sin(θ),ty=Math.cos(θ);
+  return v.x*ty-v.y*tx;
+}
+/**
+ * In/out line bearings (°T) for one mark, matching `buildMarkGateDebugFC` (W135, L135/R135, chAlign, chord).
+ * `detectMarkInboundOutboundGates` uses this so map overlays and per-mark rounding/gates share geometry.
+ */
+function computeMapMarkGateRaysForDetection(prev,curr,next,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg){
+  const chIn=bear(prev.lat,prev.lon,curr.lat,curr.lon);
+  const chOut=bear(curr.lat,curr.lon,next.lat,next.lon);
+  const wdf=Number(windFromDeg);
+  const wwm=String(windwardMarkName||"").trim();
+  const name=String(currentMarkName||"");
+  const nxt=String(nextMarkName||"");
+  const ts=tack==='P'?-90:90;
+  const isWm=isWindwardMarkForMapGates(name,wwm,chIn,wdf);
+  const isNextWm=!!next&&isWindwardMarkForMapGates(nxt,wwm,chOut,wdf);
+  let inRayBr=null, inMode="ch", outRayPre=null, outModePre="ch", apUPre=null;
+  if(Number.isFinite(chIn)){
+    if(isWm&&tack&&Number.isFinite(wdf)){
+      const tangW=(wdf+(tack==='P'?-135:135)+360)%360;
+      inRayBr=(tangW+180)%360;
+      inMode="W135";
+    }else{
+      inRayBr=((chIn+ts+360)%360+180)%360;
+      inMode="ch";
+    }
+  }
+  if(next&&prev&&Number.isFinite(chOut)){
+    outRayPre=((chOut+ts+360)%360+180)%360;
+    outModePre="ch";
+    if(!isWm&&isNextWm&&Number.isFinite(wdf)&&tack){
+      if(tack==='P'){
+        apUPre=(wdf+135+360)%360;
+        outRayPre=apUPre;
+        outModePre="L135";
+      }else{
+        apUPre=(wdf-135+360)%360;
+        outRayPre=apUPre;
+        outModePre="R135";
+      }
+    }
+  }
+  const CH_ALIGN_EPS=0.1;
+  let chAlignToPrev=false, alBearing=null;
+  if(next&&prev&&inRayBr!=null&&outRayPre!=null&&chIn!=null){
+    const dIn=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,inRayBr);
+    const dOut=lateralDistMToLineAtCFromP(curr.lat,curr.lon,prev.lat,prev.lon,outRayPre);
+    if(Number.isFinite(dIn)&&Number.isFinite(dOut)&&dIn+CH_ALIGN_EPS<dOut){
+      chAlignToPrev=true;
+      alBearing=((chIn+ts+360)%360+180)%360;
+      inRayBr=alBearing;
+      outRayPre=alBearing;
+    }
+  }
+  return{
+    chIn, chOut, inRayBr, outRayPre, inMode, outModePre, isWm, isNextWm, chAlign:chAlignToPrev, alBearing, apUPre, ts,
+    apIsOutWind135:outModePre==="L135"||outModePre==="R135",
+  };
+}
 /**
  * Map gates (magenta in / cyan out) — state machine when a mark counts as **windward** (field, name `Windward`, or upwind leg per below):
  * - **This = windward:** in = 135° from wind FROM (P/S); out = ⟂ to mark→next (chord +90, +display flip)
@@ -320,7 +410,7 @@ function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
  *   (last leg finish) is met before the out-gate (next leg start).) Both gates then use the same `ch` line.
  * - **Neither this nor next = windward:** in & out = chord ±90
  * Windward = user field, or name `Windward`, or track to/through mark is upwind (`isUpwindLegBearingVsWindDeg`).
- * If none apply, in/out are chord. Detection unchanged; map is illustrative.
+ * If none apply, in/out are chord. Rounding/leg **detection** reuses the same in/out state via `computeMapMarkGateRaysForDetection`.
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFromDeg=null,windwardMarkName=null){
   const markPositions=lapMarks||[];
@@ -570,6 +660,8 @@ function sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,latP,lonP,bBEnuX,bBEnuY,b
   return(p.x-bBEnuX)*bNormX+(p.y-bBEnuY)*bNormY;
 }
 const LEG_CHORD_MIN_M=3;
+/** Min GNSS samples in a leg / perp window (1 Hz, fast legs, or exit→entry clip can be only a few points). */
+const LEG_MIN_TRACK_POINTS=2;
 function segmentSignCrosses(s0,s1){
   if(!Number.isFinite(s0)||!Number.isFinite(s1))return false;
   return s0*s1<0;
@@ -692,21 +784,33 @@ function firstValidOutboundPerpCrossingLoose(pts,iStart,jEnd,sideAt,tack,mLat,mL
   return-1;
 }
 /**
- * Inbound: mark B ⟂ to normal along prev→mark, or to **U±135** when `useUpwindEntryGateBearing` (15° to upwind
- * or named windward mark) and tack. Outbound: ⟂ to M→Next with
- * S/P = multiply side by +1/−1 (same infinite line, opposite “half-space” for crossings).
+ * Inbound/outbound geometry matches `computeMapMarkGateRaysForDetection` (same as map gate overlay):
+ * W135 in when mark is windward on map rules; chord otherwise; leeward→windward uses L135/R135 out;
+ * chAlign = one joint ⟂ line (first crossing in, second out). Previously U±135 in used a 15° upwind test only.
  * Rounded only if both are crossed; perpCrossingSatisfiesMarkTack unchanged.
  */
-function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windFromDeg=null,currentMarkName=null,windwardMarkName=null){
+function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windFromDeg=null,currentMarkName=null,windwardMarkName=null,nextMarkName=null){
   const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
   const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
   if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{ok:false};
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const ts=tackSignGates(tack);
-  const chIn=bear(prev.lat,prev.lon,curr.lat,curr.lon);
   const wdf=Number(windFromDeg);
-  const useU135=!!tack&&Number.isFinite(wdf)&&useUpwindEntryGateBearing(chIn,wdf,currentMarkName,windwardMarkName);
+  const mapG=computeMapMarkGateRaysForDetection(prev,curr,next,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg);
+  if(mapG.chAlign&&mapG.alBearing!=null){
+    const al=mapG.alBearing;
+    const sideJ=pp=>signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,al);
+    const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideJ,tack,curr.lat,curr.lon);
+    if(eIn<0)return{ok:false};
+    const eOut=firstPerpCrossing(pts,eIn,jEnd,sideJ);
+    if(eOut<0||eOut<=eIn)return{ok:false};
+    if(eOut-eIn+1<2)return{ok:false};
+    const trackM=sumPathDist(pts,eIn,eOut);
+    const straightM=hav(pts[eIn].lat,pts[eIn].lon,pts[eOut].lat,pts[eOut].lon);
+    return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
+  }
+  const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
   const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
   const bPrevMark=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
   const bBIn=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
@@ -722,11 +826,21 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
     return useU135?v*ts:v;
   };
   const bOut0=enuMeters(curr.lat,curr.lon,next.lat,next.lon);
-  const sideOut=pp=>sideValuePerpAtAChordEnuA(curr.lat,curr.lon,pp.lat,pp.lon,bOut0.x*ts,bOut0.y*ts);
+  const outWind135=mapG.apIsOutWind135&&mapG.outRayPre!=null&&Number.isFinite(wdf);
+  const sideOutBase=outWind135
+    ?(pp=>signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,mapG.outRayPre))
+    :(pp=>sideValuePerpAtAChordEnuA(curr.lat,curr.lon,pp.lat,pp.lon,bOut0.x*ts,bOut0.y*ts));
   const eIn=firstValidPerpCrossing(pts,sF,jEnd,sideIn,tack,curr.lat,curr.lon);
   if(eIn<0)return{ok:false};
-  let eOut=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
-  if(eOut<0)eOut=firstValidOutboundPerpCrossingLoose(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
+  const tryOutbound=sideOut=>{
+    let eO=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
+    if(eO<0)eO=firstValidOutboundPerpCrossingLoose(pts,eIn,jEnd,sideOut,tack,curr.lat,curr.lon,next.lat,next.lon);
+    return eO;
+  };
+  let eOut=tryOutbound(sideOutBase);
+  if((eOut<0||eOut<=eIn)&&outWind135){
+    eOut=tryOutbound(pp=>-sideOutBase(pp));
+  }
   if(eOut<0||eOut<=eIn)return{ok:false};
   if(eOut-eIn+1<2)return{ok:false};
   const trackM=sumPathDist(pts,eIn,eOut);
@@ -741,11 +855,11 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
  */
 function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMark,startFinishLine,gpsToBowM,windFromDeg=null,tackFrom=null,tackTo=null,toMarkName=null,windwardMarkName=null){
   const c=hav(latA,lonA,latB,lonB);
-  if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
+  if(c<LEG_CHORD_MIN_M||!Number.isFinite(c))return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"chord_too_short",chordM:c}};
   const s0=Math.max(0,searchFrom|0),idxEnd=fbEnd|0;
   const wdF=Number(windFromDeg);
   const chLeg=bear(latA,lonA,latB,lonB);
-  let useU135=!!tackFrom&&!!tackTo&&Number.isFinite(wdF)&&useUpwindEntryGateBearing(chLeg,wdF,toMarkName,windwardMarkName);
+  let useU135=!!tackFrom&&!!tackTo&&Number.isFinite(wdF)&&(isWindwardMarkForMapGates(String(toMarkName||""),String(windwardMarkName||""),chLeg,wdF)||useUpwindEntryGateBearing(chLeg,wdF,toMarkName,windwardMarkName));
   const bChord=enuMeters(latA,lonA,latB,lonB);
   const bB=enuMeters(latA,lonA,latB,lonB);
   const tsA=tackSignGates(tackFrom);
@@ -775,17 +889,17 @@ function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fb
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const cA=firstPerpCrossing(pts, sF, jEnd, sideA);
-  if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
+  if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_perp_crossing_at_A",cAIdx:null,cBIdx:null,searchFrom:sF}};
   const cB=firstPerpCrossing(pts, cA, jEnd, sideB);
-  if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
+  if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_perp_crossing_at_B",cAIdx:cA,cBIdx:null,searchFrom:sF}};
   const e0=startFinishLine?.endA, e1=startFinishLine?.endB;
   const hasSf=e0&&e1&&Number.isFinite(e0.lat)&&Number.isFinite(e0.lon)&&Number.isFinite(e1.lat)&&Number.isFinite(e1.lon);
   let jSf=-1;
   if(String(fromMark||"")==="START"&&hasSf)
     jSf=firstCommitteeLineSegmentCrossing(pts,sF,Math.min(cB,jEnd),e0,e1);
   let legStartIdx=cA;
-  if(String(fromMark||"")==="START"&&jSf>=0&&jSf<cB&&(cB-jSf+1)>=5)legStartIdx=jSf;
-  if(cB-legStartIdx+1<5)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null};
+  if(String(fromMark||"")==="START"&&jSf>=0&&jSf<cB&&(cB-jSf+1)>=LEG_MIN_TRACK_POINTS)legStartIdx=jSf;
+  if(cB-legStartIdx+1<LEG_MIN_TRACK_POINTS)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"perp_window_too_few_points",cAIdx:cA,cBIdx:cB,jSf,legStartIdx,perpPts:cB-legStartIdx+1}};
   let roundingM=0,roundingKind=null,startLineDistanceSignedM=null;
   if(String(fromMark||"")==="START"&&hasSf){
     if(jSf>=0){
@@ -811,7 +925,7 @@ function findPerpendicularLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fb
       roundingKind="mark_path_m";
     }else{roundingM=0;roundingKind="mark_path_m";}
   }
-  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"perp",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null};
+  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"perp",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null,gateDebug:{ok:true,useU135,cAIdx:cA,cBIdx:cB,jSf,jSfOnLine:jSf>=0,perpPts:cB-legStartIdx+1,fromMark:String(fromMark||"")}};
 }
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
 function destinationPoint(lat,lon,bearingDeg,distM){
@@ -823,6 +937,16 @@ function destinationPoint(lat,lon,bearingDeg,distM){
   while(lonDeg>180)lonDeg-=360;
   while(lonDeg<-180)lonDeg+=360;
   return{lat:φ2/D,lon:lonDeg};
+}
+/** When there is no committee (S/F) mid, the first mark had no `prev` — use a point 500m “before” the first mark, away from the next mark, so in/out gates have valid chord geometry. */
+function virtualPrevForFirstMarkApproach(curr,nextW,distM=500){
+  const bCN=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
+  return destinationPoint(curr.lat,curr.lon,((bCN+180)%360+360)%360,distM);
+}
+/** When there is no committee mid, the last mark had no `next` — extend 500m past the mark along the leg from the previous mark. */
+function virtualNextAfterLastMark(prev,curr,distM=500){
+  const bPC=bear(prev.lat,prev.lon,curr.lat,curr.lon);
+  return destinationPoint(curr.lat,curr.lon,bPC,distM);
 }
 /** Cumulative distance along pts to index nearest (tlat, tlon); returns {alongM, nearestIdx, distToMarkM}. */
 function distanceAlongTrackToNearest(pts,tlat,tlon){
@@ -1232,6 +1356,17 @@ async function apiGetSession(){
   const r=await workerFetch("/session",{method:"GET"});
   return r.json();
 }
+/** RLS on `analyses` requires the user JWT, not the anon key. `doAnalysis` used to skip this, so upserts always failed. */
+async function ensureSupabaseUserJwtFromSession(){
+  try{
+    const d=await apiGetSession();
+    if(d&&d.ok&&d.supabase_access_token){
+      supabaseUserJwt=d.supabase_access_token;
+      return true;
+    }
+  }catch(e){ console.warn("ensureSupabaseUserJwtFromSession",e); }
+  return false;
+}
 
 async function apiSignIn(email,password){
   const r=await workerFetch("/auth/signin",{method:"POST",body:JSON.stringify({email,password})});
@@ -1298,6 +1433,9 @@ function unknownAnalysisSnapshotColumn(err){
 }
 
 async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
+  if(!(await ensureSupabaseUserJwtFromSession())){
+    return{ok:false,error:"Not signed in to SailStats (email/password) — Supabase RLS needs your user token to save. Use Sign in, then run Analyse or Save course setup again."};
+  }
   const prev = await loadAnalysisRow(stravaId, activityId);
   const csPrev = prev?.course_setup && typeof prev.course_setup === "object" ? prev.course_setup : {};
   const course_setup = buildPersistedCourseSetup(csPrev, {
@@ -1352,7 +1490,8 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     const{analysis_snapshot:_drop,...fallback}=baseRow;
     data=await tryUpsert(fallback);
   }
-  return data;
+  if(supabaseFailed(data)) return{ok:false,error:formatPostgrestError(data)};
+  return{ok:true};
 }
 
 async function loadAnalyses(stravaId) {
@@ -1714,6 +1853,9 @@ function applyWindwardMarkFromRow(cs, setWindwardMarkName) {
 
 /** Save course / crop / marks / wind without full analysis — PATCH if row exists, else INSERT. */
 async function saveCourseSetup(stravaId, activityId, activityName, activityDate, parts) {
+  if(!(await ensureSupabaseUserJwtFromSession())){
+    return{ok:false,error:"Not signed in to SailStats (email/password) — cloud save needs your user token (database RLS). Sign in, then try again."};
+  }
   const sid = Number(stravaId);
   const aid = String(activityId);
   const rowQ = `strava_id=eq.${sid}&activity_id=eq.${encodeURIComponent(aid)}&limit=1`;
@@ -1762,7 +1904,8 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
       const { course_setup: _drop, ...fallback } = patchBody;
       pr = await supabase.patch("analyses", filter, fallback);
     }
-    return pr.ok;
+    if (!pr.ok) return { ok: false, error: formatPatchFailure(pr) };
+    return { ok: true };
   }
 
   let err = await insertTry(patchBody);
@@ -1770,7 +1913,8 @@ async function saveCourseSetup(stravaId, activityId, activityName, activityDate,
     const { course_setup: _d2, ...fb } = patchBody;
     err = await insertTry(fb);
   }
-  return !err;
+  if (err) return { ok: false, error: formatPostgrestError(err) };
+  return { ok: true };
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2592,8 +2736,10 @@ const MARK_ROUND_SAILING_COG_TOL_DEG=10;
 const MARK_MANOEUVRE_AT_MARK_M=10;
 /** Tack/gybe turn centre within this many GPS indices of a detected mark-rounding hit → excluded from racing stats (orange badge). */
 const MARK_MANOEUVRE_NEAR_ROUNDING_PTS=4;
-/** When perp in/out gates miss (sparse GPS, tight reach), use closest point to mark in search window if within this m. */
-const MARK_CLOSEST_FALLBACK_MAX_M=180;
+/** Preferred radius (m) for closest-approach fallback when strict perp/in-out gates miss. */
+const MARK_CLOSEST_FALLBACK_MAX_M=800;
+/** Hard stop (m): if closest approach exceeds this, the track likely never passed this mark (wrong course / crop). */
+const MARK_CLOSEST_FALLBACK_HARD_MAX_M=4000;
 
 function allCourseMarkLocations(markPositions,preamble,laps){
   const seq=expandCourseMarks(preamble,markPositions||[],Math.max(1,Number(laps)||1));
@@ -2668,6 +2814,60 @@ function buildTrackSegmentFeatureCollection(pts,mask){
   }
   return{type:"FeatureCollection",features:feats};
 }
+/**
+ * Track segments by leg attempt (leg0, leg1, …, leg_skip_k) with rounding zones still orange.
+ * `legBuildLog` rows must have startIdx, endIdx, status, stepIndex (from buildLegsFromRoundingsArray).
+ */
+function buildTrackSegmentFeatureCollectionWithLegDiagnostics(pts,legBuildLog,roundingMask){
+  if(!pts||pts.length<2)return{type:"FeatureCollection",features:[]};
+  const n=pts.length;
+  const mask=roundingMask&&roundingMask.length===n?roundingMask:new Array(n).fill(false);
+  const kinds=new Array(n).fill("base");
+  if(Array.isArray(legBuildLog)){
+    legBuildLog.forEach(row=>{
+      const a=row.startIdx|0,b=row.endIdx|0,si=row.stepIndex|0;
+      if(a<0||b>=n||a>b||!Number.isFinite(a)||!Number.isFinite(b))return;
+      const ok=row.status==="included"||row.status==="ok";
+      const tag=ok?`leg${si}`:`leg_skip_${si}`;
+      for(let i=a;i<=b;i++)kinds[i]=tag;
+    });
+  }
+  for(let i=0;i<n;i++)if(mask[i])kinds[i]="rounding";
+  const feats=[];
+  let segStart=0;
+  let kind=kinds[0]||"base";
+  const pushSeg=(a,b,k)=>{
+    if(b<a)return;
+    const coords=[];
+    for(let j=a;j<=b;j++)coords.push([pts[j].lon,pts[j].lat]);
+    if(coords.length===1)coords.push(coords[0]);
+    if(coords.length>=2)feats.push({type:"Feature",properties:{kind:k},geometry:{type:"LineString",coordinates:coords}});
+  };
+  for(let i=1;i<n;i++){
+    const rk=kinds[i]||"base";
+    if(rk!==kind){
+      pushSeg(segStart,i-1,kind);
+      segStart=i-1;
+      kind=rk;
+    }
+  }
+  pushSeg(segStart,n-1,kind);
+  if(!feats.length){
+    return{type:"FeatureCollection",features:[{type:"Feature",properties:{kind:"base"},geometry:{type:"LineString",coordinates:pts.map(p=>[p.lon,p.lat])}}]};
+  }
+  return{type:"FeatureCollection",features:feats};
+}
+/** Mapbox GL `line-color` expression: rounding (orange), leg0…15, leg_skip_0…15 (grey), base (teal). */
+function mapboxTrackLineColorByKindExpr(defaultTrkColor,roundingColor){
+  const legPal=["#3b82f6","#f59e0b","#10b981","#a855f7","#ef4444","#06b6d4","#eab308","#f472b6","#94a3b8","#6366f1","#14b8a6","#ec4899","#84cc16","#f97316","#8b5cf6","#22c55e"];
+  const pairs=["rounding",roundingColor,"base",defaultTrkColor,"normal",defaultTrkColor];
+  for(let i=0;i<16;i++){
+    pairs.push(`leg${i}`,legPal[i%legPal.length]);
+    pairs.push(`leg_skip_${i}`,"#64748b");
+  }
+  pairs.push(defaultTrkColor);
+  return["match",["get","kind"],...pairs];
+}
 
 function computeRoundingPointMask(pts,details,baselines){
   const n=pts?.length||0;
@@ -2689,10 +2889,122 @@ function computeRoundingPointMask(pts,details,baselines){
   return mask;
 }
 
-function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2,windFromDeg=null,windwardMarkName=null){
+/**
+ * Turn resolved `roundings` (with optional START/FINISH) into legs + one diagnostic row per consecutive pair.
+ */
+function buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBowM,windFromDeg,windwardMarkName){
   const legs=[];
+  const legBuildLog=[];
+  const getWP=(r)=>{
+    if(r.lat!=null&&r.lon!=null&&Number.isFinite(r.lat)&&Number.isFinite(r.lon))return{lat:r.lat,lon:r.lon};
+    const p=pts?.[r.idx];
+    return p?{lat:p.lat,lon:p.lon}:null;
+  };
+  let nextFrom=0;
+  for(let i=0;i<roundings.length-1;i++){
+    const r0=roundings[i],r1=roundings[i+1];
+    const wA0=getWP(r0),wB0=getWP(r1);
+    const wA=String(r0.mark)==="START"&&sfMid?sfMid:(wA0||null);
+    const wB=String(r1.mark)==="FINISH"&&sfMid?sfMid:(wB0||null);
+    const si=r0.idx,ei=r1.idx;
+    let startIdx=si,endIdx=ei,roundingM=0,roundingStraightM=null,legPathDef="closest",roundingKind=null;
+    let startLineDistanceM=null;
+    const row={
+      stepIndex:i,
+      from:String(r0.mark||""),
+      to:String(r1.mark||""),
+      lap:r0.lap??0,
+      r0GateOK:!!r0.roundingGateOK,
+      r1GateOK:!!r1.roundingGateOK,
+      r0ExitIdx:r0.exitIdx??null,
+      r1EntryIdx:r1.entryIdx??null,
+      gateDebug:null,
+      legPathDef:"closest",
+      committeeLineCrossingIdx:null,
+      startLineDistanceSignedM:null,
+      usedPerpClip:false,
+      status:"pending",
+      startIdx:0,endIdx:0,legPtsCount:0,
+    };
+    if(!wA||!wB){
+      row.status="no_waypoints";
+      row.startIdx=si;row.endIdx=ei;row.legPtsCount=Math.max(0,ei-si+1);
+      legBuildLog.push(row);
+      nextFrom=Math.max(nextFrom,ei);
+      continue;
+    }
+    const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg,r0.tack??null,r1.tack??null,String(r1.mark||""),windwardMarkName);
+    row.gateDebug=g.gateDebug||null;
+    row.legPathDef=g.legPathDef||"closest";
+    row.committeeLineCrossingIdx=g.committeeLineCrossingIdx??null;
+    row.startLineDistanceSignedM=g.startLineDistanceSignedM!=null?g.startLineDistanceSignedM:null;
+    startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;roundingStraightM=null;
+    if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
+    if(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)startIdx=r0.exitIdx;
+    if(String(r1.mark)!=="FINISH"&&r1.roundingGateOK&&r1.entryIdx!=null)endIdx=r1.entryIdx;
+    row.usedPerpClip=(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)||(String(r1.mark)!=="FINISH"&&r1.roundingGateOK&&r1.entryIdx!=null);
+    if(endIdx<=startIdx||endIdx-startIdx+1<2){
+      startIdx=g.startIdx;endIdx=g.endIdx;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;
+      roundingM=g.roundingM??0;roundingStraightM=null;
+      if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
+      row.usedPerpClip=false;
+    }else{
+      legPathDef="perp";
+      if(r0.mark!=="START"&&r0.roundingGateOK&&r0.roundingTrackM!=null&&Number.isFinite(r0.roundingTrackM)&&r0.roundingTrackM>0){
+        roundingM=r0.roundingTrackM;roundingKind="perp_in_out_m";
+        if(r0.roundingStraightM!=null&&Number.isFinite(r0.roundingStraightM))roundingStraightM=r0.roundingStraightM;
+      }else if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null){
+        startLineDistanceM=g.startLineDistanceSignedM;roundingM=0;roundingKind="sf_line_m";
+      }
+    }
+    const fromStart=String(r0.mark)==="START"&&startLineDistanceM!=null;
+    row.startIdx=startIdx;row.endIdx=endIdx;
+    const legPts=pts.slice(startIdx,endIdx+1);
+    row.legPtsCount=legPts.length;
+    nextFrom=endIdx;
+    if(legPts.length<LEG_MIN_TRACK_POINTS){
+      row.status="skipped_too_few_points";
+      legBuildLog.push(row);
+      continue;
+    }
+    row.status="included";
+    const dist=legPts.reduce((a,p)=>a+(p.dist||0),0);
+    const straightDist=hav(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
+    const speeds=legPts.map(p=>ms2k(p.ss||0)).filter(s=>s>0.3);
+    const avgSpd=speeds.length?speeds.reduce((a,b)=>a+b,0)/speeds.length:0;
+    const maxSpd=speeds.length?Math.max(...speeds):0;
+    const dur=legPts[legPts.length-1].time-legPts[0].time;
+    const eff=dist>0?(straightDist/dist*100):100;
+    const legBearing=bear(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
+    let markChordBearingDeg=null,markChordM=null;
+    if(wA&&wB&&Number.isFinite(wA.lat)&&Number.isFinite(wA.lon)&&Number.isFinite(wB.lat)&&Number.isFinite(wB.lon)){
+      markChordBearingDeg=bear(wA.lat,wA.lon,wB.lat,wB.lon);
+      markChordM=hav(wA.lat,wA.lon,wB.lat,wB.lon);
+    }
+    legBuildLog.push(row);
+    legs.push({
+      from:roundings[i].mark,to:roundings[i+1].mark,
+      lap:roundings[i].lap,
+      startIdx,endIdx,
+      distance:dist,straightDistance:straightDist,markChordBearingDeg,markChordM,
+      duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
+      efficiency:eff,legBearing,
+      type:"leg",
+      roundingM:fromStart?null:roundingM,
+      roundingStraightM:fromStart?null:roundingStraightM,
+      startLineDistanceM,
+      legPathDef,roundingKind,
+    });
+  }
+  return{legs,legBuildLog};
+}
+
+function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLine=null,gpsToBowM=2,windFromDeg=null,windwardMarkName=null){
+  const emptyDiag={markSequenceLog:[],legBuildLog:[]};
   const fullSeq=expandCourseMarks(preamble,markPositions||[],laps);
-  if(fullSeq.length<2)return{legs,roundings:[]};
+  if(fullSeq.length<2){
+    return{legs:[],roundings:[],markSequenceLog:[{error:"need_at_least_2_marks",expandedCount:fullSeq.length,hint:"Preamble + lap marks need at least two waypoints with GPS (e.g. two mark rows in the WSC order)."}],legBuildLog:[]};
+  }
 
   const sfMid=startFinishLine?.endA&&startFinishLine?.endB?{
     lat:(startFinishLine.endA.lat+startFinishLine.endB.lat)/2,
@@ -2702,12 +3014,16 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     ?{lat:row.lat,lon:row.lon}:null);
 
   const roundings=[];
+  const markSequenceLog=[];
   let searchFrom=0;
 
   for(let mi=0;mi<fullSeq.length;mi++){
     const m=fullSeq[mi];
     const curr=wpFromRow(m);
-    if(!curr)return{legs,roundings:[]};
+    if(!curr){
+      markSequenceLog.push({orderIndex:mi,mark:m?.name,error:"no_mark_coords"});
+      return{legs:[],roundings,markSequenceLog,legBuildLog:[]};
+    }
     let prev=null;
     if(mi>0){
       const pr=fullSeq[mi-1];
@@ -2718,10 +3034,19 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       const nx=fullSeq[mi+1];
       nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
     }else if(sfMid)nextW=sfMid;
-    if(!prev||!nextW)return{legs,roundings:[]};
-    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName);
+    const needVirtPrev=!prev&&!!nextW;
+    const needVirtNext=!nextW&&!!prev;
+    if(needVirtPrev)prev=virtualPrevForFirstMarkApproach(curr,nextW,500);
+    if(needVirtNext)nextW=virtualNextAfterLastMark(prev,curr,500);
+    if(!prev||!nextW){
+      markSequenceLog.push({orderIndex:mi,mark:m.name,error:"incomplete_neighbours",hasPrev:!!prev,hasNext:!!nextW,note:"Could not set virtual prev/next (need curr + neighbour mark)."});
+      return{legs:[],roundings,markSequenceLog,legBuildLog:[]};
+    }
+    const synN=needVirtPrev||needVirtNext;
+    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName,mi+1<fullSeq.length?String((fullSeq[mi+1]||{}).name||""):"");
     if(g2.ok){
       const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
+      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:true,entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,syntheticNeighbours:synN});
       roundings.push({
         mark:m.name,idx:g2.exitIdx,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
         entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
@@ -2733,10 +3058,19 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
         const d=hav(pts[k].lat,pts[k].lon,m.lat,m.lon);
         if(d<bestD){bestD=d;bestI=k;}
       }
-      if(bestI<0||bestD>MARK_CLOSEST_FALLBACK_MAX_M)return{legs,roundings:[]};
+      if(bestI<0){
+        markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:false,fail:"no_track_points",closestDistM:null,closestIdx:null,searchFrom,aborted:true,syntheticNeighbours:synN});
+        break;
+      }
+      if(bestD>MARK_CLOSEST_FALLBACK_HARD_MAX_M){
+        markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:false,fail:"mark_unreachable",closestDistM:bestD,closestIdx:bestI,searchFrom,hardMaxM:MARK_CLOSEST_FALLBACK_HARD_MAX_M,aborted:true,syntheticNeighbours:synN});
+        break;
+      }
+      const farApproach=bestD>MARK_CLOSEST_FALLBACK_MAX_M;
+      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:false,fail:farApproach?"fallback_far":"fallback_closest",closestDistM:bestD,closestIdx:bestI,softMaxM:MARK_CLOSEST_FALLBACK_MAX_M,farApproach,syntheticNeighbours:synN});
       roundings.push({
         mark:m.name,idx:bestI,dist:bestD,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
-        entryIdx:bestI,exitIdx:bestI,roundingTrackM:0,roundingStraightM:0,roundingGateOK:false,
+        entryIdx:bestI,exitIdx:bestI,roundingTrackM:0,roundingStraightM:0,roundingGateOK:false,farApproach:!!farApproach,
       });
       searchFrom=bestI;
     }
@@ -2761,74 +3095,8 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     }
   }
 
-  const getWP=(r)=>{
-    if(r.lat!=null&&r.lon!=null&&Number.isFinite(r.lat)&&Number.isFinite(r.lon))return{lat:r.lat,lon:r.lon};
-    const p=pts?.[r.idx];
-    return p?{lat:p.lat,lon:p.lon}:null;
-  };
-  const sf=sfMid;
-  let nextFrom=0;
-  for(let i=0;i<roundings.length-1;i++){
-    const r0=roundings[i],r1=roundings[i+1];
-    const wA0=getWP(r0),wB0=getWP(r1);
-    const wA=String(r0.mark)==="START"&&sf?sf:(wA0||null);
-    const wB=String(r1.mark)==="FINISH"&&sf?sf:(wB0||null);
-    const si=r0.idx,ei=r1.idx;
-    let startIdx=si,endIdx=ei,roundingM=0,roundingStraightM=null,legPathDef="closest",roundingKind=null;
-    let startLineDistanceM=null;
-    if(wA&&wB){
-      const g=findPerpendicularLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg,r0.tack??null,r1.tack??null,String(r1.mark||""),windwardMarkName);
-      startIdx=g.startIdx;endIdx=g.endIdx;roundingM=g.roundingM??0;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;roundingStraightM=null;
-      if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
-      if(String(r0.mark)!=="START"&&r0.roundingGateOK&&r0.exitIdx!=null)startIdx=r0.exitIdx;
-      if(String(r1.mark)!=="FINISH"&&r1.roundingGateOK&&r1.entryIdx!=null)endIdx=r1.entryIdx;
-      if(endIdx<=startIdx||endIdx-startIdx+1<2){
-        startIdx=g.startIdx;endIdx=g.endIdx;legPathDef=g.legPathDef||"closest";roundingKind=g.roundingKind??null;
-        roundingM=g.roundingM??0;roundingStraightM=null;
-        if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null)startLineDistanceM=g.startLineDistanceSignedM;
-      }else{
-        legPathDef="perp";
-        if(r0.mark!=="START"&&r0.roundingGateOK&&r0.roundingTrackM!=null&&Number.isFinite(r0.roundingTrackM)&&r0.roundingTrackM>0){
-          roundingM=r0.roundingTrackM;roundingKind="perp_in_out_m";
-          if(r0.roundingStraightM!=null&&Number.isFinite(r0.roundingStraightM))roundingStraightM=r0.roundingStraightM;
-        }else if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null){
-          startLineDistanceM=g.startLineDistanceSignedM;roundingM=0;roundingKind="sf_line_m";
-        }
-      }
-    }
-    const fromStart=String(r0.mark)==="START"&&startLineDistanceM!=null;
-    const legPts=pts.slice(startIdx,endIdx+1);
-    nextFrom=endIdx;
-    if(legPts.length<5)continue;
-    const dist=legPts.reduce((a,p)=>a+(p.dist||0),0);
-    const straightDist=hav(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
-    const speeds=legPts.map(p=>ms2k(p.ss||0)).filter(s=>s>0.3);
-    const avgSpd=speeds.length?speeds.reduce((a,b)=>a+b,0)/speeds.length:0;
-    const maxSpd=speeds.length?Math.max(...speeds):0;
-    const dur=legPts[legPts.length-1].time-legPts[0].time;
-    const eff=dist>0?(straightDist/dist*100):100;
-    const legBearing=bear(legPts[0].lat,legPts[0].lon,legPts[legPts.length-1].lat,legPts[legPts.length-1].lon);
-    let markChordBearingDeg=null,markChordM=null;
-    if(wA&&wB&&Number.isFinite(wA.lat)&&Number.isFinite(wA.lon)&&Number.isFinite(wB.lat)&&Number.isFinite(wB.lon)){
-      markChordBearingDeg=bear(wA.lat,wA.lon,wB.lat,wB.lon);
-      markChordM=hav(wA.lat,wA.lon,wB.lat,wB.lon);
-    }
-
-    legs.push({
-      from:roundings[i].mark,to:roundings[i+1].mark,
-      lap:roundings[i].lap,
-      startIdx,endIdx,
-      distance:dist,straightDistance:straightDist,markChordBearingDeg,markChordM,
-      duration:dur,avgSpeed:avgSpd,maxSpeed:maxSpd,
-      efficiency:eff,legBearing,
-      type:"leg",
-      roundingM:fromStart?null:roundingM,
-      roundingStraightM:fromStart?null:roundingStraightM,
-      startLineDistanceM,
-      legPathDef,roundingKind,
-    });
-  }
-  return{legs,roundings};
+  const{legs,legBuildLog}=buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBowM,windFromDeg,windwardMarkName);
+  return{legs,roundings,markSequenceLog,legBuildLog};
 }
 
 /** Sum of |ΔCOG| between consecutive points (integrated turn magnitude, °). */
@@ -3218,9 +3486,8 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const windEst=windDerive.windEst;
   const manoeuvreEvents=applyDetectionSettings(manoeuvres,en,detSettings);
   const markLocList=allCourseMarkLocations(markPositions,preamble,laps);
-  let legDetection=null;
-  if(expandCourseMarks(preamble,markPositions||[],laps).length>=2)
-    legDetection=detectLegsFromMarks(en,markPositions,laps,preamble,startFinishLine,gpsToBowM,wd,windwardMarkName);
+  const legDetection=detectLegsFromMarks(en,markPositions||[],laps,preamble,startFinishLine,gpsToBowM,wd,windwardMarkName);
+  const legDiagnostics={markSequence:legDetection.markSequenceLog||[],legBuild:legDetection.legBuildLog||[]};
   const roundingIdxs=legDetection?.roundings?.map(r=>r.idx).filter(i=>Number.isFinite(i)&&i>=0)??[];
   for(const m of manoeuvreEvents){
     const ti=Math.max(0,Math.min(en.length-1,m.turnIdx??m.idx));
@@ -3294,7 +3561,9 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
 
   const markDetForMask=markRoundingDetailsAll.filter(d=>!d.skipped);
   const roundingPointMask=computeRoundingPointMask(en,markDetForMask,baselines);
-  const trackSegmentFC=buildTrackSegmentFeatureCollection(en,roundingPointMask);
+  const trackSegmentFC=legDiagnostics?.legBuild?.length
+    ? buildTrackSegmentFeatureCollectionWithLegDiagnostics(en,legDiagnostics.legBuild,roundingPointMask)
+    : buildTrackSegmentFeatureCollection(en,roundingPointMask);
 
   const hasMansForVMG=manoeuvreEvents.some(m=>!m.excludeFromStatsAndVMG);
   const vmcMode=hasMansForVMG?"magnitude":"targeted";
@@ -3346,8 +3615,10 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
   const avgTackQuality=soloTackScores.length?soloTackScores.reduce((a,b)=>a+b,0)/soloTackScores.length:null;
   const avgGybeQuality=gybesStats.length?gybesStats.reduce((a,b)=>a+(Number(b.q)||0),0)/gybesStats.length:null;
 
+  const cropFingerprint=en.length>=2?`${en[0].time}|${en[en.length-1].time}|${en.length}`:null;
   return{
     points:en,
+    cropFingerprint,
     windDir:wd,
     courseGeometrySignature:courseGeometrySignature(preamble,markPositions,laps,startFinishLine),
     legGatesWindwardMark:(windwardMarkName==null||windwardMarkName==="")?null:String(windwardMarkName).trim(),
@@ -3370,7 +3641,7 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
       portStbdSplit:{port:portS,stbd:stbdS},
       tackStatsByLegType,
     },
-    tacks,gybes,legs,
+    tacks,gybes,legs,legDiagnostics,
     markRoundingDetails:markRoundingDetailsAll.filter(d=>!d.skipped),
     trackSegmentFC,
     streaks,speedTL,portS,stbdS,upwindByTack,maxSpeedMark,
@@ -3514,7 +3785,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
       if(trackPoints&&trackPoints.length>1){
         const fc=trackSegmentFC&&trackSegmentFC.features?.length>=1?trackSegmentFC:buildTrackSegmentFeatureCollection(trackPoints,new Array(trackPoints.length).fill(false));
         map.addSource("track-segments",{type:"geojson",data:fc});
-        map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":["match",["get","kind"],"rounding",C.trkRound,C.trk],"line-width":3,"line-opacity":0.88}});
+        map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":mapboxTrackLineColorByKindExpr(C.trk,C.trkRound),"line-width":3,"line-opacity":0.88}});
         map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
         map.addLayer({id:"track-points",type:"circle",source:"track-points",paint:{"circle-radius":1.8,"circle-color":"#d9fff7","circle-opacity":0.72}});
         const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
@@ -3667,7 +3938,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
       if(tsrc)tsrc.setData(fc);
       else{
         map.addSource("track-segments",{type:"geojson",data:fc});
-        if(!map.getLayer("track-line"))map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":["match",["get","kind"],"rounding",C.trkRound,C.trk],"line-width":3,"line-opacity":0.88}});
+        if(!map.getLayer("track-line"))map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":mapboxTrackLineColorByKindExpr(C.trk,C.trkRound),"line-width":3,"line-opacity":0.88}});
       }
       const psrc=map.getSource("track-points");
       if(psrc)psrc.setData({type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))});
@@ -3742,6 +4013,8 @@ function App(){
   const [markOverrides,setMarkOverrides]=useState({});
   const [setupSaveBusy,setSetupSaveBusy]=useState(false);
   const [setupSaveMsg,setSetupSaveMsg]=useState(null);
+  /** Last Supabase / network error from saving course setup or analysis (RLS, schema, token, etc.). */
+  const [lastSupabaseSaveError,setLastSupabaseSaveError]=useState(null);
   const [actId,setActId]=useState(null);
   const [actDate,setActDate]=useState(null);
   const [cropStartText,setCropStartText]=useState("00:00:00");
@@ -4310,7 +4583,7 @@ function App(){
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
     if (sid != null && result) {
       try {
-        await saveAnalysis(sid, actId, actName, actDate, result, {
+        const saveRes = await saveAnalysis(sid, actId, actName, actDate, result, {
           courseLetter,
           laps,
           markOverrides,
@@ -4322,7 +4595,19 @@ function App(){
           sfLineEndBText,
           windwardMark: windwardMarkName,
         });
-      } catch (e) { console.warn("Save failed:", e); }
+        if (saveRes && saveRes.ok === false) {
+          setLastSupabaseSaveError(
+            `Analysis save: ${saveRes.error || "unknown error"}. Charts are on this device only until save succeeds.`
+          );
+        } else {
+          setLastSupabaseSaveError(null);
+        }
+      } catch (e) {
+        console.warn("Save failed:", e);
+        setLastSupabaseSaveError(
+          `Analysis save: ${e && e.message ? String(e.message) : "Network or script error"}.`
+        );
+      }
       refreshSavedAnalyses();
     }
     setProcessing(false);
@@ -4359,18 +4644,18 @@ function App(){
 
   const saveCourseSetupOnly = useCallback(async () => {
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
-    if (sid == null || String(actId || "").startsWith("file-")) {
-      alert("Save course setup needs a Strava-linked activity (not a file-only upload).");
+    if (sid == null) {
+      alert("Link Strava and sign in with your SailStats email/password — cloud save needs that session for the database.");
+      return;
+    }
+    if (!actId) {
+      alert("Open an activity or upload a track first.");
       return;
     }
     setSetupSaveBusy(true);
     setSetupSaveMsg(null);
     try {
-      try {
-        const sess = await apiGetSession();
-        if (sess?.ok && sess.supabase_access_token) supabaseUserJwt = sess.supabase_access_token;
-      } catch (_) {}
-      const ok = await saveCourseSetup(sid, actId, actName, actDate, {
+      const res = await saveCourseSetup(sid, actId, actName, actDate, {
         courseLetter,
         laps,
         markOverrides,
@@ -4383,12 +4668,20 @@ function App(){
         sfLineEndBText,
         windwardMark: windwardMarkName,
       });
-      setSetupSaveMsg(ok ? "Saved course setup." : "Could not save — check console.");
-      if (ok) setTimeout(() => setSetupSaveMsg(null), 4000);
-      else console.warn("saveCourseSetup failed");
+      if (res && res.ok) {
+        setSetupSaveMsg("Saved course setup.");
+        setLastSupabaseSaveError(null);
+        setTimeout(() => setSetupSaveMsg(null), 4000);
+      } else {
+        setSetupSaveMsg(null);
+        const msg = res && res.error ? String(res.error) : "Unknown error";
+        setLastSupabaseSaveError(`Course setup save: ${msg}`);
+        console.warn("saveCourseSetup failed:", res);
+      }
     } catch (e) {
       console.error(e);
-      setSetupSaveMsg("Could not save.");
+      setSetupSaveMsg(null);
+      setLastSupabaseSaveError(`Course setup save: ${e && e.message ? e.message : String(e)}`);
     }
     setSetupSaveBusy(false);
   }, [
@@ -4576,6 +4869,14 @@ function App(){
     }
     return analysis;
   },[analysis,windOvr,croppedPoints,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName,courseGeomSig]);
+
+  useEffect(()=>{
+    if(!analysis||!croppedPoints||croppedPoints.length<20)return;
+    const fp=croppedPoints.length>=2?`${croppedPoints[0].time}|${croppedPoints[croppedPoints.length-1].time}|${croppedPoints.length}`:null;
+    if(!fp||fp===(analysis.cropFingerprint??null))return;
+    const recalc=runAnalysis(croppedPoints,windOvr,courseMarkSeq||[],laps,coursePreambleSeq,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName);
+    if(recalc)setAnalysis(recalc);
+  },[analysis,croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
   const overviewStartBadges=useMemo(()=>{
     if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
@@ -5412,18 +5713,14 @@ function App(){
         <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center",marginTop:14}}>
           <button
             type="button"
-            disabled={
-              setupSaveBusy ||
-              !(session?.strava?.athlete?.id ?? sAth?.id) ||
-              String(actId || "").startsWith("file-")
-            }
+            disabled={setupSaveBusy || !(session?.strava?.athlete?.id ?? sAth?.id) || !actId}
             onClick={saveCourseSetupOnly}
             style={{
               ...btn("transparent", C.acc, C.acc),
               padding: "10px 16px",
               fontSize: 13,
               opacity:
-                setupSaveBusy || !(session?.strava?.athlete?.id ?? sAth?.id) || String(actId || "").startsWith("file-")
+                setupSaveBusy || !(session?.strava?.athlete?.id ?? sAth?.id) || !actId
                   ? 0.45
                   : 1,
             }}
@@ -5432,9 +5729,36 @@ function App(){
           </button>
           {setupSaveMsg && <span style={{ fontSize: 12, color: C.acc }}>{setupSaveMsg}</span>}
           <span style={{ fontSize: 11, color: C.txD, lineHeight: 1.45, maxWidth: 420 }}>
-            Saves course, crop, mark positions & wind for this activity (no full analysis required). Reloads when you open the activity again.
+            Saves course, crop, mark positions & wind to Supabase (Strava or file upload). You must be <strong>signed in with your SailStats email</strong> — Strava alone is not enough for the database. Re-open the activity to reload.
           </span>
         </div>
+        {lastSupabaseSaveError && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: `1px solid ${C.wrn}55`,
+              background: `${C.wrn}10`,
+              fontSize: 11,
+              color: C.wrn,
+              lineHeight: 1.5,
+              maxWidth: 520,
+            }}
+            role="status"
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+              <span>{lastSupabaseSaveError}</span>
+              <button
+                type="button"
+                onClick={() => setLastSupabaseSaveError(null)}
+                style={{ background: "none", border: "none", color: C.txM, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>);
   }
@@ -5475,6 +5799,32 @@ function App(){
       </div>
 
       <div style={{maxWidth:700,margin:"0 auto",padding:"16px 14px"}}>
+        {lastSupabaseSaveError && (
+          <div
+            style={{
+              marginBottom: 14,
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: `1px solid ${C.wrn}55`,
+              background: `${C.wrn}10`,
+              fontSize: 11,
+              color: C.wrn,
+              lineHeight: 1.5,
+            }}
+            role="status"
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+              <span>{lastSupabaseSaveError}</span>
+              <button
+                type="button"
+                onClick={() => setLastSupabaseSaveError(null)}
+                style={{ background: "none", border: "none", color: C.txM, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* OVERVIEW */}
         {tab==="overview"&&<>
@@ -5786,6 +6136,39 @@ function App(){
 
         {/* LEGS */}
         {tab==="legs"&&<>
+          {a.legDiagnostics&&(a.legDiagnostics.markSequence?.length>0||a.legDiagnostics.legBuild?.length>0)?(
+            <div style={{background:C.card,borderRadius:12,padding:12,border:`1px solid ${C.bdr}`,marginBottom:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.acc,marginBottom:6}}>Leg detection trace</div>
+              <div style={{fontSize:9,color:C.txD,lineHeight:1.5,marginBottom:10}}>
+                Map: each leg step uses a distinct colour; <span style={{color:"#64748b"}}>grey</span> = window rejected (or no points); <span style={{color:C.trkRound}}>orange</span> = mark-rounding band. Committee line: look for <span style={{color:C.txt}}>signed m to line</span> on START→… rows.
+              </div>
+              {a.legDiagnostics.markSequence?.length>0&&<>
+                <div style={{fontSize:10,color:C.txM,marginBottom:4}}>Marks (in course order)</div>
+                <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.65}}>
+                  {a.legDiagnostics.markSequence.map((m,ix)=><div key={ix}>
+                    {m.orderIndex!=null?`#${m.orderIndex+1} `:""}{m.mark||"—"}{" "}
+                    {m.error?<span style={{color:C.wrn}}>{m.error}</span>:m.gateOk===true?<span style={{color:"#10b981"}}>in/out gates OK</span>:<span style={{color:m.aborted?C.wrn:"#f59e0b"}}>
+                      {m.fail||"no gate"}{m.closestDistM!=null&&Number.isFinite(m.closestDistM)?` (closest ${Math.round(m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
+                    </span>}
+                  </div>)}
+                </div>
+              </>}
+              {a.legDiagnostics.legBuild?.length>0&&<>
+                <div style={{fontSize:10,color:C.txM,margin:"10px 0 4px"}}>Legs (in order, after START/FINISH injection if set)</div>
+                <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.5}}>
+                  {a.legDiagnostics.legBuild.map((r,ix)=><div key={ix} style={{borderBottom:`1px solid ${C.bdr}`,padding:"6px 0"}}>
+                    <span style={{color:C.gld}}>{r.stepIndex+1}. {r.from}→{r.to}</span>{" "}
+                    <span style={{color:r.status==="included"?C.acc:r.status==="no_waypoints"?C.wrn:"#a8b5c4"}}>{r.status}</span>
+                    {` · idx ${r.startIdx}…${r.endIdx} · ${r.legPtsCount} pts · ${r.legPathDef||"—"}`}
+                    {r.r0GateOK===false||r.r1GateOK===false?" · fallback/clipped rounding":""}
+                    {r.committeeLineCrossingIdx!=null&&r.committeeLineCrossingIdx>=0?` · committee crossing seg ${r.committeeLineCrossingIdx}`:""}{r.committeeLineCrossingIdx===null&&String(r.from)==="START"&&r.legPathDef==="perp"&&r.gateDebug&&!r.gateDebug.ok?" · no line crossing found (try denser crop to line)":""}
+                    {r.startLineDistanceSignedM!=null&&Number.isFinite(r.startLineDistanceSignedM)?` · signed m to line (vs mark B) ${Math.round(r.startLineDistanceSignedM)}`:""}
+                    {r.gateDebug?(()=>{const g=r.gateDebug;if(g.ok)return` · perp cA=${g.cAIdx} cB=${g.cBIdx}${g.jSf!=null&&g.jSf>=0?` lineSeg=${g.jSf}`:""}`;return` · ${g.fail||"perp"}`+(g.cAIdx!=null?` cA=${g.cAIdx}`:"")+(g.cBIdx!=null?` cB=${g.cBIdx}`:"")+(g.searchFrom!=null?` sF=${g.searchFrom}`:"");})():""}
+                  </div>)}
+                </div>
+              </>}
+            </div>
+          ):null}
           {a.legs.length>0?<>
             <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:6,padding:"6px 8px",marginBottom:4}}>
               <div style={{width:56}}>From→To</div>
@@ -5832,7 +6215,13 @@ function App(){
                 </div>);
               })}
             </div>
-          </>:<div style={{textAlign:"center",color:C.txM,padding:30}}>{courseLetter?"Gates not found for the full mark sequence (in/out perpendiculars and P/S). Widen the crop, check the track, or mark positions.":"Select a course for leg-by-leg breakdown."}<br/><button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:12,padding:"8px 16px",fontSize:12}}>← Setup</button></div>}
+          </>:<div style={{textAlign:"center",color:C.txM,padding:30,maxWidth:480,margin:"0 auto"}}>
+            {courseLetter?<>
+              <div style={{marginBottom:10,lineHeight:1.55}}>No leg stats in the table. Use the <strong>Leg detection trace</strong> above (each mark and leg window). Common issues: the time crop misses a mark, mark GPS is wrong, or the track never comes within a few kilometres of a mark in sequence.</div>
+              <div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>After you change the crop, wind, or mark positions, use <strong>Analyse / Run analysis</strong> (or it auto-refreshes when the crop no longer matches the last run). Stale results used to show empty legs for the new crop.</div>
+            </>:"Select a course for leg-by-leg breakdown."}
+            <button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:4,padding:"8px 16px",fontSize:12}}>← Setup</button>
+          </div>}
         </>}
 
         {/* SPEED */}
