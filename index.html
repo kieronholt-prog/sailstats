@@ -848,12 +848,14 @@ function buildInOutGateFailureDebug(pts,sF,jEnd,sideIn,sideOutBase,outWind135,ta
     if(perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))inTack.push(j);
   }
   const inUse=inTack.length?inTack:inLax;
+  const winSeg=Math.max(0,jEnd-Math.max(0,sF));
   const out={
-    mode:"in_out",trackRef:"gps_latlon",searchFrom:sF,windowEndIdx:jEnd,gateSubPts:pts.length,
+    mode:"in_out",trackRef:"gps_latlon",searchFrom:sF,windowEndIdx:jEnd,gateSubPts:pts.length,windowSegApprox:winSeg,
     inboundStraddlesLax:inLax.length,inboundStraddlesTack:inTack.length,
     tackFilterBlocksAllInbound:inLax.length>0&&inTack.length===0,
     failStage:!inUse.length?(!inLax.length?"no_inbound_straddle":"tack_rejects_all_inbound"):"inbound_out_pairing",
   };
+  if(!inLax.length)out.suspectInboundBeforeSearchFrom=sF>0;
   if(!inUse.length){
     if(out.tackFilterBlocksAllInbound)out.hintTack="Geometric in-straddles exist but P/S dropped every crossing at COG; try tack blank.";
     return out;
@@ -892,13 +894,19 @@ function formatMarkGateDetDebugText(d){
     return`ch_align: lax=${d.alignStraddlesLax} tack=${d.alignStraddlesTack} · ${d.failStage}.`;
   }
   if(d.mode==="in_out"){
+    if((d.inboundStraddlesLax|0)===0){
+      const sF=d.searchFrom,sz=d.gateSubPts,ws=d.windowSegApprox;
+      return`in_out: no segment crosses the computed in-gate in this window (lax=0, tack=0) · sF=${sF} · ${sz} densified pts, ~${ws!=null?ws:"?"} segs. `+
+        (d.suspectInboundBeforeSearchFrom?`searchFrom>0: the in-gate may already lie behind you (try earlier/wider crop or check prior mark). `:"")+
+        `Otherwise: met wind, windward name, tack P/S, or mark order can move the in-line vs the map. Positions = GPS.`;
+    }
     const ps=(d.pairSample||[]).slice(0,2).map(p=>`in@${p.eIn}→out@${p.eOut}`).join(" · ");
     const al=d.alongM_towardNext_atAnyOutEnd;
     return`in_out: inbound straddles lax=${d.inboundStraddlesLax} tack=${d.inboundStraddlesTack}${d.tackFilterBlocksAllInbound?"; P/S blocked all; try blank tack.":""}`+
       (ps?` · pair tries: ${ps}`:"")+
       (al!=null&&Number.isFinite(al)?` · along toward next at first out flip ≈${al.toFixed(2)}m`:"")+
       (d.suspectAlongChordBlock?" (likely along-chord / forward check).":d.suspectNoOutboundStraddle?" (no base-side outbound straddle after first in).":"")+
-      " Track for gates is GPS, not bow.";
+      " GPS track, not bow.";
   }
   return"";
 }
