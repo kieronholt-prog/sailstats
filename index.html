@@ -4489,38 +4489,6 @@ function App(){
   const [gateStraddleA,setGateStraddleA]=useState("");
   const [gateStraddleB,setGateStraddleB]=useState("");
 
-  const gateLineInspector=useMemo(()=>{
-    if(!courseMapLine||courseMapLine.length<1)return null;
-    const sfMid=sfLineEnds?.endA&&sfLineEnds?.endB?{
-      lat:(sfLineEnds.endA.lat+sfLineEnds.endB.lat)/2,
-      lon:(sfLineEnds.endA.lon+sfLineEnds.endB.lon)/2
-    }:null;
-    const miParsed=parseInt(String(gateInspectMi).trim(),10);
-    const mi=Number.isFinite(miParsed)?Math.max(0,Math.min(miParsed,courseMapLine.length-1)):0;
-    const ctx=resolveMarkGateNeighboursForIndex(courseMapLine,sfMid,mi);
-    if(ctx.error)return{error:ctx.error,mi,hasPrev:ctx.hasPrev,hasNext:ctx.hasNext};
-    const wdf=Number(effWind);
-    if(!Number.isFinite(wdf))return{error:"wind",ctx,mi,msg:"Set wind FROM (rose) so W135 / windward rules match the engine."};
-    const wwm=String(windwardMarkName||"").trim();
-    const mapG=computeMapMarkGateRaysForDetection(ctx.prev,ctx.curr,ctx.next,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
-    let straddle=null;
-    const sAs=String(gateStraddleA).trim(),sBs=String(gateStraddleB).trim();
-    if(sAs!==""&&sBs!==""&&croppedPoints&&croppedPoints.length>0){
-      const ia=parseInt(sAs,10),ib=parseInt(sBs,10);
-      if(Number.isFinite(ia)&&Number.isFinite(ib)&&ia>=0&&ib>=0&&ia<croppedPoints.length&&ib<croppedPoints.length){
-        const pa=croppedPoints[ia],pb=croppedPoints[ib];
-        const ra=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pa,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
-        const rb=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pb,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
-        if(ra.error||rb.error)straddle={err:ra.error||rb.error};
-        else if(ra.sideM!=null&&rb.sideM!=null){
-          const prod=ra.sideM*rb.sideM;
-          straddle={ia,ib,s0:ra.sideM,s1:rb.sideM,wouldStraddle:prod<0,onLine:ra.sideM===0||rb.sideM===0};
-        }
-      }
-    }
-    return{ctx,mapG,mi,straddle,wdf};
-  },[courseMapLine,sfLineEnds,effWind,windwardMarkName,gateInspectMi,gateStraddleA,gateStraddleB,croppedPoints]);
-
   // Do **not** reset crop in an effect on [rawPoints] — that ran after load/saved-crop/apply
   // and cleared DB + auto S/F crop. New-track resets are done in loadStrava / handleFile / openSaved only.
 
@@ -5324,7 +5292,9 @@ function App(){
     setTimelineScroll(0);
   },[actId]);
 
-  const effWind=windOvr!==null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
+  const effWindRaw=windOvr!=null?windOvr:(view==="course-setup"?(setupMapAnalysis?.windDir??analysis?.windDir??0):(curAnalysis?.windDir??0));
+  const _effN=Number(effWindRaw);
+  const effWind=Number.isFinite(_effN)?_effN:0;
 
   const courseMapStartFinish=useMemo(()=>{
     if(!sfLineEnds)return null;
@@ -5378,6 +5348,39 @@ function App(){
     setActs([]);
     setView("home");
   },[]);
+
+  /** In-gate / out-gate rays for selected course row — same wind source as map gates (`markGateMapFC`). Placed after `courseMapLine` / `curAnalysis` / `effWind` and other hooks to avoid TDZ. */
+  const gateLineInspector=useMemo(()=>{
+    if(!courseMapLine||courseMapLine.length<1)return null;
+    const sfMid=sfLineEnds?.endA&&sfLineEnds?.endB?{
+      lat:(sfLineEnds.endA.lat+sfLineEnds.endB.lat)/2,
+      lon:(sfLineEnds.endA.lon+sfLineEnds.endB.lon)/2
+    }:null;
+    const miParsed=parseInt(String(gateInspectMi).trim(),10);
+    const mi=Number.isFinite(miParsed)?Math.max(0,Math.min(miParsed,courseMapLine.length-1)):0;
+    const ctx=resolveMarkGateNeighboursForIndex(courseMapLine,sfMid,mi);
+    if(ctx.error)return{error:ctx.error,mi,hasPrev:ctx.hasPrev,hasNext:ctx.hasNext};
+    const wnForGates=windOvr!=null&&Number.isFinite(windOvr)?windOvr:curAnalysis?.windDir;
+    const wdf=wnForGates!=null&&Number.isFinite(Number(wnForGates))?Number(wnForGates):0;
+    const wwm=String(windwardMarkName||"").trim();
+    const mapG=computeMapMarkGateRaysForDetection(ctx.prev,ctx.curr,ctx.next,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+    let straddle=null;
+    const sAs=String(gateStraddleA).trim(),sBs=String(gateStraddleB).trim();
+    if(sAs!==""&&sBs!==""&&croppedPoints&&croppedPoints.length>0){
+      const ia=parseInt(sAs,10),ib=parseInt(sBs,10);
+      if(Number.isFinite(ia)&&Number.isFinite(ib)&&ia>=0&&ib>=0&&ia<croppedPoints.length&&ib<croppedPoints.length){
+        const pa=croppedPoints[ia],pb=croppedPoints[ib];
+        const ra=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pa,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+        const rb=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pb,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+        if(ra.error||rb.error)straddle={err:ra.error||rb.error};
+        else if(ra.sideM!=null&&rb.sideM!=null){
+          const prod=ra.sideM*rb.sideM;
+          straddle={ia,ib,s0:ra.sideM,s1:rb.sideM,wouldStraddle:prod<0,onLine:ra.sideM===0||rb.sideM===0};
+        }
+      }
+    }
+    return{ctx,mapG,mi,straddle,wdf};
+  },[courseMapLine,sfLineEnds,windOvr,curAnalysis?.windDir,windwardMarkName,gateInspectMi,gateStraddleA,gateStraddleB,croppedPoints]);
 
   /* ─── HOME ─── */
   if(view==="home"){
@@ -6067,10 +6070,9 @@ function App(){
                 </select>
               </label>
             </div>
-            {gateLineInspector&&gateLineInspector.error&&gateLineInspector.error!=="wind"&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>
+            {gateLineInspector&&gateLineInspector.error&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>
               {gateLineInspector.error}{gateLineInspector.hasPrev!=null?` (has prev: ${gateLineInspector.hasPrev}, has next: ${gateLineInspector.hasNext})`:""}
             </div>}
-            {gateLineInspector&&gateLineInspector.error==="wind"&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>{gateLineInspector.msg}</div>}
             {gateLineInspector&&gateLineInspector.ctx&&gateLineInspector.mi!=null&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.7,marginBottom:8}}>
               <div>Mark <strong style={{color:C.acc}}>{gateLineInspector.ctx.markName}</strong> · {gateLineInspector.ctx.curr.lat.toFixed(6)}°, {gateLineInspector.ctx.curr.lon.toFixed(6)}°</div>
               {gateLineInspector.ctx.synN&&<div style={{color:C.txD,fontSize:9}}>Synthetic 500m prev/next (missing S/F or neighbour coordinates).</div>}
