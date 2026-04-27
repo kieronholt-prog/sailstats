@@ -686,11 +686,16 @@ function segmentSignCrosses(s0,s1){
   if(!Number.isFinite(s0)||!Number.isFinite(s1))return false;
   return s0*s1<0;
 }
-/** Sum p.dist (or haversine segment) for indices (i0+1 … i1) inclusive. */
+/** Sum consecutive haversines along `pts[i0]…pts[i1]` (never `p.dist`): on densified tracks, `dist` still
+ * refers to the **pre-densify** neighbour, so using it after inserted points double-counts sparse segments. */
 function sumPathDist(pts,i0,i1){
   if(i1<=i0||!pts?.length)return 0;
   let s=0;
-  for(let k=i0+1;k<=i1;k++)s+=pts[k].dist??hav(pts[k-1].lat,pts[k-1].lon,pts[k].lat,pts[k].lon);
+  for(let k=i0+1;k<=i1;k++){
+    const a=pts[k-1],b=pts[k];
+    if(!a||!b)continue;
+    s+=hav(a.lat,a.lon,b.lat,b.lon);
+  }
   return s;
 }
 function firstPerpCrossing(pts, iStart, jEnd, sideAt){
