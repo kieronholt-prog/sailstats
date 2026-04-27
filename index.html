@@ -1229,6 +1229,13 @@ function formatHMS(totalSec){
   const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
   return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
 }
+/** ISO UTC for a track `time` (unix seconds or ms). */
+function formatTrackPointIsoTime(t){
+  if(t==null||!Number.isFinite(Number(t)))return"—";
+  const n=Number(t);
+  const ms=n>1e12?n:n*1000;
+  try{return new Date(ms).toISOString();}catch(_){ return String(t); }
+}
 /** Parse HH:MM:SS, MM:SS, or seconds; invalid → null. */
 function parseHMS(str){
   const t=String(str).trim();
@@ -4239,6 +4246,9 @@ function App(){
   useEffect(()=>{
     try{localStorage.setItem(LS_SHOW_TRACK_IDX_KEY,showTrackPointIndices?"1":"0");}catch(_){}
   },[showTrackPointIndices]);
+  const [trackInspectI,setTrackInspectI]=useState("");
+  const [trackInspectJ,setTrackInspectJ]=useState("");
+  const [trackInspectCopyMsg,setTrackInspectCopyMsg]=useState(null);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
   const [windOvr,setWindOvr]=useState(null);
@@ -4345,6 +4355,48 @@ function App(){
     const s=[...croppedPoints].sort((a,b)=>a.time-b.time);
     return{durSec:s[s.length-1].time-s[0].time,n:s.length};
   },[croppedPoints]);
+
+  const trackInspectBlock=useMemo(()=>{
+    if(!croppedPoints||croppedPoints.length<1)return null;
+    const ts=String(trackInspectI).trim();
+    if(ts==="")return null;
+    const a=parseInt(ts,10);
+    if(!Number.isFinite(a))return{error:"Enter a valid start index (integer)."};
+    const n=croppedPoints.length;
+    if(a<0||a>=n)return{error:`Start index ${a} out of range (0…${n-1}).`};
+    const tj=String(trackInspectJ).trim();
+    const b=tj===""?a:parseInt(tj,10);
+    if(tj!==""&&(!Number.isFinite(b)||b<0||b>=n))return{error:`End index out of range (0…${n-1}).`};
+    const lo=Math.min(a,b),hi=Math.max(a,b);
+    if(hi-lo>24)return{error:"Range too large (max 25 points at once)."};
+    const copyParts=[],rows=[];
+    for(let i=lo;i<=hi;i++){
+      const p=croppedPoints[i];
+      const cogS=p.cog!=null&&Number.isFinite(p.cog)?`${Math.round(p.cog)}°`:"—";
+      const spdS=p.ss!=null&&Number.isFinite(p.ss)?`${ms2k(p.ss).toFixed(2)} kts`:"—";
+      copyParts.push(`i=${i} lat=${p.lat.toFixed(6)} lon=${p.lon.toFixed(6)} t=${formatTrackPointIsoTime(p.time)} COG=${cogS} spd=${spdS}`);
+      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS});
+    }
+    return{rows,copyLine:copyParts.join(" | "),n};
+  },[croppedPoints,trackInspectI,trackInspectJ]);
+
+  const copyTrackInspectLine=useCallback(()=>{
+    if(!trackInspectBlock||trackInspectBlock.error||!trackInspectBlock.copyLine)return;
+    const t=trackInspectBlock.copyLine;
+    const ok=()=>{setTrackInspectCopyMsg("Copied");setTimeout(()=>setTrackInspectCopyMsg(null),2200);};
+    const fail=()=>{setTrackInspectCopyMsg("Copy failed");setTimeout(()=>setTrackInspectCopyMsg(null),2200);};
+    const fallback=()=>{
+      try{
+        const ta=document.createElement("textarea");
+        ta.value=t;ta.style.position="fixed";ta.style.left="-9999px";
+        document.body.appendChild(ta);ta.select();document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok();
+      }catch(_){ fail(); }
+    };
+    if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok).catch(fallback);
+    else fallback();
+  },[trackInspectBlock]);
 
   // Do **not** reset crop in an effect on [rawPoints] — that ran after load/saved-crop/apply
   // and cleared DB + auto S/F crop. New-track resets are done in loadStrava / handleFile / openSaved only.
@@ -5847,6 +5899,38 @@ function App(){
               Show track point indices (0…n−1, cropped track; zoom in past ~12)
             </label>
             {showTrackPointIndices&&<div style={{fontSize:9,color:C.txD,margin:"4px 0 0",maxWidth:640,lineHeight:1.45}}>A line crossing in the app is a sign flip between <strong>consecutive</strong> points. These labels are the cropped track order. Mark-gate code also densifies inside that window, so engine segment indices can differ from what you read here—use the Legs trace (<code style={{fontSize:8.5}}>sF</code>, diagnostics) for the same run.</div>}
+          </div>
+          <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.bdr}`}}>
+            <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Cropped track point lookup (lat/lon / time for bug reports)</div>
+            <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginBottom:8}}>
+              <label style={{fontSize:11,color:C.txt}}>Index
+                <input type="number" min={0} step={1} value={trackInspectI} onChange={e=>setTrackInspectI(e.target.value)} placeholder="509" style={{marginLeft:6,width:72,padding:"4px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+              </label>
+              <label style={{fontSize:11,color:C.txt}}>to
+                <input type="number" min={0} step={1} value={trackInspectJ} onChange={e=>setTrackInspectJ(e.target.value)} placeholder="510" style={{marginLeft:6,width:72,padding:"4px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+              </label>
+              <button type="button" onClick={copyTrackInspectLine} disabled={!trackInspectBlock||!!trackInspectBlock.error||!trackInspectBlock.copyLine} style={{padding:"5px 12px",borderRadius:6,border:`1px solid ${C.bdr}`,background:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?C.acc:`${C.bdr}99`,color:C.txt,fontSize:11,cursor:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?"pointer":"not-allowed",opacity:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?1:0.55}}>Copy line</button>
+              {trackInspectCopyMsg&&<span style={{fontSize:11,color:trackInspectCopyMsg==="Copied"?C.acc:C.wrn}}>{trackInspectCopyMsg}</span>}
+            </div>
+            {trackInspectBlock&&trackInspectBlock.error&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>{trackInspectBlock.error}</div>}
+            {trackInspectBlock&&trackInspectBlock.rows&&<div style={{overflowX:"auto"}}>
+              <table style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,borderCollapse:"collapse",width:"100%",maxWidth:720}}>
+                <thead><tr style={{color:C.txM,textAlign:"left"}}>
+                  <th style={{padding:"4px 8px 4px 0"}}>#</th><th style={{padding:4}}>lat</th><th style={{padding:4}}>lon</th><th style={{padding:4}}>t (UTC)</th><th style={{padding:4}}>COG</th><th style={{padding:4}}>spd</th>
+                </tr></thead>
+                <tbody>
+                  {trackInspectBlock.rows.map(r=><tr key={r.i} style={{borderTop:`1px solid ${C.bdr}`}}>
+                    <td style={{padding:"4px 8px 4px 0",color:C.acc}}>{r.i}</td>
+                    <td style={{padding:4}}>{r.lat.toFixed(6)}</td>
+                    <td style={{padding:4}}>{r.lon.toFixed(6)}</td>
+                    <td style={{padding:4,color:C.txD}}>{r.tIso}</td>
+                    <td style={{padding:4}}>{r.cogS}</td>
+                    <td style={{padding:4}}>{r.spdS}</td>
+                  </tr>)}
+                </tbody>
+              </table>
+            </div>}
+            <div style={{fontSize:9,color:C.txD,marginTop:6,lineHeight:1.45}}>Indices are the <strong>auto-cropped</strong> polyline (same as map labels). Gate detection may use extra interpolated points between these.</div>
           </div>
           <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
             Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
