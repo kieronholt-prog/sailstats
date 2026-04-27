@@ -784,6 +784,25 @@ function firstValidOutboundPerpCrossingLoose(pts,iStart,jEnd,sideAt,tack,mLat,mL
   return-1;
 }
 /**
+ * Outbound on the **other** sign flip (s0>0, s1<0). Same line, opposite approach; map overlay can match either
+ * side depending on which leg you sail in from — strict `s0<0&&s1>0` alone rejected valid roundings.
+ */
+function firstValidOutboundPerpCrossingOpp(pts,iStart,jEnd,sideAt,tack,mLat,mLon,latN,lonN,loose){
+  const sF=Math.max(0,Math.floor(iStart|0));
+  const e=Math.min(jEnd,pts.length-1);
+  const minA=loose?OUTBOUND_LOOSE_MIN_ALONG_B_M:OUTBOUND_MIN_ALONG_B_M;
+  for(let j=Math.max(1,sF+1);j<=e;j++){
+    const a=pts[j-1],b=pts[j];
+    const s0=sideAt(a),s1=sideAt(b);
+    if(!segmentSignCrosses(s0,s1))continue;
+    if(!(s0>0&&s1<0))continue;
+    if(!perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))continue;
+    if(alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN)<minA)continue;
+    return j;
+  }
+  return-1;
+}
+/**
  * Inbound/outbound geometry matches `computeMapMarkGateRaysForDetection` (same as map gate overlay):
  * W135 in when mark is windward on map rules; chord otherwise; leeward→windward uses L135/R135 out;
  * chAlign = one joint ⟂ line (first crossing in, second out). Previously U±135 in used a 15° upwind test only.
@@ -792,16 +811,23 @@ function firstValidOutboundPerpCrossingLoose(pts,iStart,jEnd,sideAt,tack,mLat,mL
  * avoids locking onto a spurious “in” that never pairs with a valid out (e.g. wrong line first).
  */
 function findFirstInOutMarkGatePair(pts,sF,jEnd,sideIn,sideOutBase,outWind135,tack,curr,next){
-  const inSeg=[];
-  for(let j=Math.max(1,sF+1);j<=jEnd;j++){
-    const a=pts[j-1],b=pts[j];
-    if(!segmentSignCrosses(sideIn(a),sideIn(b)))continue;
-    if(!perpCrossingSatisfiesMarkTack(pts,j,tack,curr.lat,curr.lon))continue;
-    inSeg.push(j);
-  }
+  const collectIn=(useTack)=>{
+    const arr=[];
+    for(let j=Math.max(1,sF+1);j<=jEnd;j++){
+      const a=pts[j-1],b=pts[j];
+      if(!segmentSignCrosses(sideIn(a),sideIn(b)))continue;
+      if(useTack&&!perpCrossingSatisfiesMarkTack(pts,j,tack,curr.lat,curr.lon))continue;
+      arr.push(j);
+    }
+    return arr;
+  };
+  let inSeg=collectIn(true);
+  if(inSeg.length===0)inSeg=collectIn(false);
   const runOut=(eIn,sideO)=>{
     let eO=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideO,tack,curr.lat,curr.lon,next.lat,next.lon);
     if(eO<0)eO=firstValidOutboundPerpCrossingLoose(pts,eIn,jEnd,sideO,tack,curr.lat,curr.lon,next.lat,next.lon);
+    if(eO<0)eO=firstValidOutboundPerpCrossingOpp(pts,eIn,jEnd,sideO,tack,curr.lat,curr.lon,next.lat,next.lon,false);
+    if(eO<0)eO=firstValidOutboundPerpCrossingOpp(pts,eIn,jEnd,sideO,tack,curr.lat,curr.lon,next.lat,next.lon,true);
     return eO;
   };
   for(const eIn of inSeg){
@@ -827,13 +853,18 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
   if(mapG.chAlign&&mapG.alBearing!=null){
     const al=mapG.alBearing;
     const sideJ=pp=>signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,al);
-    const inSeg=[];
-    for(let j=Math.max(1,sF+1);j<=jEnd;j++){
-      const a=pts[j-1],b=pts[j];
-      if(!segmentSignCrosses(sideJ(a),sideJ(b)))continue;
-      if(!perpCrossingSatisfiesMarkTack(pts,j,tack,curr.lat,curr.lon))continue;
-      inSeg.push(j);
-    }
+    const fillAlign=(useTack)=>{
+      const arr=[];
+      for(let j=Math.max(1,sF+1);j<=jEnd;j++){
+        const a=pts[j-1],b=pts[j];
+        if(!segmentSignCrosses(sideJ(a),sideJ(b)))continue;
+        if(useTack&&!perpCrossingSatisfiesMarkTack(pts,j,tack,curr.lat,curr.lon))continue;
+        arr.push(j);
+      }
+      return arr;
+    };
+    let inSeg=fillAlign(true);
+    if(inSeg.length===0)inSeg=fillAlign(false);
     for(const eIn of inSeg){
       const eOut=firstPerpCrossing(pts,eIn,jEnd,sideJ);
       if(eOut<0||eOut<=eIn)continue;
@@ -1099,6 +1130,21 @@ function densifyGpsTrack(pts, opts){
     out.push(b);
   }
   return out;
+}
+/** Nearest `origPts` index to absolute time (sorted by time, binary search + neighbour check). */
+function nearestTimeIndexInSortedGps(origPts,t){
+  if(!origPts?.length)return 0;
+  const t0=Number(t);
+  if(!Number.isFinite(t0))return 0;
+  let lo=0,hi=origPts.length-1;
+  while(lo<hi){
+    const mid=(lo+hi)>>1;
+    if(origPts[mid].time<t0)lo=mid+1;else hi=mid;
+  }
+  const i=lo;
+  const i0=Math.max(0,i-1);
+  const d0=Math.abs(origPts[i0].time-t0),d1=Math.abs(origPts[i].time-t0);
+  return d0<=d1?i0:i;
 }
 
 /** HH:MM:SS from seconds (always two-digit hours). */
@@ -3106,6 +3152,12 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
   const roundings=[];
   const markSequenceLog=[];
   let searchFrom=0;
+  const gatePts=densifyGpsTrack(pts,{maxStepM:4,maxTimeSec:1});
+  const mapGateIdxToOrig=gi=>{
+    if(gi==null||!Number.isFinite(gi)||gi<0)return 0;
+    if(gi>=gatePts.length)return pts.length-1;
+    return nearestTimeIndexInSortedGps(pts,gatePts[gi].time);
+  };
 
   for(let mi=0;mi<fullSeq.length;mi++){
     const m=fullSeq[mi];
@@ -3133,19 +3185,20 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       return{legs:[],roundings,markSequenceLog,legBuildLog:[]};
     }
     const synN=needVirtPrev||needVirtNext;
-    const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName,mi+1<fullSeq.length?String((fullSeq[mi+1]||{}).name||""):"");
+    const g2=detectMarkInboundOutboundGates(gatePts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName,mi+1<fullSeq.length?String((fullSeq[mi+1]||{}).name||""):"");
     if(g2.ok){
-      const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
-      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:true,entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,syntheticNeighbours:synN});
+      const exitO=mapGateIdxToOrig(g2.exitIdx),entO=mapGateIdxToOrig(g2.entryIdx);
+      const dExit=hav(gatePts[g2.exitIdx].lat,gatePts[g2.exitIdx].lon,m.lat,m.lon);
+      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:true,entryIdx:entO,exitIdx:exitO,roundingTrackM:g2.trackM,syntheticNeighbours:synN});
       roundings.push({
-        mark:m.name,idx:g2.exitIdx,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
-        entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
+        mark:m.name,idx:exitO,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
+        entryIdx:entO,exitIdx:exitO,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
       });
       searchFrom=g2.exitIdx;
     }else{
       let bestI=-1,bestD=Infinity;
-      for(let k=searchFrom;k<pts.length;k++){
-        const d=hav(pts[k].lat,pts[k].lon,m.lat,m.lon);
+      for(let k=searchFrom;k<gatePts.length;k++){
+        const d=hav(gatePts[k].lat,gatePts[k].lon,m.lat,m.lon);
         if(d<bestD){bestD=d;bestI=k;}
       }
       if(bestI<0){
@@ -3155,7 +3208,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
       markSequenceLog.push({
         orderIndex:mi,mark:m.name,lap:m.lap,gateOk:false,fail:"gates_not_found",
         hint:"In then out on the map gate lines (135°/chord/L135) not found in order from here — check wind, tack P/S, crop, or mark order. Nearest approach is diagnostic only.",
-        nearestDistM:bestD,nearestIdx:bestI,searchFrom,syntheticNeighbours:synN,
+        nearestDistM:bestD,nearestIdx:bestI>=0?mapGateIdxToOrig(bestI):null,searchFrom,syntheticNeighbours:synN,
       });
       break;
     }
