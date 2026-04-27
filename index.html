@@ -4374,10 +4374,21 @@ function App(){
       const p=croppedPoints[i];
       const cogS=p.cog!=null&&Number.isFinite(p.cog)?`${Math.round(p.cog)}°`:"—";
       const spdS=p.ss!=null&&Number.isFinite(p.ss)?`${ms2k(p.ss).toFixed(2)} kts`:"—";
-      copyParts.push(`i=${i} lat=${p.lat.toFixed(6)} lon=${p.lon.toFixed(6)} t=${formatTrackPointIsoTime(p.time)} COG=${cogS} spd=${spdS}`);
-      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS});
+      let segInS="—";
+      if(i>0){
+        const b=bear(croppedPoints[i-1].lat,croppedPoints[i-1].lon,p.lat,p.lon);
+        if(Number.isFinite(b))segInS=`${(Math.round(b*10)/10).toFixed(1)}°T`;
+      }
+      copyParts.push(`i=${i} lat=${p.lat.toFixed(6)} lon=${p.lon.toFixed(6)} t=${formatTrackPointIsoTime(p.time)} COG=${cogS} spd=${spdS} segIn=${segInS}`);
+      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS,segInS});
     }
-    return{rows,copyLine:copyParts.join(" | "),n};
+    const segBrgBits=[];
+    for(let k=lo+1;k<=hi;k++){
+      const b=bear(croppedPoints[k-1].lat,croppedPoints[k-1].lon,croppedPoints[k].lat,croppedPoints[k].lon);
+      if(Number.isFinite(b))segBrgBits.push(`${k-1}→${k}=${(Math.round(b*10)/10).toFixed(1)}°T`);
+    }
+    const copyLine=copyParts.join(" | ")+(segBrgBits.length?` | ${segBrgBits.join(" ")}`:"");
+    return{rows,copyLine,n};
   },[croppedPoints,trackInspectI,trackInspectJ]);
 
   const copyTrackInspectLine=useCallback(()=>{
@@ -5916,7 +5927,9 @@ function App(){
             {trackInspectBlock&&trackInspectBlock.rows&&<div style={{overflowX:"auto"}}>
               <table style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,borderCollapse:"collapse",width:"100%",maxWidth:720}}>
                 <thead><tr style={{color:C.txM,textAlign:"left"}}>
-                  <th style={{padding:"4px 8px 4px 0"}}>#</th><th style={{padding:4}}>lat</th><th style={{padding:4}}>lon</th><th style={{padding:4}}>t (UTC)</th><th style={{padding:4}}>COG</th><th style={{padding:4}}>spd</th>
+                  <th style={{padding:"4px 8px 4px 0"}}>#</th><th style={{padding:4}}>lat</th><th style={{padding:4}}>lon</th><th style={{padding:4}}>t (UTC)</th>
+                  <th style={{padding:4}} title="Bearing of segment (i−1)→i; same as gate tack fallback when COG missing">Seg in</th>
+                  <th style={{padding:4}}>COG</th><th style={{padding:4}}>spd</th>
                 </tr></thead>
                 <tbody>
                   {trackInspectBlock.rows.map(r=><tr key={r.i} style={{borderTop:`1px solid ${C.bdr}`}}>
@@ -5924,6 +5937,7 @@ function App(){
                     <td style={{padding:4}}>{r.lat.toFixed(6)}</td>
                     <td style={{padding:4}}>{r.lon.toFixed(6)}</td>
                     <td style={{padding:4,color:C.txD}}>{r.tIso}</td>
+                    <td style={{padding:4,color:r.segInS!=="—"?C.gld:C.txD}}>{r.segInS}</td>
                     <td style={{padding:4}}>{r.cogS}</td>
                     <td style={{padding:4}}>{r.spdS}</td>
                   </tr>)}
