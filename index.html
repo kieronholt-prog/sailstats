@@ -961,19 +961,11 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
     return{ok:false,gateDetDebug:buildChAlignGateFailureDebug(pts,sF,jEnd,sideJ,tack,curr)};
   }
   const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
-  const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
-  const bPrevMark=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
-  const bBIn=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
-  let bInNormX,bInNormY;
-  if(useU135&&apU!=null){
-    const s=enuVecFromBearingMetersTwd(apU,Math.max(c1,1));
-    bInNormX=s.x;bInNormY=s.y;
-  }else{
-    bInNormX=bPrevMark.x*ts;bInNormY=bPrevMark.y*ts;
-  }
+  if(mapG.inRayBr==null||!Number.isFinite(mapG.inRayBr))return{ok:false,gateDetDebug:{mode:"in_ray",fail:"no_in_ray",mapG}};
   const sideIn=pp=>{
-    const v=sideValuePerpAtBChordEnuA(prev.lat,prev.lon,curr.lat,curr.lon,pp.lat,pp.lon,bBIn.x,bBIn.y,bInNormX,bInNormY);
-    return useU135?v*ts:v;
+    let s0=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,mapG.inRayBr);
+    if(useU135)s0*=ts;
+    return s0;
   };
   const bOut0=enuMeters(curr.lat,curr.lon,next.lat,next.lon);
   const outWind135=mapG.apIsOutWind135&&mapG.outRayPre!=null&&Number.isFinite(wdf);
@@ -1200,20 +1192,12 @@ function signedInboundSideMetersForMapGate(prev,curr,next,p,currentMarkName,next
   }
   const wdf=Number(windFromDeg);
   const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
-  const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
   const ts=tackSignGates(tack);
-  const bPrevMark=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
-  const bBIn=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
-  let bInNormX,bInNormY;
-  if(useU135&&apU!=null){
-    const s=enuVecFromBearingMetersTwd(apU,Math.max(c1,1));
-    bInNormX=s.x;bInNormY=s.y;
-  }else{
-    bInNormX=bPrevMark.x*ts;bInNormY=bPrevMark.y*ts;
-  }
-  const v=sideValuePerpAtBChordEnuA(prev.lat,prev.lon,curr.lat,curr.lon,p.lat,p.lon,bBIn.x,bBIn.y,bInNormX,bInNormY);
-  const sideM=useU135?v*ts:v;
-  return{mapG,sideM,mode:useU135?"U135_chord":"ch",inLineBearingTwd:mapG.inRayBr};
+  if(mapG.inRayBr==null||!Number.isFinite(mapG.inRayBr))return{error:"no_in_ray",mapG};
+  /** In-gate = infinite line through the mark in the same direction the map draws the magenta segment (`inRayBr`); P/S may flip the sign to match the engine. */
+  let sideM=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,p.lat,p.lon,mapG.inRayBr);
+  if(useU135)sideM*=ts;
+  return{mapG,sideM,mode:useU135?"U135_chord":(mapG.inMode||"ch"),inLineBearingTwd:mapG.inRayBr};
 }
 /** Cumulative distance along pts to index nearest (tlat, tlon); returns {alongM, nearestIdx, distToMarkM}. */
 function distanceAlongTrackToNearest(pts,tlat,tlon){
