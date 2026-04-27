@@ -68,6 +68,7 @@ const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
 const LS_GPS_TO_BOW_M_KEY="sailstats_gpsToBowM";
 const DEFAULT_GPS_TO_BOW_M=2;
+const LS_SHOW_TRACK_IDX_KEY="sailstats_showTrackIdx";
 const LS_BOAT_TYPE_KEY="sailstats_boatType";
 const BOAT_TYPE_OPTIONS=[
   "",
@@ -3973,7 +3974,7 @@ function WindRose({wd,onChange,compact,hint}){
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
-function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC,legGatesFC,legGatesKey}){
+function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC,legGatesFC,legGatesKey,showPointIndices=false}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const markersRef=useRef([]);
@@ -4000,7 +4001,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         const fc=trackSegmentFC&&trackSegmentFC.features?.length>=1?trackSegmentFC:buildTrackSegmentFeatureCollection(trackPoints,new Array(trackPoints.length).fill(false));
         map.addSource("track-segments",{type:"geojson",data:fc});
         map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":mapboxTrackLineColorByKindExpr(C.trk,C.trkRound),"line-width":3,"line-opacity":0.88}});
-        map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
+        map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map((p,idx)=>({type:"Feature",properties:{idx:idx},geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
         map.addLayer({id:"track-points",type:"circle",source:"track-points",paint:{"circle-radius":1.8,"circle-color":"#d9fff7","circle-opacity":0.72}});
         const lats=trackPoints.map(p=>p.lat),lons=trackPoints.map(p=>p.lon);
         map.fitBounds([[Math.min(...lons)-0.005,Math.min(...lats)-0.003],[Math.max(...lons)+0.005,Math.max(...lats)+0.003]],{padding:40});
@@ -4154,14 +4155,29 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         map.addSource("track-segments",{type:"geojson",data:fc});
         if(!map.getLayer("track-line"))map.addLayer({id:"track-line",type:"line",source:"track-segments",layout:{"line-join":"round","line-cap":"round"},paint:{"line-color":mapboxTrackLineColorByKindExpr(C.trk,C.trkRound),"line-width":3,"line-opacity":0.88}});
       }
-      const psrc=map.getSource("track-points");
-      if(psrc)psrc.setData({type:"FeatureCollection",features:trackPoints.map(p=>({type:"Feature",geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))});
-    }
+      let psrc=map.getSource("track-points");
+      if(!psrc){
+        map.addSource("track-points",{type:"geojson",data:{type:"FeatureCollection",features:trackPoints.map((p,idx)=>({type:"Feature",properties:{idx:idx},geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))}});
+        if(!map.getLayer("track-points"))map.addLayer({id:"track-points",type:"circle",source:"track-points",paint:{"circle-radius":1.8,"circle-color":"#d9fff7","circle-opacity":0.72}});
+        psrc=map.getSource("track-points");
+      }else
+        psrc.setData({type:"FeatureCollection",features:trackPoints.map((p,idx)=>({type:"Feature",properties:{idx:idx},geometry:{type:"Point",coordinates:[p.lon,p.lat]}}))});
+      try{
+        if(psrc){
+          if(!map.getLayer("track-idx-lbls")){
+            map.addLayer({id:"track-idx-lbls",type:"symbol",source:"track-points",minzoom:12,layout:{"text-field":["to-string",["get","idx"]],"text-size":7.5,"text-offset":[0,0.55],"text-anchor":"top","text-allow-overlap":true,"text-ignore-placement":true,"text-optional":false},paint:{"text-color":"#e0f2fe","text-halo-color":"#0a1020","text-halo-width":1.1}});
+            map.setLayoutProperty("track-idx-lbls","visibility",showPointIndices?"visible":"none");
+          }else
+            map.setLayoutProperty("track-idx-lbls","visibility",showPointIndices?"visible":"none");
+        }
+      }catch(e){console.warn("[CourseMap] track index labels",e);}
+    }else
+      try{ if(map.getLayer("track-idx-lbls"))map.setLayoutProperty("track-idx-lbls","visibility","none");}catch(_){ }
     if(courseMarks&&courseMarks.length>1){
       const src=map.getSource("course");
       if(src)src.setData({type:"Feature",geometry:{type:"LineString",coordinates:courseMarks.map(m=>[m.lon,m.lat])}});
     }
-  },[trackPoints,courseMarks,trackSegmentFC]);
+  },[trackPoints,courseMarks,trackSegmentFC,showPointIndices]);
 
   const roseSz=84;
   return(
@@ -4217,6 +4233,12 @@ function App(){
     try{return localStorage.getItem("sailstats_densify")!=="0";}catch(_){ return true; }
   });
   const [showMarkGates,setShowMarkGates]=useState(true);
+  const [showTrackPointIndices,setShowTrackPointIndices]=useState(()=>{
+    try{return localStorage.getItem(LS_SHOW_TRACK_IDX_KEY)==="1";}catch(_){ return false; }
+  });
+  useEffect(()=>{
+    try{localStorage.setItem(LS_SHOW_TRACK_IDX_KEY,showTrackPointIndices?"1":"0");}catch(_){}
+  },[showTrackPointIndices]);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
   const [windOvr,setWindOvr]=useState(null);
@@ -5820,6 +5842,11 @@ function App(){
               <input type="checkbox" checked={showMarkGates} onChange={e=>setShowMarkGates(e.target.checked)}/>
               Show mark in / out gate lines
             </label>
+            <label style={{fontSize:12,color:C.txt,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
+              <input type="checkbox" checked={showTrackPointIndices} onChange={e=>setShowTrackPointIndices(e.target.checked)}/>
+              Show track point indices (0…n−1, cropped track; zoom in past ~12)
+            </label>
+            {showTrackPointIndices&&<div style={{fontSize:9,color:C.txD,margin:"4px 0 0",maxWidth:640,lineHeight:1.45}}>A line crossing in the app is a sign flip between <strong>consecutive</strong> points. These labels are the cropped track order. Mark-gate code also densifies inside that window, so engine segment indices can differ from what you read here—use the Legs trace (<code style={{fontSize:8.5}}>sF</code>, diagnostics) for the same run.</div>}
           </div>
           <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
             Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
@@ -5860,6 +5887,7 @@ function App(){
               trackSegmentFC={setupMapAnalysis?.trackSegmentFC||null}
               legGatesFC={markGateMapFC}
               legGatesKey={courseGeomSig}
+              showPointIndices={showTrackPointIndices}
             />
             <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
               <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
