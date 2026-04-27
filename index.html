@@ -340,7 +340,7 @@ function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
 /** Signed lateral (m) to infinite line through M along `lineBearingTwd` (°T). Same line as `lateralDistMToLineAtCFromP` (unsigned). */
 function signedLateralMetersToLineFromMAlongBearingTwd(latM,lonM,latP,lonP,lineBearingTwd){
   if(!Number.isFinite(lineBearingTwd))return NaN;
-  const v=enuMeters(latM,lonM,latP,latP);
+  const v=enuMeters(latM,lonM,latP,lonP);
   const θ=Number(lineBearingTwd)*D;
   const tx=Math.sin(θ),ty=Math.cos(θ);
   return v.x*ty-v.y*tx;
@@ -621,18 +621,20 @@ function enuVecFromBearingMetersTwd(bearingDeg,scaleM){
  * `sideOfPerpAtA`: line through A, ⟂ to chord along `b` in A’s ENU. Here `b` = normal (A→B) in m at A.
  */
 function sideValuePerpAtAChordEnuA(latA,lonA,latP,lonP,bEnuX,bEnuY){
-  const p=enuMeters(latA,lonA,latP,latP);
-  if(Math.hypot(bEnuX,bEnuY)<0.1)return 0;
-  return p.x*bEnuX+p.y*bEnuY;
+  const p=enuMeters(latA,lonA,latP,lonP);
+  const L=Math.hypot(bEnuX,bEnuY);
+  if(L<0.1)return 0;
+  return(p.x*bEnuX+p.y*bEnuY)/L;
 }
 /**
  * Line through B, ⟂ to chord, normal in A’s ENU = bNorm (same as sideOfPerpAtB for real chord).
  * `bB` = (B−A) in A’s; `bNorm` = gate normal in A (any length, non-zero).
  */
 function sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,latP,lonP,bBEnuX,bBEnuY,bNormX,bNormY){
-  const p=enuMeters(latA,lonA,latP,latP);
-  if(Math.hypot(bNormX,bNormY)<0.1)return 0;
-  return(p.x-bBEnuX)*bNormX+(p.y-bBEnuY)*bNormY;
+  const p=enuMeters(latA,lonA,latP,lonP);
+  const L=Math.hypot(bNormX,bNormY);
+  if(L<0.1)return 0;
+  return((p.x-bBEnuX)*bNormX+(p.y-bBEnuY)*bNormY)/L;
 }
 const LEG_CHORD_MIN_M=3;
 /** Min GNSS samples in a leg / perp window (1 Hz, fast legs, or exit→entry clip can be only a few points). */
