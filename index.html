@@ -988,15 +988,18 @@ function firstPerpCrossingWithNeg(pts,sF,jEnd,sideAt){
 }
 /**
  * Per-leg windows aligned with the **map** debug gates: committee line (START) or `computeMapMarkGateRaysForDetection` out at A, in at B.
+ * Gate **side** = committee-style mark→5nm + `signedMetersToABLineLikeCommittee` + U135 tack when windward (same as `detectMarkInboundOutboundGates`).
  * Falls back in caller to chord-⊥ when null.
  */
 function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMark,toMarkName,tackFrom,tackTo,wdF,wwm,legMapCtx,e0,e1,hasSf){
-  if(!legMapCtx||!Number.isFinite(wdF))return null;
+  const base={wPrev:legMapCtx?.wPrev??null,wAfter:legMapCtx?.wAfter??null,nameAfter:legMapCtx?.nameAfter??null};
+  const legCtx=enrichLegMapCtxForGates(base,latA,lonA,latB,lonB,fromMark,toMarkName);
+  if(!legCtx)return null;
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const fromM=String(fromMark||"");
   const toM=String(toMarkName||"");
-  const{wPrev,wAfter,nameAfter}=legMapCtx;
+  const{wPrev,wAfter,nameAfter}=legCtx;
   let cA=-1,cB=-1,gOut=null,gIn=null,cAmap=false,cBmap=false;
   if(fromM==="START"&&hasSf&&e0&&e1){
     cA=firstCommitteeLineSegmentCrossing(pts,sF,jEnd,e0,e1);
@@ -1005,14 +1008,14 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
     if(!wAfter||!Number.isFinite(wAfter.lat)||!Number.isFinite(wAfter.lon))return null;
     gIn=computeMapMarkGateRaysForDetection({lat:latA,lon:lonA},{lat:latB,lon:lonB},wAfter,toM,String(nameAfter||""),wwm,tackTo,wdF);
     if(gIn.inRayBr==null||!Number.isFinite(gIn.inRayBr))return null;
-    const sideB=p=>signedLateralMetersToLineFromMAlongBearingTwd(latB,lonB,p.lat,p.lon,gIn.inRayBr);
+    const sideB=p=>markGateSideMetersMapAlignedForLeg(p,latB,lonB,gIn,"in",tackTo,wdF);
     const cBr=firstPerpCrossingWithNeg(pts,cA,jEnd,sideB);
     cB=cBr.idx;
     cBmap=true;
   }else if(toM==="FINISH"&&hasSf&&e0&&e1&&wPrev&&fromM!=="START"){
     gOut=computeMapMarkGateRaysForDetection(wPrev,{lat:latA,lon:lonA},{lat:latB,lon:lonB},fromM,"FINISH",wwm,tackFrom,wdF);
     if(gOut.outRayPre==null||!Number.isFinite(gOut.outRayPre))return null;
-    const sideA=p=>signedLateralMetersToLineFromMAlongBearingTwd(latA,lonA,p.lat,p.lon,gOut.outRayPre);
+    const sideA=p=>markGateSideMetersMapAlignedForLeg(p,latA,lonA,gOut,"out",tackFrom,wdF);
     const cAr=firstPerpCrossingWithNeg(pts,sF,jEnd,sideA);
     cA=cAr.idx;
     cAmap=true;
@@ -1023,8 +1026,8 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
     gOut=computeMapMarkGateRaysForDetection(wPrev,{lat:latA,lon:lonA},{lat:latB,lon:lonB},fromM,toM,wwm,tackFrom,wdF);
     gIn=computeMapMarkGateRaysForDetection({lat:latA,lon:lonA},{lat:latB,lon:lonB},wAfter,toM,String(nameAfter||""),wwm,tackTo,wdF);
     if(gOut.outRayPre==null||gIn.inRayBr==null||!Number.isFinite(gOut.outRayPre)||!Number.isFinite(gIn.inRayBr))return null;
-    const sideA=p=>signedLateralMetersToLineFromMAlongBearingTwd(latA,lonA,p.lat,p.lon,gOut.outRayPre);
-    const sideB=p=>signedLateralMetersToLineFromMAlongBearingTwd(latB,lonB,p.lat,p.lon,gIn.inRayBr);
+    const sideA=p=>markGateSideMetersMapAlignedForLeg(p,latA,lonA,gOut,"out",tackFrom,wdF);
+    const sideB=p=>markGateSideMetersMapAlignedForLeg(p,latB,lonB,gIn,"in",tackTo,wdF);
     const cAr=firstPerpCrossingWithNeg(pts,sF,jEnd,sideA);
     cA=cAr.idx;
     cAmap=true;
@@ -1039,7 +1042,8 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
   return{cA,cB,cAmap,cBmap,gOut,gIn};
 }
 /**
- * Leg = map-aligned gate lines when possible (135° / wind L135·R135 / committee / chord ±90°), else legacy chord-based gates.
+ * Leg = map-aligned gate lines when possible (135° / wind L135·R135 / committee; virtual 500m prev/next like `detectMark`); if that fails, chord-⊥ gates with
+ * **5nm** + `signedMetersToABLineLikeCommittee` (not raw ENU dot) so the fallback still matches Start/map distance parity.
  * **START** → first mark: gate A = **committee line** (not the synthetic line at mid ⟂ leg, which the track may never cross).
  * **Mark** → mark: A = **map out** at A, B = **map in** at B (same as overlay).
  */
@@ -1053,7 +1057,7 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
   const hasSf=e0&&e1&&Number.isFinite(e0.lat)&&Number.isFinite(e0.lon)&&Number.isFinite(e1.lat)&&Number.isFinite(e1.lon);
   const chLeg=bear(latA,lonA,latB,lonB);
   const mapTry=tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMark,toMarkName,tackFrom,tackTo,wdF,wwm,legMapCtx,e0,e1,hasSf);
-  let cA, cB, useU135, sideA, sideB, bChord, bB, tsA, tsB, bNormAx, bNormAy, bNormBx, bNormBy, mapLegOk=false, gateGOut=null, gateGIn=null;
+  let cA, cB, useU135, sideA, sideB, bChord, tsA, tsB, bNormAx, bNormAy, bNormBx, bNormBy, mapLegOk=false, gateGOut=null, gateGIn=null;
   const jEnd=pts.length-1;
   const sF=Math.max(0,searchFrom|0);
   if(mapTry){
@@ -1061,7 +1065,6 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
   }else{
     useU135=!!tackFrom&&!!tackTo&&Number.isFinite(wdF)&&(isWindwardMarkForMapGates(String(toMarkName||""),String(windwardMarkName||""),chLeg,wdF)||useUpwindEntryGateBearing(chLeg,wdF,toMarkName,windwardMarkName));
     bChord=enuMeters(latA,lonA,latB,lonB);
-    bB=enuMeters(latA,lonA,latB,lonB);
     tsA=tackSignGates(tackFrom);
     tsB=tackSignGates(tackTo);
     bNormAx=bNormAy=bNormBx=bNormBy=0;
@@ -1081,15 +1084,17 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
       bNormBx=bChord.x*tsB;bNormBy=bChord.y*tsB;
     }
     sideA=useU135
-      ?(p)=>sideValuePerpAtAChordEnuA(latA,lonA,p.lat,p.lon,bNormAx,bNormAy)*tsA
-      :(p)=>sideValuePerpAtAChordEnuA(latA,lonA,p.lat,p.lon,bNormAx,bNormAy);
+      ?(p)=>signedMetersChordPerpAtAGate5nm(latA,lonA,p.lat,p.lon,bNormAx,bNormAy)*tsA
+      :(p)=>signedMetersChordPerpAtAGate5nm(latA,lonA,p.lat,p.lon,bNormAx,bNormAy);
     sideB=useU135
-      ?(p)=>sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,p.lat,p.lon,bB.x,bB.y,bNormBx,bNormBy)*tsB
-      :(p)=>sideValuePerpAtBChordEnuA(latA,lonA,latB,lonB,p.lat,p.lon,bB.x,bB.y,bNormBx,bNormBy);
-    cA=firstPerpCrossing(pts, sF, jEnd, sideA);
-    if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_gate_crossing_at_leg_A",cAIdx:null,cBIdx:null,searchFrom:sF}};
-    cB=firstPerpCrossing(pts, cA, jEnd, sideB);
-    if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_gate_crossing_at_leg_B",cAIdx:cA,cBIdx:null,searchFrom:sF}};
+      ?(p)=>signedMetersChordPerpAtBGate5nm(latB,lonB,p.lat,p.lon,bNormBx,bNormBy)*tsB
+      :(p)=>signedMetersChordPerpAtBGate5nm(latB,lonB,p.lat,p.lon,bNormBx,bNormBy);
+    const cArF=firstPerpCrossingWithNeg(pts,sF,jEnd,sideA);
+    cA=cArF.idx;
+    if(cA<0)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_gate_crossing_at_leg_A",cAIdx:null,cBIdx:null,searchFrom:sF,legFallback:"chord_perp_5nm"}};
+    const cBrF=firstPerpCrossingWithNeg(pts,cA,jEnd,sideB);
+    cB=cBrF.idx;
+    if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_gate_crossing_at_leg_B",cAIdx:cA,cBIdx:null,searchFrom:sF,legFallback:"chord_perp_5nm"}};
   }
   if(cB-cA+1<LEG_MIN_TRACK_POINTS)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"leg_gate_window_too_few_points",cAIdx:cA,cBIdx:cB,searchFrom:sF,mapLeg:mapLegOk}};
   let jSf=-1;
@@ -1123,7 +1128,7 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
       roundingKind="mark_path_m";
     }else{roundingM=0;roundingKind="mark_path_m";}
   }else if(String(fromMark||"")!=="START"&&mapLegOk)roundingM=0,roundingKind="map_in_out_leg_m";
-  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"map_gates",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null,gateDebug:{ok:true,useU135:mapLegOk?null:useU135,mapLeg:mapLegOk,cAIdx:cA,cBIdx:cB,jSf,jSfOnLine:jSf>=0,legGatePts:cB-legStartIdx+1,fromMark:String(fromMark||""),gateGIn:mapLegOk?gateGIn:undefined,gateGOut:mapLegOk?gateGOut:undefined}};
+  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"map_gates",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null,gateDebug:{ok:true,useU135:mapLegOk?null:useU135,mapLeg:mapLegOk,legFallback:mapLegOk?null:"chord_perp_5nm",cAIdx:cA,cBIdx:cB,jSf,jSfOnLine:jSf>=0,legGatePts:cB-legStartIdx+1,fromMark:String(fromMark||""),gateGIn:mapLegOk?gateGIn:undefined,gateGOut:mapLegOk?gateGOut:undefined}};
 }
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
 function destinationPoint(lat,lon,bearingDeg,distM){
@@ -1145,6 +1150,27 @@ function virtualPrevForFirstMarkApproach(curr,nextW,distM=500){
 function virtualNextAfterLastMark(prev,curr,distM=500){
   const bPC=bear(prev.lat,prev.lon,curr.lat,curr.lon);
   return destinationPoint(curr.lat,curr.lon,bPC,distM);
+}
+/**
+ * Fills **virtual 500m** prev / next when missing so per-leg `computeMapMarkGateRaysForDetection` matches
+ * `resolveMarkGateNeighboursForIndex` / `detectMarkInboundOutboundGates` (same as map overlay).
+ */
+function enrichLegMapCtxForGates(legMapCtx,latA,lonA,latB,lonB,fromMark,toMarkName){
+  if(!legMapCtx)return null;
+  const fromM=String(fromMark||"");
+  const toM=String(toMarkName||"");
+  if(!Number.isFinite(latA)||!Number.isFinite(lonA)||!Number.isFinite(latB)||!Number.isFinite(lonB))return{...legMapCtx};
+  const a={lat:latA,lon:lonA},b={lat:latB,lon:lonB};
+  let wPrev=legMapCtx.wPrev,wAfter=legMapCtx.wAfter;
+  if((!wAfter||!Number.isFinite(wAfter.lat))&&fromM==="START"&&toM!=="FINISH")
+    wAfter=virtualNextAfterLastMark(a,b,500);
+  if((!wPrev||!Number.isFinite(wPrev.lat))&&toM==="FINISH"&&fromM!=="START")
+    wPrev=virtualPrevForFirstMarkApproach(a,b,500);
+  if((!wAfter||!Number.isFinite(wAfter.lat))&&fromM!=="START"&&toM!=="FINISH")
+    wAfter=virtualNextAfterLastMark(a,b,500);
+  if((!wPrev||!Number.isFinite(wPrev.lat))&&fromM!=="START"&&toM!=="FINISH"&&wAfter&&Number.isFinite(wAfter.lat))
+    wPrev=virtualPrevForFirstMarkApproach(a,b,500);
+  return{...legMapCtx,wPrev,wAfter};
 }
 /**
  * Prev / curr / next for one row in the expanded course — same as `detectLegsFromMarks`
@@ -1374,6 +1400,44 @@ function signedMetersToABLineLikeCommittee(pLat,pLon,aLat,aLon,bLat,bLon){
   const L=Math.hypot(b.x-a.x,b.y-a.y);
   if(L<0.1)return 0;
   return s/L;
+}
+/**
+ * Signed m to the map **in**- or **out**-gate line at one mark, committee-style (mark→B along ray, 5nm arm + `signedMetersToABLineLikeCommittee`),
+ * with U135×`tackAtMark` when `gMap.isWm` — same construction as `detectMarkInboundOutboundGates` / inspector.
+ */
+function markGateSideMetersMapAlignedForLeg(p,markLat,markLon,gMap,inOrOut,tackAtMark,windFromDeg){
+  if(!gMap||!p)return 0;
+  const ray=inOrOut==="in"?gMap.inRayBr:gMap.outRayPre;
+  if(ray==null||!Number.isFinite(ray))return 0;
+  const g=markGateSegmentEndsFromBearingTwd(markLat,markLon,ray,MARK_GATE_LINE_ARM_M);
+  if(!g)return 0;
+  let s=signedMetersToABLineLikeCommittee(p.lat,p.lon,g.aLat,g.aLon,g.bLat,g.bLon);
+  const wdF=Number(windFromDeg);
+  const useU135=!!tackAtMark&&Number.isFinite(wdF)&&gMap.isWm;
+  if(useU135)s*=tackSignGates(tackAtMark);
+  return s;
+}
+/**
+ * Chord-⊥ leg fallback: same **infinite** line as `sideValuePerpAtAChordEnuA` / `sideValuePerpAtBChordEnuA`, but
+ * signed distance via 5nm segment + `signedMetersToABLineLikeCommittee` (par with Start / map mark gates).
+ */
+function signedMetersChordPerpAtAGate5nm(latA,lonA,latP,lonP,bEnuX,bEnuY){
+  const L=Math.hypot(bEnuX,bEnuY);
+  if(L<0.1)return 0;
+  const tx=-bEnuY/L,ty=bEnuX/L;
+  const brT=((Math.atan2(tx,ty)*180/Math.PI)+360)%360;
+  const g=markGateSegmentEndsFromBearingTwd(latA,lonA,brT,MARK_GATE_LINE_ARM_M);
+  if(!g)return 0;
+  return signedMetersToABLineLikeCommittee(latP,lonP,g.aLat,g.aLon,g.bLat,g.bLon);
+}
+function signedMetersChordPerpAtBGate5nm(latB,lonB,latP,lonP,bNormX,bNormY){
+  const L=Math.hypot(bNormX,bNormY);
+  if(L<0.1)return 0;
+  const tx=-bNormY/L,ty=bNormX/L;
+  const brT=((Math.atan2(tx,ty)*180/Math.PI)+360)%360;
+  const g=markGateSegmentEndsFromBearingTwd(latB,lonB,brT,MARK_GATE_LINE_ARM_M);
+  if(!g)return 0;
+  return signedMetersToABLineLikeCommittee(latP,lonP,g.aLat,g.aLon,g.bLat,g.bLon);
 }
 /**
  * Project GPS forward to bow: along COG (° T) or segment bearing, by `forwardM` (m, ≥0).
@@ -3240,7 +3304,7 @@ function buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBo
     const r2=hasR2?roundings[i+2]:null;
     const wAfterLL=r2?(String(r2.mark)==="FINISH"&&sfMid?sfMid:(getWP(r2)||null)):null;
     const nameAfterR2=hasR2?String(r2.mark||""):null;
-    const legMapCtx=Number.isFinite(Number(windFromDeg))?{wPrev:wPrevLL,wAfter:wAfterLL,nameAfter:nameAfterR2}:null;
+    const legMapCtx={wPrev:wPrevLL,wAfter:wAfterLL,nameAfter:nameAfterR2};
     const g=findMapLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg,r0.tack??null,r1.tack??null,String(r1.mark||""),windwardMarkName,legMapCtx);
     row.gateDebug=g.gateDebug||null;
     row.legPathDef=g.legPathDef||"closest";
