@@ -1000,13 +1000,14 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
     };
     let inSeg=fillAlign(true);
     if(inSeg.length===0)inSeg=fillAlign(false);
-    for(const eIn of inSeg){
-      const eOut=firstPerpCrossing(pts,eIn,jEnd,sideJ);
-      if(eOut<0||eOut<=eIn)continue;
-      if(eOut-eIn+1<2)continue;
-      const trackM=sumPathDist(pts,eIn,eOut);
-      const straightM=hav(pts[eIn].lat,pts[eIn].lon,pts[eOut].lat,pts[eOut].lon);
-      return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
+    inSeg.sort((a,b)=>a-b);
+    /** Same infinite line for in & out: first crossing along track = in, second = out (never pair a later in before an earlier out). */
+    if(inSeg.length>=2){
+      const eIn=inSeg[0],eOut=inSeg[1];
+      if(eOut>eIn&&eOut-eIn+1>=2){
+        const COINCIDENT_GATE_DIST_M=1;
+        return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM:COINCIDENT_GATE_DIST_M,straightM:COINCIDENT_GATE_DIST_M};
+      }
     }
     return{ok:false,gateDetDebug:buildChAlignGateFailureDebug(pts,sF,jEnd,sideJ,tack,curr)};
   }
