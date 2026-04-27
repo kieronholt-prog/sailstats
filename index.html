@@ -329,6 +329,18 @@ function nudgeGLabelM(lat,lon,idx){
   const oE=((g%6)-2.5)*1.0,oN=((Math.floor(g/6)%4)-1.5)*0.9;
   return enuMetersToLatLon(lat,lon,oE,oN);
 }
+/** Stable key for de-duplicating map LineString features (e.g. same chAlign line or repeated laps). */
+function gateLineCoordsKey(seg){
+  if(!seg||seg.length<2)return"";
+  return seg.map(p=>`${Number(p[0]).toFixed(5)},${Number(p[1]).toFixed(5)}`).join(";");
+}
+function markGateLinesEqual(a,b){
+  if(!a||!b||a.length!==b.length)return false;
+  for(let i=0;i<a.length;i++){
+    if(Math.abs(Number(a[i][0])-Number(b[i][0]))>1e-5||Math.abs(Number(a[i][1])-Number(b[i][1]))>1e-5)return false;
+  }
+  return true;
+}
 /** Lateral distance (m) in local ENU from P to the infinite line through C along bearing `lineBearingTwd` (°T). */
 function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
   if(!Number.isFinite(lineBearingTwd))return NaN;
@@ -436,6 +448,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     ?{lat:row.lat,lon:row.lon}:null);
   const shortN=n=>n&&String(n).length>10?String(n).slice(0,9)+"\u2006\u2026":String(n);
   const feats=[];
+  const seenGateLineGeom=new Set();
   let gNum=0;
   for(let mi=0;mi<fullSeq.length;mi++){
     const m=fullSeq[mi];
@@ -478,48 +491,78 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180,windFro
     if(prev){
       if(nextW){
         if(inRayBr==null)continue;
-        const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,inRayBr,halfLenM);
-        if(seg){
-          const gi=++gNum;
-          const tag=`#${gi} in ${inMode} ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${chAlignToPrev?" chAlign":""}`;
-          feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:seg}});
-          {const p=nudgeGLabelM(seg[1][1],seg[1][0],gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+        const segIn=segmentOneRayBearingTwd(curr.lat,curr.lon,inRayBr,halfLenM);
+        const outRayBr=outRayPre;
+        const outMode=outModePre;
+        const apU=apUPre;
+        const segOut=outRayBr!=null?segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM):null;
+        const legToOut=outToSf?shortN("S/F"):shortN(nxRow?.name??"?");
+        const merged=chAlignToPrev&&segIn&&segOut&&markGateLinesEqual(segIn,segOut);
+        if(merged){
+          const geo=segIn;
+          const gk=gateLineCoordsKey(geo);
+          if(gk&&!seenGateLineGeom.has(gk)){
+            seenGateLineGeom.add(gk);
+            const gi=++gNum;
+            const uBit=(outMode==="L135"||outMode==="R135")&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
+            const chBit=` chOut${Math.round((chOut??0)*10)/10}°`;
+            const tag=`#${gi} in/out chAlign ${shortN(name)} \u2194 ${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}`;
+            feats.push({type:"Feature",properties:{kind:"inout",g:gi,mark:name,lap:Number(m.lap)||0,inMode,chOut:Math.round((chOut??0)*10)/10,apU:apU!=null?Math.round(apU*10)/10:null,tag},geometry:{type:"LineString",coordinates:geo}});
+            const midLon=(geo[0][0]+geo[1][0])/2,midLa=(geo[0][1]+geo[1][1])/2;
+            {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"inout"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+          }
+        }else{
+          if(segIn){
+            const gkIn=gateLineCoordsKey(segIn);
+            if(gkIn&&!seenGateLineGeom.has(gkIn)){
+              seenGateLineGeom.add(gkIn);
+              const gi=++gNum;
+              const tag=`#${gi} in ${inMode} ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${chAlignToPrev?" chAlign":""}`;
+              feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:segIn}});
+              {const p=nudgeGLabelM(segIn[1][1],segIn[1][0],gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+            }
+          }
+          if(segOut){
+            const gkOut=gateLineCoordsKey(segOut);
+            if(gkOut&&!seenGateLineGeom.has(gkOut)){
+              seenGateLineGeom.add(gkOut);
+              const go=++gNum;
+              const uBit=(outMode==="L135"||outMode==="R135")&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
+              const chBit=` chOut${Math.round((chOut??0)*10)/10}°`;
+              const tag=`#${go} out ${outMode} ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}${chAlignToPrev?" chAlign":""}`;
+              feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legFrom:shortN(name),legTo:legToOut,outMode,chOut:Math.round((chOut??0)*10)/10,apU:apU!=null?Math.round(apU*10)/10:null,tack:tack??"",tag},geometry:{type:"LineString",coordinates:segOut}});
+              {const p=nudgeGLabelM(segOut[1][1],segOut[1][0],go);feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+            }
+          }
         }
       }else{
         const seg=segmentGateThroughBPerpChord(prev.lat,prev.lon,curr.lat,curr.lon,halfLenM);
         if(seg){
-          const gi=++gNum;
-          const inMode="ch";
-          const tag=`#${gi} in ${inMode} \u00b7B\u27f3 ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0}`;
-          feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode,tag},geometry:{type:"LineString",coordinates:seg}});
-          const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
-          {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+          const gk=gateLineCoordsKey(seg);
+          if(gk&&!seenGateLineGeom.has(gk)){
+            seenGateLineGeom.add(gk);
+            const gi=++gNum;
+            const inModeBranch="ch";
+            const tag=`#${gi} in ${inModeBranch} \u00b7B\u27f3 ${legFrom}\u2192${shortN(name)} \u00b7L${Number(m.lap)|0}`;
+            feats.push({type:"Feature",properties:{kind:"in",g:gi,mark:name,lap:Number(m.lap)||0,legFrom,legTo:shortN(name),inMode:inModeBranch,tag},geometry:{type:"LineString",coordinates:seg}});
+            const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
+            {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"in"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+          }
         }
-      }
-    }
-    if(nextW&&prev){
-      const outRayBr=outRayPre;
-      const outMode=outModePre;
-      const apU=apUPre;
-      const seg2=segmentOneRayBearingTwd(curr.lat,curr.lon,outRayBr,halfLenM);
-      if(seg2){
-        const go=++gNum;
-        const legToOut=outToSf?shortN("S/F"):shortN(nxRow?.name??"?");
-        const uBit=(outMode==="L135"||outMode==="R135")&&apU!=null?` U${Math.round(apU*10)/10}°`:"";
-        const chBit=` chOut${Math.round(chOut*10)/10}°`;
-        const tag=`#${go} out ${outMode} ${shortN(name)}\u2192${legToOut} \u00b7L${Number(m.lap)|0} seq${m.seqIdx??mi}${uBit}${chBit}${chAlignToPrev?" chAlign":""}`;
-        feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legFrom:shortN(name),legTo:legToOut,outMode,chOut:Math.round(chOut*10)/10,apU:apU!=null?Math.round(apU*10)/10:null,tack:tack??"",tag},geometry:{type:"LineString",coordinates:seg2}});
-        {const p=nudgeGLabelM(seg2[1][1],seg2[1][0],go);feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
       }
     }else if(nextW){
       const seg2=segmentGateThroughAPerpChord(curr.lat,curr.lon,nextW.lat,nextW.lon,halfLenM);
       if(seg2){
-        const go=++gNum;
-        const toNm2=outToSf?shortN("S/F"):shortN(nxRow?.name??"S/F");
-        const tag=`#${go} out ch \u00b7A\u27f3 ${shortN(name)}\u2192${toNm2} \u00b7L${Number(m.lap)|0}`;
-        feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legTo:toNm2,outMode:"ch",tag},geometry:{type:"LineString",coordinates:seg2}});
-        const mLon=(seg2[0][0]+seg2[1][0])/2,mLa=(seg2[0][1]+seg2[1][1])/2;
-        {const p=nudgeGLabelM(mLa,mLon,go);feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+        const gk2=gateLineCoordsKey(seg2);
+        if(gk2&&!seenGateLineGeom.has(gk2)){
+          seenGateLineGeom.add(gk2);
+          const go=++gNum;
+          const toNm2=outToSf?shortN("S/F"):shortN(nxRow?.name??"S/F");
+          const tag=`#${go} out ch \u00b7A\u27f3 ${shortN(name)}\u2192${toNm2} \u00b7L${Number(m.lap)|0}`;
+          feats.push({type:"Feature",properties:{kind:"out",g:go,mark:name,lap:Number(m.lap)||0,legTo:toNm2,outMode:"ch",tag},geometry:{type:"LineString",coordinates:seg2}});
+          const mLon=(seg2[0][0]+seg2[1][0])/2,mLa=(seg2[0][1]+seg2[1][1])/2;
+          {const p=nudgeGLabelM(mLa,mLon,go);feats.push({type:"Feature",properties:{kind:"gLbl",g:go,tag,sub:"out"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+        }
       }
     }
   }
@@ -3366,6 +3409,7 @@ function buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBo
       legPathDef="map_gates";
       if(r0.mark!=="START"&&r0.roundingGateOK&&r0.roundingTrackM!=null&&Number.isFinite(r0.roundingTrackM)&&r0.roundingTrackM>0){
         roundingM=r0.roundingTrackM;roundingKind="gate_in_out_m";
+        row.roundingMNote="Meters along the densified track between the detected in-gate and out-gate (not chord); tacks and path inside the band add distance. Compare to roundingStraightM if present.";
         if(r0.roundingStraightM!=null&&Number.isFinite(r0.roundingStraightM))roundingStraightM=r0.roundingStraightM;
       }else if(String(r0.mark)==="START"&&g.startLineDistanceSignedM!=null){
         startLineDistanceM=g.startLineDistanceSignedM;roundingM=0;roundingKind="sf_line_m";
@@ -3496,6 +3540,9 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
         hint:"In then out on the map gate lines (135°/chord/L135) not found in order from here — check wind, tack P/S, crop, or mark order. Nearest approach is diagnostic only.",
         nearestDistM:bestD,nearestIdx:bestI>=0?mapGateIdxToOrig(bestI):null,searchFrom,syntheticNeighbours:synN,
         gateDetDebug:g2.gateDetDebug??null,
+        searchFromDensifyIdx:searchFrom,
+        searchFromOrigTrackIdx:mapGateIdxToOrig(searchFrom),
+        noteGpsIndices:"`searchFrom` is on the 4m/1s densified track; `searchFromOrigTrackIdx` is the nearest point on the main (analysis) track. If `lax=0` for in, the in-line crossing may be before `searchFrom` (already past the in-gate) or the line/weather/tack is inconsistent with the track.",
       });
       break;
     }
@@ -4346,6 +4393,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         if(typeof map.isStyleLoaded==="function"&&!map.isStyleLoaded()){map.once("idle",apply);return;}
         map.addSource("leg-gates",{type:"geojson",data:fc});
         if(!map.getLayer("leg-gate-in"))map.addLayer({id:"leg-gate-in",type:"line",source:"leg-gates",filter:["==",["get","kind"],"in"],paint:{"line-color":"#c026d3","line-width":2.2,"line-opacity":0.92,"line-dasharray":[0.1,0.1,1.2,0.1]}});
+        if(!map.getLayer("leg-gate-inout"))map.addLayer({id:"leg-gate-inout",type:"line",source:"leg-gates",filter:["==",["get","kind"],"inout"],paint:{"line-color":"#a855f7","line-width":2.5,"line-opacity":0.95,"line-dasharray":[0.2,0.2,0.6,0.2]}});
         if(!map.getLayer("leg-gate-out"))map.addLayer({id:"leg-gate-out",type:"line",source:"leg-gates",filter:["==",["get","kind"],"out"],paint:{"line-color":"#06b6d4","line-width":2.2,"line-opacity":0.92,"line-dasharray":[1.1,0.7]}});
         if(!map.getLayer("leg-gate-txt"))map.addLayer({id:"leg-gate-txt",type:"symbol",source:"leg-gates",filter:["==",["get","kind"],"gLbl"],layout:{"text-field":["get","tag"],"text-size":9,"text-offset":[0,0.75],"text-allow-overlap":true,"text-optional":true,"text-max-width":22},paint:{"text-color":"#f2ecff","text-halo-color":"#0a1020","text-halo-width":1.2}});
       }catch(e){console.warn("[CourseMap] leg gates",e);}
@@ -6816,7 +6864,7 @@ function App(){
                     return(<div key={ix}>
                     {m.orderIndex!=null?`#${m.orderIndex+1} `:""}{m.mark||"—"}{" "}
                     {m.error?<span style={{color:C.wrn}}>{m.error}</span>:m.gateOk===true?<span style={{color:"#10b981"}}>in/out gates OK</span>:<span style={{color:m.aborted?C.wrn:"#f59e0b"}}>
-                      {m.fail||"no gate"}{(m.nearestDistM!=null&&Number.isFinite(m.nearestDistM))||(m.closestDistM!=null&&Number.isFinite(m.closestDistM))?` (nearest ${Math.round(m.nearestDistM??m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.hint?<><br/><span style={{color:C.txD,fontSize:8.5}}>{m.hint}</span></>:""}{gateDbg?<><br/><span style={{color:"#94a3b8",fontSize:8.2}}>{gateDbg}</span></>:""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
+                      {m.fail||"no gate"}{(m.nearestDistM!=null&&Number.isFinite(m.nearestDistM))||(m.closestDistM!=null&&Number.isFinite(m.closestDistM))?` (nearest ${Math.round(m.nearestDistM??m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.hint?<><br/><span style={{color:C.txD,fontSize:8.5}}>{m.hint}</span></>:""}{gateDbg?<><br/><span style={{color:"#94a3b8",fontSize:8.2}}>{gateDbg}</span></>:""}{m.searchFromDensifyIdx!=null&&m.searchFromOrigTrackIdx!=null&&m.fail==="gates_not_found"?<><br/><span style={{color:"#94a3b8",fontSize:8}}>searchFrom= densify idx {m.searchFromDensifyIdx} (≈ main track {m.searchFromOrigTrackIdx})</span></>:""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
                     </span>}
                   </div>);
                   })}
@@ -6833,6 +6881,7 @@ function App(){
                     {r.committeeLineCrossingIdx!=null&&r.committeeLineCrossingIdx>=0?` · committee crossing seg ${r.committeeLineCrossingIdx}`:""}{r.committeeLineCrossingIdx===null&&String(r.from)==="START"&&(r.legPathDef==="map_gates"||r.legPathDef==="perp")&&r.gateDebug&&!r.gateDebug.ok?" · no committee line crossing (widen crop / line)":""}
                     {r.startLineDistanceSignedM!=null&&Number.isFinite(r.startLineDistanceSignedM)?` · signed m to line (vs mark B) ${Math.round(r.startLineDistanceSignedM)}`:""}
                     {r.gateDebug?(()=>{const g=r.gateDebug;if(g.ok)return` · gate line cA=${g.cAIdx} cB=${g.cBIdx}${g.jSf!=null&&g.jSf>=0?` committeeSeg=${g.jSf}`:""}`;return` · ${g.fail||"gate"}`+(g.cAIdx!=null?` cA=${g.cAIdx}`:"")+(g.cBIdx!=null?` cB=${g.cBIdx}`:"")+(g.searchFrom!=null?` sF=${g.searchFrom}`:"");})():""}
+                    {r.roundingMNote?<><br/><span style={{color:C.txD,fontSize:7.5}}>{r.roundingMNote}</span></>:""}
                   </div>)}
                 </div>
               </>}
