@@ -2603,6 +2603,8 @@ const MARK_ROUND_SAILING_COG_TOL_DEG=10;
 const MARK_MANOEUVRE_AT_MARK_M=10;
 /** Tack/gybe turn centre within this many GPS indices of a detected mark-rounding hit → excluded from racing stats (orange badge). */
 const MARK_MANOEUVRE_NEAR_ROUNDING_PTS=4;
+/** When perp in/out gates miss (sparse GPS, tight reach), use closest point to mark in search window if within this m. */
+const MARK_CLOSEST_FALLBACK_MAX_M=120;
 
 function allCourseMarkLocations(markPositions,preamble,laps){
   const seq=expandCourseMarks(preamble,markPositions||[],Math.max(1,Number(laps)||1));
@@ -2729,13 +2731,26 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     }else if(sfMid)nextW=sfMid;
     if(!prev||!nextW)return{legs,roundings:[]};
     const g2=detectMarkInboundOutboundGates(pts,prev,curr,nextW,searchFrom,m.tack??null,windFromDeg,String(m.name||""),windwardMarkName);
-    if(!g2.ok)return{legs,roundings:[]};
-    const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
-    roundings.push({
-      mark:m.name,idx:g2.exitIdx,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
-      entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
-    });
-    searchFrom=g2.exitIdx;
+    if(g2.ok){
+      const dExit=hav(pts[g2.exitIdx].lat,pts[g2.exitIdx].lon,m.lat,m.lon);
+      roundings.push({
+        mark:m.name,idx:g2.exitIdx,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
+        entryIdx:g2.entryIdx,exitIdx:g2.exitIdx,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
+      });
+      searchFrom=g2.exitIdx;
+    }else{
+      let bestI=-1,bestD=Infinity;
+      for(let k=searchFrom;k<pts.length;k++){
+        const d=hav(pts[k].lat,pts[k].lon,m.lat,m.lon);
+        if(d<bestD){bestD=d;bestI=k;}
+      }
+      if(bestI<0||bestD>MARK_CLOSEST_FALLBACK_MAX_M)return{legs,roundings:[]};
+      roundings.push({
+        mark:m.name,idx:bestI,dist:bestD,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
+        entryIdx:bestI,exitIdx:bestI,roundingTrackM:0,roundingStraightM:0,roundingGateOK:false,
+      });
+      searchFrom=bestI;
+    }
   }
 
   if(startFinishLine?.endA&&startFinishLine?.endB&&roundings.length){
@@ -4221,34 +4236,58 @@ function App(){
   },[croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
   const startFinishStats=useMemo(()=>{
-    if(!workPoints||workPoints.length<2||!sfLineEnds||!fullTrackAnalysis)return null;
-    const pts=fullTrackAnalysis.points||workPoints;
+    if(!workPoints||workPoints.length<2||!sfLineEnds||!sfLineEnds.endA||!sfLineEnds.endB)return null;
+    const pts=fullTrackAnalysis&&fullTrackAnalysis.points&&fullTrackAnalysis.points.length>=2?fullTrackAnalysis.points:workPoints;
+    const e0=sfLineEnds.endA,e1=sfLineEnds.endB;
     const startIdx=nearestPointIndexByClockTime(pts,raceStartSecParsed);
     const startPt=startIdx>=0?pts[startIdx]:null;
     const bow=startPt?gpsPositionToBow(pts,startIdx,Number(gpsToBowM)||0):null;
     const refLat=bow?.lat??startPt?.lat,refLon=bow?.lon??startPt?.lon;
-    const startDist=refLat!=null?distPointToSegmentM(refLat,refLon,sfLineEnds.endA.lat,sfLineEnds.endA.lon,sfLineEnds.endB.lat,sfLineEnds.endB.lon):null;
+    const startDist=refLat!=null?distPointToSegmentM(refLat,refLon,e0.lat,e0.lon,e1.lat,e1.lon):null;
     let signedStartDist=null,startOnCourseSide=null;
     const firstMarkSpec=WSC_COURSES[courseLetter]?.marks?.[0];
     const firstMarkName=Array.isArray(firstMarkSpec)?firstMarkSpec[0]:firstMarkSpec;
     const firstMark=firstMarkName?effectiveMarks[firstMarkName]:null;
     if(refLat!=null&&refLon!=null&&firstMark&&Number.isFinite(startDist)){
-      signedStartDist=signedDistanceToCommitteeLineM(refLat,refLon,sfLineEnds.endA,sfLineEnds.endB,firstMark.lat,firstMark.lon);
+      signedStartDist=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,firstMark.lat,firstMark.lon);
       startOnCourseSide=signedStartDist<0;
     }
-    const legs=fullTrackAnalysis.legs||[];
+    const legs=fullTrackAnalysis&&fullTrackAnalysis.legs?fullTrackAnalysis.legs:[];
     const startLeg=legs.find(l=>l.from==="START")||null;
     const finishLeg=[...legs].reverse().find(l=>l.to==="FINISH")||null;
     let startCross=null,finishCross=null;
     if(startLeg&&startLeg.startIdx!=null&&startLeg.endIdx!=null){
-      const pick=closestIndexToLine(pts,sfLineEnds.endA,sfLineEnds.endB,startLeg.startIdx,startLeg.endIdx);
+      const pick=closestIndexToLine(pts,e0,e1,startLeg.startIdx,startLeg.endIdx);
       if(pick.idx>=0&&pts[pick.idx])startCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
     if(finishLeg&&finishLeg.startIdx!=null&&finishLeg.endIdx!=null){
-      const pick=closestIndexToLine(pts,sfLineEnds.endA,sfLineEnds.endB,finishLeg.startIdx,finishLeg.endIdx);
+      const pick=closestIndexToLine(pts,e0,e1,finishLeg.startIdx,finishLeg.endIdx);
       if(pick.idx>=0&&pts[pick.idx])finishCross={time:pts[pick.idx].time,idx:pick.idx,dist:pick.dist};
     }
-    return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time||null};
+    if((!startCross||!finishCross)&&pts.length>=2){
+      const xs=detectLineCrossings(pts,e0,e1);
+      if(xs.length){
+        xs.sort((a,b)=>a.time-b.time);
+        const packLineHit=c=>{
+          const j=Math.max(0,Math.min(pts.length-1,c.idx|0));
+          const t=Number.isFinite(c.time)?c.time:pts[j].time;
+          const d=distPointToSegmentM(pts[j].lat,pts[j].lon,e0.lat,e0.lon,e1.lat,e1.lon);
+          return{time:t,idx:j,dist:d};
+        };
+        if(!startCross)startCross=packLineHit(xs[0]);
+        if(!finishCross){
+          const f=xs[xs.length-1];
+          const tRef=startCross?startCross.time:(startPt?.time??pts[0].time);
+          if(f.time>tRef+15)finishCross=packLineHit(f);
+        }
+      }
+    }
+    if(!finishCross&&pts.length>=4){
+      const a=Math.max(0,Math.floor(pts.length*0.4));
+      const p=closestIndexToLine(pts,e0,e1,a,pts.length-1);
+      if(p.idx>=0&&p.dist<300)finishCross={time:pts[p.idx].time,idx:p.idx,dist:p.dist};
+    }
+    return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time??null};
   },[workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM]);
 
   useEffect(()=>{
