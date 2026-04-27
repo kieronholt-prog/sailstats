@@ -357,13 +357,6 @@ function signedLateralMetersToLineFromMAlongBearingTwd(latM,lonM,latP,lonP,lineB
   const tx=Math.sin(θ),ty=Math.cos(θ);
   return v.x*ty-v.y*tx;
 }
-/** Acute angle 0…90° between two **lines** in the plane, given a bearing (°T) for each. */
-function acuteAngleBetweenTwoLineBearingsTwd(b1,b2){
-  if(!Number.isFinite(b1)||!Number.isFinite(b2))return null;
-  let d=Math.abs(b1-b2)%180;
-  if(d>90)d=180-d;
-  return d;
-}
 function normNEDouble(ne){const h=Math.hypot(ne.n,ne.e);return h<1e-12?{n:1,e:0}:{n:ne.n/h,e:ne.e/h};}
 /** North/east components for bearing °T clockwise from north. */
 function vecFromBearTwd(deg){
@@ -371,20 +364,22 @@ function vecFromBearTwd(deg){
 }
 function bearTwdFromNE(n,e){return((Math.atan2(e,n)/D)+360)%360;}
 /**
- * One rounding line through the mark: bearing (°T) of **one** ray lying on the bisector of the **outside**
- * angle between the extended inbound chord (curr→prev) and the outbound chord (curr→next). Uses the
- * external-angle bisector (unit(u)−unit(v)); falls back to internal if degenerate.
+ * One rounding line through the mark (°T): ray on the angular bisector of the **navigation turn**—the interior
+ * angle at the mark between **inbound** (prev→curr) and **outbound** (curr→next). Uses unit(prev→curr) and
+ * unit(curr→next): bisector direction ∝ **b − a** (`a`=inbound bearing vector, `b`=outbound). Fallback when
+ * `a ‖ −b`: line ⟂ course (straight-line or reversal). (Using **curr→prev − curr→next** equiv. `−b−a` was wrong—perpendicular.)
  */
 function computeRoundingOutsideBisectorBearingDeg(prev,curr,next){
   if(!prev||!curr||!next)return null;
-  const u=vecFromBearTwd(bear(curr.lat,curr.lon,prev.lat,prev.lon));
-  const v=vecFromBearTwd(bear(curr.lat,curr.lon,next.lat,next.lon));
-  const ext={n:u.n-v.n,e:u.e-v.e};
-  if(Math.hypot(ext.n,ext.e)<1e-9){
-    const intra=normNEDouble({n:u.n+v.n,e:u.e+v.e});
-    return bearTwdFromNE(intra.n,intra.e);
+  const a=vecFromBearTwd(bear(prev.lat,prev.lon,curr.lat,curr.lon)); // inbound
+  const b=vecFromBearTwd(bear(curr.lat,curr.lon,next.lat,next.lon)); // outbound
+  const sn=b.n-a.n,se=b.e-a.e; // −a+b = bisector toward rounding side vs acute supplement
+  if(Math.hypot(sn,se)<1e-9){
+    const pn=-a.e,pe=a.n;
+    const ne=normNEDouble({n:pn,e:pe});
+    return bearTwdFromNE(ne.n,ne.e);
   }
-  const ne=normNEDouble(ext);
+  const ne=normNEDouble({n:sn,e:se});
   return bearTwdFromNE(ne.n,ne.e);
 }
 /**
@@ -615,20 +610,6 @@ function perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon){
   if(tack==="S")return L>-lim;
   if(tack==="P")return L<lim;
   return true;
-}
-function formatMarkGateDetDebugText(d){
-  if(!d||typeof d!=="object")return"";
-  if(d.mode==="chord")
-    return`Leg segments too short: P→M ${Math.round(d.c1M)}m, M→N ${Math.round(d.c2M)}m (need ≥${d.minM}m).`;
-  if(d.mode==="bisector"&&d.fail==="no_bearing")
-    return`Bisector${d.bisDeg!=null&&Number.isFinite(d.bisDeg)?` ≈${(Math.round(d.bisDeg*10)/10).toFixed(1)}°T`:""} · could not derive outside-angle bisector.`;
-  if(d.mode==="bisector"&&d.fail==="no_crossing"){
-    const lax=d.straddleLax|0;
-    const head=`Bisector${d.bisDeg!=null&&Number.isFinite(d.bisDeg)?` ≈${(Math.round(d.bisDeg*10)/10).toFixed(1)}°T`:""} · `;
-    if(lax===0)return head+"no track segment straddles the rounding line from searchFrom onward.";
-    return head+`geometric straddles=${lax} but none passed tack filter — try tack blank.`;
-  }
-  return"";
 }
 /**
  * Mark rounding: outside-angle bisector crossing (see `computeRoundingOutsideBisectorBearingDeg`).
@@ -875,8 +856,8 @@ function virtualNextAfterLastMark(prev,curr,distM=500){
   return destinationPoint(curr.lat,curr.lon,bPC,distM);
 }
 /**
- * Fills **virtual 500m** prev / next when missing so per-leg bisector geometry matches `resolveMarkGateNeighboursForIndex` /
- * `detectMarkInboundOutboundGates` (same as map overlay).
+ * Fills **virtual 500m** prev / next when missing so per-leg bisector geometry matches `detectMarkInboundOutboundGates`
+ * (same as map overlay).
  */
 function enrichLegMapCtxForGates(legMapCtx,latA,lonA,latB,lonB,fromMark,toMarkName){
   if(!legMapCtx)return null;
@@ -894,54 +875,6 @@ function enrichLegMapCtxForGates(legMapCtx,latA,lonA,latB,lonB,fromMark,toMarkNa
   if((!wPrev||!Number.isFinite(wPrev.lat))&&fromM!=="START"&&toM!=="FINISH"&&wAfter&&Number.isFinite(wAfter.lat))
     wPrev=virtualPrevForFirstMarkApproach(a,b,500);
   return{...legMapCtx,wPrev,wAfter};
-}
-/**
- * Prev / curr / next for one row in the expanded course — same as `detectLegsFromMarks`
- * (S/F mid, FINISH mid, virtual 500m when needed).
- */
-function resolveMarkGateNeighboursForIndex(fullSeq,sfMid,mi){
-  const wpFromRow=row=>row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)?{lat:row.lat,lon:row.lon}:null;
-  if(!fullSeq||mi<0||mi>=fullSeq.length)return{error:"bad_index"};
-  const m=fullSeq[mi];
-  const curr=wpFromRow(m);
-  if(!curr)return{error:"no_mark_coords"};
-  let prev=null;
-  if(mi>0){
-    const pr=fullSeq[mi-1];
-    prev=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
-  }else if(sfMid)prev=sfMid;
-  let nextW=null;
-  if(mi+1<fullSeq.length){
-    const nx=fullSeq[mi+1];
-    nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
-  }else if(sfMid)nextW=sfMid;
-  const needVirtPrev=!prev&&!!nextW;
-  const needVirtNext=!nextW&&!!prev;
-  if(needVirtPrev)prev=virtualPrevForFirstMarkApproach(curr,nextW,500);
-  if(needVirtNext)nextW=virtualNextAfterLastMark(prev,curr,500);
-  if(!prev||!nextW)return{error:"incomplete_neighbours",hasPrev:!!prev,hasNext:!!nextW};
-  return{prev,curr,next:nextW,markName:String(m.name||""),nextName:mi+1<fullSeq.length?String((fullSeq[mi+1]||{}).name||""):"",tack:m.tack??null,synN:needVirtPrev||needVirtNext};
-}
-/** Normalise epoch sec vs ms, then return Δt in seconds. */
-function timeDeltaSecBetweenTrackSamples(t0,t1){
-  const t0n=Number(t0),t1n=Number(t1);
-  if(!Number.isFinite(t0n)||!Number.isFinite(t1n))return null;
-  const t0s=t0n>1e12?t0n/1000:t0n;
-  const t1s=t1n>1e12?t1n/1000:t1n;
-  const d=Math.abs(t1s-t0s);
-  return d>0?d:null;
-}
-/**
- * Signed metres to **one** rounding line at mark `curr`: outside-angle bisector (same geometry as rounding detection).
- */
-function signedInboundSideMetersForMapGate(prev,curr,next,p,_cn,_nn,_wm,_tack,_wf){
-  const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
-  const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
-  if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{error:"chord_too_short",c1M:c1,c2M:c2};
-  const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next);
-  if(br==null||!Number.isFinite(br))return{error:"no_bearing"};
-  const sideM=signedMetersToRoundingBisectorAtMark(p.lat,p.lon,curr.lat,curr.lon,br);
-  return{mapG:{bisDeg:br,bis:true},sideM,mode:"bisector",inLineBearingTwd:br};
 }
 /** Cumulative distance along pts to index nearest (tlat, tlon); returns {alongM, nearestIdx, distToMarkM}. */
 function distanceAlongTrackToNearest(pts,tlat,tlon){
@@ -1031,13 +964,6 @@ function formatHMS(totalSec){
   const s=Math.max(0,Math.floor(Number(totalSec)||0));
   const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
   return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
-}
-/** ISO UTC for a track `time` (unix seconds or ms). */
-function formatTrackPointIsoTime(t){
-  if(t==null||!Number.isFinite(Number(t)))return"—";
-  const n=Number(t);
-  const ms=n>1e12?n:n*1000;
-  try{return new Date(ms).toISOString();}catch(_){ return String(t); }
 }
 /** Parse HH:MM:SS, MM:SS, or seconds; invalid → null. */
 function parseHMS(str){
@@ -1713,15 +1639,13 @@ function buildComparePrintHtml(ctx){
     const t0l=l0?.duration, t1l=l1?.duration;
     const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
     const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
-    const r0m=l0?.roundingM, r1m=l1?.roundingM, rs0=l0?.roundingStraightM, rs1=l1?.roundingStraightM;
-    const fmtR=(m,rs)=>(m!=null&&Number.isFinite(m)&&m>0.05?String(Math.round(m))+(rs!=null&&Number.isFinite(rs)&&rs>0.05?` (st ${String(Math.round(rs))})`:""):"—");
-    const lineCell=(l,m,rs)=>{
+    const lineCell=l=>{
       if(l&&l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)){
         const v=Math.round(l.startLineDistanceM);
         const neg=v<0;
         return`Distance from line <span class="${neg?"lineNeg":""}">${v}m</span>`;
       }
-      return fmtR(m,rs);
+      return "—";
     };
     let deltaS="—";
     if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
@@ -1730,8 +1654,8 @@ function buildComparePrintHtml(ctx){
       else if(d>0)deltaS=`+${d.toFixed(0)}s (${escapeHtml(title1)} slower)`;
       else deltaS=`${d.toFixed(0)}s (${escapeHtml(title1)} faster)`;
     }
-    const r0s=lineCell(l0,r0m,rs0);
-    const r1s=lineCell(l1,r1m,rs1);
+    const r0s=lineCell(l0);
+    const r1s=lineCell(l1);
     legRows.push(`<tr>
 <td class="num">${l0&&l0.legNo?String(l0.legNo):l1&&l1.legNo?String(l1.legNo):String(i+1)}</td>
 <td>${escapeHtml((l0&&`${l0.from} → ${l0.to}`)||(l1&&`${l1.from} → ${l1.to}`)||"—")}</td>
@@ -1804,21 +1728,21 @@ ${tackTable("Reach",t0s?.reach,t1s?.reach)}
 ${tackTable("Downwind",t0s?.downwind,t1s?.downwind)}
 
 <h2>5 — Performance by leg</h2>
-<p class="foot">Legs: from mark rounding line (bisector) crossing to the next. <strong>VMC</strong> = speed toward next mark (chord A→B). <strong>Chord nm/h</strong> = mark separation ÷ leg time. <strong>Distance from line</strong> (START): bow vs committee line. <strong>Rnd</strong>: track from bisector at the <em>from</em> mark. Re-run Analyse to refresh.</p>
+<p class="foot">Legs: mark-to-mark <strong>VMC</strong> = speed toward next mark (chord A→B). <strong>Chord nm/h</strong> = mark separation ÷ leg time. <strong>Line</strong>: signed bow distance from committee line on START legs only; otherwise —. Re-run Analyse to refresh.</p>
 <table>
 <thead>
 <tr>
 <th class="num" rowspan="2">Leg</th><th rowspan="2">From → To</th><th rowspan="2">Type</th>
-<th class="c1" colspan="6">${escapeHtml(lab0)}</th>
-<th class="c2" colspan="6">${escapeHtml(lab1)}</th>
+<th class="c1" colspan="5">${escapeHtml(lab0)}</th>
+<th class="c2" colspan="5">${escapeHtml(lab1)}</th>
 <th rowspan="2">Time gain/loss</th>
 </tr>
 <tr>
-<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
-<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Rnd / line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
+<th class="num">VMC</th><th class="num">Chord nm/h</th><th class="num">Eff%</th><th class="num">Line (m)</th><th class="num">Track (nm)</th><th class="num">Time</th>
 </tr>
 </thead>
-<tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"16\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
+<tbody>${nLeg?legRows.join("\n"):"<tr><td colspan=\"14\" class=\"muted\">No leg breakdown in saved data</td></tr>"}</tbody>
 </table>
 </body></html>`;
 }
@@ -4115,9 +4039,6 @@ function App(){
   useEffect(()=>{
     try{localStorage.setItem(LS_SHOW_TRACK_IDX_KEY,showTrackPointIndices?"1":"0");}catch(_){}
   },[showTrackPointIndices]);
-  const [trackInspectI,setTrackInspectI]=useState("");
-  const [trackInspectJ,setTrackInspectJ]=useState("");
-  const [trackInspectCopyMsg,setTrackInspectCopyMsg]=useState(null);
   const [actName,setActName]=useState("");
   const [analysis,setAnalysis]=useState(null);
   const [windOvr,setWindOvr]=useState(null);
@@ -4224,73 +4145,6 @@ function App(){
     const s=[...croppedPoints].sort((a,b)=>a.time-b.time);
     return{durSec:s[s.length-1].time-s[0].time,n:s.length};
   },[croppedPoints]);
-
-  const trackInspectBlock=useMemo(()=>{
-    if(!croppedPoints||croppedPoints.length<1)return null;
-    const ts=String(trackInspectI).trim();
-    if(ts==="")return null;
-    const a=parseInt(ts,10);
-    if(!Number.isFinite(a))return{error:"Enter a valid start index (integer)."};
-    const n=croppedPoints.length;
-    if(a<0||a>=n)return{error:`Start index ${a} out of range (0…${n-1}).`};
-    const tj=String(trackInspectJ).trim();
-    const b=tj===""?a:parseInt(tj,10);
-    if(tj!==""&&(!Number.isFinite(b)||b<0||b>=n))return{error:`End index out of range (0…${n-1}).`};
-    const lo=Math.min(a,b),hi=Math.max(a,b);
-    if(hi-lo>24)return{error:"Range too large (max 25 points at once)."};
-    const copyParts=[],rows=[];
-    for(let i=lo;i<=hi;i++){
-      const p=croppedPoints[i];
-      const cogFile=p.cog!=null&&Number.isFinite(p.cog)?`${Math.round(p.cog)}°`:"—";
-      const spdFile=p.ss!=null&&Number.isFinite(p.ss)?`${ms2k(p.ss).toFixed(2)} kts`:"—";
-      let segInS="—",brgNum=null;
-      if(i>0){
-        const b=bear(croppedPoints[i-1].lat,croppedPoints[i-1].lon,p.lat,p.lon);
-        if(Number.isFinite(b)){ brgNum=b; segInS=`${(Math.round(b*10)/10).toFixed(1)}°T`; }
-      }
-      let cogS=cogFile,spdS=spdFile;
-      if(cogS==="—"&&brgNum!=null&&Number.isFinite(brgNum))cogS=`${Math.round(brgNum)}° (Δpos)`;
-      if(spdS==="—"&&i>0){
-        const dt=timeDeltaSecBetweenTrackSamples(croppedPoints[i-1].time,p.time);
-        if(dt && dt>0){
-          const dm=hav(croppedPoints[i-1].lat,croppedPoints[i-1].lon,p.lat,p.lon);
-          const mps=dm/dt;
-          if(Number.isFinite(mps)&&mps>0)spdS=`${ms2k(mps).toFixed(2)} kts (Δs/Δt)`;
-        }
-      }
-      copyParts.push(`i=${i} lat=${p.lat.toFixed(6)} lon=${p.lon.toFixed(6)} t=${formatTrackPointIsoTime(p.time)} COG=${cogS} spd=${spdS} segIn=${segInS}`);
-      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS,segInS,cogFile,spdFile});
-    }
-    const segBrgBits=[];
-    for(let k=lo+1;k<=hi;k++){
-      const b=bear(croppedPoints[k-1].lat,croppedPoints[k-1].lon,croppedPoints[k].lat,croppedPoints[k].lon);
-      if(Number.isFinite(b))segBrgBits.push(`${k-1}→${k}=${(Math.round(b*10)/10).toFixed(1)}°T`);
-    }
-    const copyLine=copyParts.join(" | ")+(segBrgBits.length?` | ${segBrgBits.join(" ")}`:"");
-    return{rows,copyLine,n};
-  },[croppedPoints,trackInspectI,trackInspectJ]);
-
-  const copyTrackInspectLine=useCallback(()=>{
-    if(!trackInspectBlock||trackInspectBlock.error||!trackInspectBlock.copyLine)return;
-    const t=trackInspectBlock.copyLine;
-    const ok=()=>{setTrackInspectCopyMsg("Copied");setTimeout(()=>setTrackInspectCopyMsg(null),2200);};
-    const fail=()=>{setTrackInspectCopyMsg("Copy failed");setTimeout(()=>setTrackInspectCopyMsg(null),2200);};
-    const fallback=()=>{
-      try{
-        const ta=document.createElement("textarea");
-        ta.value=t;ta.style.position="fixed";ta.style.left="-9999px";
-        document.body.appendChild(ta);ta.select();document.execCommand("copy");
-        document.body.removeChild(ta);
-        ok();
-      }catch(_){ fail(); }
-    };
-    if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok).catch(fallback);
-    else fallback();
-  },[trackInspectBlock]);
-
-  const [gateInspectMi,setGateInspectMi]=useState("0");
-  const [gateStraddleA,setGateStraddleA]=useState("");
-  const [gateStraddleB,setGateStraddleB]=useState("");
 
   // Do **not** reset crop in an effect on [rawPoints] — that ran after load/saved-crop/apply
   // and cleared DB + auto S/F crop. New-track resets are done in loadStrava / handleFile / openSaved only.
@@ -5150,65 +5004,6 @@ function App(){
     setView("home");
   },[]);
 
-  /** In-gate / out-gate rays for selected course row — same wind source as map gates (`markGateMapFC`). Placed after `courseMapLine` / `curAnalysis` / `effWind` and other hooks to avoid TDZ. */
-  const gateLineInspector=useMemo(()=>{
-    if(!courseMapLine||courseMapLine.length<1)return null;
-    const sfMid=sfLineEnds?.endA&&sfLineEnds?.endB?{
-      lat:(sfLineEnds.endA.lat+sfLineEnds.endB.lat)/2,
-      lon:(sfLineEnds.endA.lon+sfLineEnds.endB.lon)/2
-    }:null;
-    const miParsed=parseInt(String(gateInspectMi).trim(),10);
-    const mi=Number.isFinite(miParsed)?Math.max(0,Math.min(miParsed,courseMapLine.length-1)):0;
-    const ctx=resolveMarkGateNeighboursForIndex(courseMapLine,sfMid,mi);
-    if(ctx.error)return{error:ctx.error,mi,hasPrev:ctx.hasPrev,hasNext:ctx.hasNext};
-    const wnForGates=windOvr!=null&&Number.isFinite(windOvr)?windOvr:curAnalysis?.windDir;
-    const wdf=wnForGates!=null&&Number.isFinite(Number(wnForGates))?Number(wnForGates):0;
-    const bisDeg=computeRoundingOutsideBisectorBearingDeg(ctx.prev,ctx.curr,ctx.next);
-    const mapG={bisDeg,mode:"bisector"};
-    let straddle=null;
-    const sAs=String(gateStraddleA).trim(),sBs=String(gateStraddleB).trim();
-    if(sAs!==""&&sBs!==""&&croppedPoints&&croppedPoints.length>0){
-      const ia=parseInt(sAs,10),ib=parseInt(sBs,10);
-      if(Number.isFinite(ia)&&Number.isFinite(ib)&&ia>=0&&ib>=0&&ia<croppedPoints.length&&ib<croppedPoints.length){
-        const pa=croppedPoints[ia],pb=croppedPoints[ib];
-        const ra=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pa);
-        const rb=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pb);
-        if(ra.error||rb.error){
-          const re=ra.error?ra:rb;
-          straddle={err:String(re.error||"error"),c1M:re.c1M,c2M:re.c2M};
-        }else if(ra.sideM!=null&&rb.sideM!=null){
-          const prod=ra.sideM*rb.sideM;
-          const inL=ra.inLineBearingTwd!=null&&Number.isFinite(ra.inLineBearingTwd)?ra.inLineBearingTwd:mapG.bisDeg;
-          const segB=bear(pa.lat,pa.lon,pb.lat,pb.lon);
-          let acuteSegToInLine=null;
-          if(Number.isFinite(segB)&&Number.isFinite(inL))acuteSegToInLine=acuteAngleBetweenTwoLineBearingsTwd(inL, segB);
-          straddle={
-            ia,ib,s0:ra.sideM,s1:rb.sideM,wouldStraddle:prod<0,onLine:ra.sideM===0||rb.sideM===0,
-            segBearingTwd:Number.isFinite(segB)?segB:null,
-            inLineBearingTwd:Number.isFinite(inL)?inL:null,
-            acuteSegBearingToInLineDeg:acuteSegToInLine,
-            crossesInGate:prod<0,
-          };
-        }
-      }
-    }
-    return{ctx,mapG,mi,straddle,wdf};
-  },[courseMapLine,sfLineEnds,windOvr,curAnalysis?.windDir,windwardMarkName,gateInspectMi,gateStraddleA,gateStraddleB,croppedPoints]);
-
-  const copyTrackInspectToStraddle=useCallback(()=>{
-    const ts=String(trackInspectI).trim();
-    if(ts==="")return;
-    const a=parseInt(ts,10);
-    if(!Number.isFinite(a)||a<0)return;
-    const tj=String(trackInspectJ).trim();
-    const b=tj===""?a:parseInt(tj,10);
-    if(!Number.isFinite(b)||b<0)return;
-    const n=croppedPoints?.length||0;
-    if(n<1||a>=n||b>=n)return;
-    setGateStraddleA(String(Math.min(a,b)));
-    setGateStraddleB(String(Math.max(a,b)));
-  },[trackInspectI,trackInspectJ,croppedPoints]);
-
   /* ─── HOME ─── */
   if(view==="home"){
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
@@ -5703,29 +5498,29 @@ function App(){
         </div>
 
         <div style={{fontSize:12,fontWeight:700,color:C.txt,marginBottom:8,letterSpacing:0.5}}>5 · Performance by leg</div>
-        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each <strong style={{color:C.txt}}>leg</strong> = track from the rounding <strong style={{color:C.txt}}>bisector</strong> crossing at the <em>from</em> mark to the bisector crossing at the <em>to</em> mark (START/FINISH use the committee line where applicable). <strong style={{color:C.txt}}>VMC</strong> = speed made good toward the <em>next mark</em> (chord A→B), averaged on the leg (magnitude vs signed per global mode). <strong style={{color:C.txt}}>Chord</strong> = mark-to-mark distance ÷ time (closed-course rate, nm/h). <strong style={{color:C.txt}}>Distance from line</strong> (START only): bow vs committee line. <strong style={{color:C.txt}}>Rnd</strong> = distance on the leg from the bisector at the <em>from</em> mark. <strong style={{color:C.txt}}>Track</strong> = along-track (nm).</p>
+        <p style={{fontSize:10,color:C.txD,margin:"0 0 10px",lineHeight:1.5}}>Each <strong style={{color:C.txt}}>leg</strong> is the track between consecutive course marks. <strong style={{color:C.txt}}>VMC</strong> = speed made good toward the <em>next mark</em> (chord A→B), averaged on the leg. <strong style={{color:C.txt}}>Chord</strong> = mark-to-mark distance ÷ time (nm/h). <strong style={{color:C.txt}}>Line</strong> = signed bow distance from the committee line on START legs only; otherwise —. <strong style={{color:C.txt}}>Track</strong> = along-track (nm).</p>
         <div style={{border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card,overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:920}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:820}}>
             <thead>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
                 <th rowSpan={2} style={th2}>Leg</th>
                 <th rowSpan={2} style={th2}>From → To</th>
                 <th rowSpan={2} style={th2}>Type</th>
-                <th colSpan={6} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
-                <th colSpan={6} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
+                <th colSpan={5} style={{...thTrack(C.acc),textAlign:"center",fontWeight:700}}>{lab0}</th>
+                <th colSpan={5} style={{...thTrack(C.gld),textAlign:"center",fontWeight:700}}>{lab1}</th>
                 <th rowSpan={2} style={th2}>Time gain/loss</th>
               </tr>
               <tr style={{borderBottom:`1px solid ${C.bdr}`}}>
                 <th style={th2}>VMC</th>
                 <th style={th2}>Chord</th>
                 <th style={th2}>Eff%</th>
-                <th style={th2}>Rnd / line (m)</th>
+                <th style={th2}>Line (m)</th>
                 <th style={th2}>Track (nm)</th>
                 <th style={th2}>Time</th>
                 <th style={th2}>VMC</th>
                 <th style={th2}>Chord</th>
                 <th style={th2}>Eff%</th>
-                <th style={th2}>Rnd / line (m)</th>
+                <th style={th2}>Line (m)</th>
                 <th style={th2}>Track (nm)</th>
                 <th style={th2}>Time</th>
               </tr>
@@ -5736,9 +5531,7 @@ function App(){
                 const t0l=l0?.duration, t1l=l1?.duration;
                 const d0m=l0!=null?l0.distanceM??l0.distance:undefined;
                 const d1m=l1!=null?l1.distanceM??l1.distance:undefined;
-                const r0m=l0?.roundingM, r1m=l1?.roundingM, r0s=l0?.roundingStraightM, r1s=l1?.roundingStraightM;
-                const fmtRndVal=(m,s)=>m!=null&&Number.isFinite(m)&&m>0.05?`${String(Math.round(m))}`+(s!=null&&Number.isFinite(s)&&s>0.05?` (st ${String(Math.round(s))})`:""):"—";
-                const preLegOrRnd=(l)=>{if(l&&l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)){const v=Math.round(l.startLineDistanceM);return(<>Distance from line <span style={{color:v<0?C.wrn:C.acc,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{v}m</span></>);}return fmtRndVal(l?.roundingM,l?.roundingStraightM);};
+                const lineCell=l=>{if(l&&l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)){const v=Math.round(l.startLineDistanceM);return(<>Distance from line <span style={{color:v<0?C.wrn:C.acc,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{v}m</span></>);}return "—";};
                 let deltaS="—";
                 if(t0l!=null&&t1l!=null&&Number.isFinite(t0l)&&Number.isFinite(t1l)){
                   const d=t1l-t0l;
@@ -5754,13 +5547,13 @@ function App(){
                     <td style={tdN}>{legVmcKts(l0)!=null?fmtF(legVmcKts(l0),2):"—"}</td>
                     <td style={tdN}>{legChordKts(l0)!=null?fmtF(legChordKts(l0),2):"—"}</td>
                     <td style={tdN}>{l0&&l0.efficiency!=null?fmtF(l0.efficiency,0):"—"}</td>
-                    <td style={tdN}>{preLegOrRnd(l0)}</td>
+                    <td style={tdN}>{lineCell(l0)}</td>
                     <td style={tdN}>{d0m!=null&&Number.isFinite(d0m)?m2nm(d0m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l0&&l0.duration!=null?fT(l0.duration):"—"}</td>
                     <td style={tdN}>{legVmcKts(l1)!=null?fmtF(legVmcKts(l1),2):"—"}</td>
                     <td style={tdN}>{legChordKts(l1)!=null?fmtF(legChordKts(l1),2):"—"}</td>
                     <td style={tdN}>{l1&&l1.efficiency!=null?fmtF(l1.efficiency,0):"—"}</td>
-                    <td style={tdN}>{preLegOrRnd(l1)}</td>
+                    <td style={tdN}>{lineCell(l1)}</td>
                     <td style={tdN}>{d1m!=null&&Number.isFinite(d1m)?m2nm(d1m).toFixed(2):"—"}</td>
                     <td style={tdN}>{l1&&l1.duration!=null?fT(l1.duration):"—"}</td>
                     <td style={{...tdL,fontSize:11}}>{deltaS}</td>
@@ -5769,7 +5562,7 @@ function App(){
               })}
             </tbody>
           </table>
-          {nLeg===0&&<div style={{padding:16,fontSize:12,color:C.txM}}>No leg breakdown — select a WSC course (≥2 marks in the expanded order), set start/finish line on the map, and run <strong style={{color:C.txt}}>Analyse Track</strong>. Legs use the same map gate lines (135°/chord/L135 from wind and course). If a mark fails, the sequence stops there (no synthetic “closest” rounding).</div>}
+          {nLeg===0&&<div style={{padding:16,fontSize:12,color:C.txM}}>No leg breakdown — select a WSC course (≥2 marks in the expanded order), set start/finish line on the map, and run <strong style={{color:C.txt}}>Analyse Track</strong>. If a mark fails, sequence stops there (no synthetic “closest” rounding).</div>}
         </div>
         {(!r0||!r1)&&<div style={{marginTop:14,fontSize:12,color:C.wrn}}>One or both activities have no saved analysis yet. Open each, set course, and run analysis.</div>}
       </div>
@@ -5845,93 +5638,14 @@ function App(){
             </label>
             <label style={{fontSize:12,color:C.txt,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
               <input type="checkbox" checked={showMarkGates} onChange={e=>setShowMarkGates(e.target.checked)}/>
-              Show mark in / out gate lines
+              Show mark rounding lines on map
             </label>
             <label style={{fontSize:12,color:C.txt,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
               <input type="checkbox" checked={showTrackPointIndices} onChange={e=>setShowTrackPointIndices(e.target.checked)}/>
               Show track point indices (0…n−1, cropped track; zoom in past ~12)
             </label>
-            {showTrackPointIndices&&<div style={{fontSize:9,color:C.txD,margin:"4px 0 0",maxWidth:640,lineHeight:1.45}}>A line crossing in the app is a sign flip between <strong>consecutive</strong> points. These labels are the cropped track order. Mark-gate code also densifies inside that window, so engine segment indices can differ from what you read here—use the Legs trace (<code style={{fontSize:8.5}}>sF</code>, diagnostics) for the same run.</div>}
+            {showTrackPointIndices&&<div style={{fontSize:9,color:C.txD,margin:"4px 0 0",maxWidth:640,lineHeight:1.45}}>A line crossing in the app is a sign flip between <strong>consecutive</strong> points. Labels use the cropped track order; analysis may interpolate extra points inside the window.</div>}
           </div>
-          <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.bdr}`}}>
-            <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Cropped track point lookup (lat/lon / time for bug reports)</div>
-            <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginBottom:8}}>
-              <label style={{fontSize:11,color:C.txt}}>Index
-                <input type="number" min={0} step={1} value={trackInspectI} onChange={e=>setTrackInspectI(e.target.value)} placeholder="509" style={{marginLeft:6,width:72,padding:"4px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
-              </label>
-              <label style={{fontSize:11,color:C.txt}}>to
-                <input type="number" min={0} step={1} value={trackInspectJ} onChange={e=>setTrackInspectJ(e.target.value)} placeholder="510" style={{marginLeft:6,width:72,padding:"4px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
-              </label>
-              <button type="button" onClick={copyTrackInspectLine} disabled={!trackInspectBlock||!!trackInspectBlock.error||!trackInspectBlock.copyLine} style={{padding:"5px 12px",borderRadius:6,border:`1px solid ${C.bdr}`,background:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?C.acc:`${C.bdr}99`,color:C.txt,fontSize:11,cursor:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?"pointer":"not-allowed",opacity:trackInspectBlock&&!trackInspectBlock.error&&trackInspectBlock.copyLine?1:0.55}}>Copy line</button>
-              {trackInspectCopyMsg&&<span style={{fontSize:11,color:trackInspectCopyMsg==="Copied"?C.acc:C.wrn}}>{trackInspectCopyMsg}</span>}
-            </div>
-            {trackInspectBlock&&trackInspectBlock.error&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>{trackInspectBlock.error}</div>}
-            {trackInspectBlock&&trackInspectBlock.rows&&<div style={{overflowX:"auto"}}>
-              <table style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,borderCollapse:"collapse",width:"100%",maxWidth:720}}>
-                <thead><tr style={{color:C.txM,textAlign:"left"}}>
-                  <th style={{padding:"4px 8px 4px 0"}}>#</th><th style={{padding:4}}>lat</th><th style={{padding:4}}>lon</th><th style={{padding:4}}>t (UTC)</th>
-                  <th style={{padding:4}} title="Bearing of segment (i−1)→i; same as gate tack fallback when COG missing">Seg in</th>
-                  <th style={{padding:4}}>COG</th><th style={{padding:4}}>spd</th>
-                </tr></thead>
-                <tbody>
-                  {trackInspectBlock.rows.map(r=><tr key={r.i} style={{borderTop:`1px solid ${C.bdr}`}}>
-                    <td style={{padding:"4px 8px 4px 0",color:C.acc}}>{r.i}</td>
-                    <td style={{padding:4}}>{r.lat.toFixed(6)}</td>
-                    <td style={{padding:4}}>{r.lon.toFixed(6)}</td>
-                    <td style={{padding:4,color:C.txD}}>{r.tIso}</td>
-                    <td style={{padding:4,color:r.segInS!=="—"?C.gld:C.txD}}>{r.segInS}</td>
-                    <td style={{padding:4}}>{r.cogS}</td>
-                    <td style={{padding:4}}>{r.spdS}</td>
-                  </tr>)}
-                </tbody>
-              </table>
-            </div>}
-            <div style={{fontSize:9,color:C.txD,marginTop:6,lineHeight:1.45}}>Indices are the <strong>auto-cropped</strong> polyline (same as map labels). Gate detection may use extra interpolated points between these. COG/spd: file first; if missing, <strong>Δpos</strong> (bearing and speed from successive positions), like the engine tack fallback.</div>
-          </div>
-          {courseMapLine&&courseMapLine.length>0&&<div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.bdr}`}}>
-            <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Rounding bisector line (engine = map)</div>
-            <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginBottom:8}}>
-              <label style={{fontSize:11,color:C.txt}}>Mark row
-                <select value={gateInspectMi} onChange={e=>setGateInspectMi(e.target.value)} style={{marginLeft:6,minWidth:220,padding:"5px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11}}>
-                  {courseMapLine.map((m,idx)=><option key={idx} value={String(idx)}>L{Number(m.lap)|0} {m.name} · row {idx}</option>)}
-                </select>
-              </label>
-            </div>
-            {gateLineInspector&&gateLineInspector.error&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>
-              {gateLineInspector.error}{gateLineInspector.hasPrev!=null?` (has prev: ${gateLineInspector.hasPrev}, has next: ${gateLineInspector.hasNext})`:""}
-            </div>}
-            {gateLineInspector&&gateLineInspector.ctx&&gateLineInspector.mi!=null&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.7,marginBottom:8}}>
-              <div>Mark <strong style={{color:C.acc}}>{gateLineInspector.ctx.markName}</strong> · {gateLineInspector.ctx.curr.lat.toFixed(6)}°, {gateLineInspector.ctx.curr.lon.toFixed(6)}°</div>
-              {gateLineInspector.ctx.synN&&<div style={{color:C.txD,fontSize:9}}>Synthetic 500m prev/next (missing S/F or neighbour coordinates).</div>}
-              <div style={{fontSize:9,color:C.txD}}>One line through the mark: bisector of the <strong>outside</strong> angle between extended inbound chord (mark→prev) and outbound chord (mark→next). Tack filters crossing where set.</div>
-              {gateLineInspector.mapG&&gateLineInspector.mapG.bisDeg!=null&&Number.isFinite(gateLineInspector.mapG.bisDeg)&&<div><span style={{color:"#a855f7"}}>Bisector</span> ray °T: <strong style={{color:"#a855f7"}}>{(Math.round(gateLineInspector.mapG.bisDeg*10)/10).toFixed(1)+"°"}</strong> · tack {gateLineInspector.ctx.tack??"—"}</div>}
-            </div>}
-            {gateLineInspector&&gateLineInspector.mapG&&<div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginTop:4,marginBottom:6}}>
-              <span style={{fontSize:10,color:C.txM}}>Straddle test (cropped index A → B)</span>
-              <input type="number" min={0} value={gateStraddleA} onChange={e=>setGateStraddleA(e.target.value)} placeholder="510" style={{width:64,padding:"4px 6px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}/>
-              <span style={{fontSize:10,color:C.txt}}>→</span>
-              <input type="number" min={0} value={gateStraddleB} onChange={e=>setGateStraddleB(e.target.value)} placeholder="511" style={{width:64,padding:"4px 6px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}/>
-              <button type="button" onClick={copyTrackInspectToStraddle} style={{fontSize:10,padding:"4px 8px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.card,color:C.txt,cursor:"pointer"}} title="Set A and B to the “from → to” range above (or single index if “to” is empty)">Use track lookup range</button>
-            </div>}
-            {gateLineInspector&&gateLineInspector.mapG&&!gateLineInspector.straddle&&<div style={{fontSize:9,color:C.txD,marginBottom:4,maxWidth:520,lineHeight:1.45}}>Enter two <strong>cropped</strong> indices (e.g. 510 and 511) to see signed side (m) to the rounding bisector line and whether the segment crosses it. Or use the button to copy from “Cropped track point lookup”.</div>}
-            {gateLineInspector&&gateLineInspector.straddle&&!gateLineInspector.straddle.err&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,marginBottom:4,lineHeight:1.65}}>
-              {gateLineInspector.straddle.segBearingTwd!=null&&Number.isFinite(gateLineInspector.straddle.segBearingTwd)&&gateLineInspector.straddle.inLineBearingTwd!=null&&Number.isFinite(gateLineInspector.straddle.inLineBearingTwd)&&<>
-                <div>Track <strong>seg {gateLineInspector.straddle.ia}→{gateLineInspector.straddle.ib}</strong> bearing <strong style={{color:C.gld}}>{(Math.round(gateLineInspector.straddle.segBearingTwd*10)/10).toFixed(1)}°T</strong> · bisector line <strong style={{color:"#a855f7"}}>{(Math.round(gateLineInspector.straddle.inLineBearingTwd*10)/10).toFixed(1)}°T</strong>
-                  {gateLineInspector.straddle.acuteSegBearingToInLineDeg!=null&&<span style={{color:C.txD}}> · ∠(seg, line) <strong style={{color:C.txt}}>{(Math.round(gateLineInspector.straddle.acuteSegBearingToInLineDeg*10)/10).toFixed(1)}°</strong> <span style={{fontSize:9}}>(0°=parallel, 90°=⊥)</span></span>}
-                </div>
-                <div style={{marginTop:4}}><strong style={{color:gateLineInspector.straddle.crossesInGate?C.acc:C.wrn}}>{gateLineInspector.straddle.crossesInGate?"Yes — rounding line is crossed between these two points.":"No — same side of the line; no crossing on this segment."}</strong></div>
-              </>}
-              <div style={{marginTop:4}}>Signed rounding line (m): s({gateLineInspector.straddle.ia})={gateLineInspector.straddle.s0.toFixed(2)} · s({gateLineInspector.straddle.ib})={gateLineInspector.straddle.s1.toFixed(2)} ·{" "}
-              {gateLineInspector.straddle.wouldStraddle?<span style={{color:C.acc}}>Opposite signs → cross the rounding line (densified gate track may refine).</span>:
-                gateLineInspector.straddle.onLine?<span style={{color:C.wrn}}>One side is 0 (on the line); the engine does not count that as a sign flip.</span>:
-                <span style={{color:C.wrn}}>Same sign here — densified points <em>between</em> A and B can still straddle; zoom map or add mid indices if needed.</span>}
-              </div>
-            </div>}
-            {gateLineInspector&&gateLineInspector.straddle&&gateLineInspector.straddle.err&&<div style={{fontSize:10,color:C.wrn}}>
-              {String(gateLineInspector.straddle.err)}
-              {gateLineInspector.straddle.err==="chord_too_short"&&gateLineInspector.straddle.c1M!=null&&<span> — leg chords: prev→mark {Number(gateLineInspector.straddle.c1M).toFixed(1)} m · mark→next {gateLineInspector.straddle.c2M!=null&&Number.isFinite(gateLineInspector.straddle.c2M)?Number(gateLineInspector.straddle.c2M).toFixed(1):"\u2014"} m (min {LEG_CHORD_MIN_M} m for this test).</span>}
-            </div>}
-          </div>}
           <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
             Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
           </div>
@@ -6462,43 +6176,6 @@ function App(){
 
         {/* LEGS */}
         {tab==="legs"&&<>
-          {a.legDiagnostics&&(a.legDiagnostics.markSequence?.length>0||a.legDiagnostics.legBuild?.length>0)?(
-            <div style={{background:C.card,borderRadius:12,padding:12,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-              <div style={{fontSize:11,fontWeight:700,color:C.acc,marginBottom:6}}>Leg detection trace</div>
-                <div style={{fontSize:9,color:C.txD,lineHeight:1.5,marginBottom:10}}>
-                Map: each leg step uses a distinct colour; <span style={{color:"#64748b"}}>grey</span> = window rejected (or no points); <span style={{color:C.trkRound}}>orange</span> = mark-rounding band. Committee line: look for <span style={{color:C.txt}}>signed m to line</span> on START→… rows. Mark gate in/out uses <strong>GPS</strong> track points; bow offset applies to START/committee distance, not to mark gate line tests.
-              </div>
-              {a.legDiagnostics.markSequence?.length>0&&<>
-                <div style={{fontSize:10,color:C.txM,marginBottom:4}}>Marks (in course order)</div>
-                <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.65}}>
-                  {a.legDiagnostics.markSequence.map((m,ix)=>{
-                    const gateDbg=m.gateOk!==true&&m.gateDetDebug?formatMarkGateDetDebugText(m.gateDetDebug):"";
-                    return(<div key={ix}>
-                    {m.orderIndex!=null?`#${m.orderIndex+1} `:""}{m.mark||"—"}{" "}
-                    {m.error?<span style={{color:C.wrn}}>{m.error}</span>:m.gateOk===true?<span style={{color:"#10b981"}}>in/out gates OK</span>:<span style={{color:m.aborted?C.wrn:"#f59e0b"}}>
-                      {m.fail||"no gate"}{(m.nearestDistM!=null&&Number.isFinite(m.nearestDistM))||(m.closestDistM!=null&&Number.isFinite(m.closestDistM))?` (nearest ${Math.round(m.nearestDistM??m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.hint?<><br/><span style={{color:C.txD,fontSize:8.5}}>{m.hint}</span></>:""}{gateDbg?<><br/><span style={{color:"#94a3b8",fontSize:8.2}}>{gateDbg}</span></>:""}{m.searchFromDensifyIdx!=null&&m.searchFromOrigTrackIdx!=null&&m.fail==="gates_not_found"?<><br/><span style={{color:"#94a3b8",fontSize:8}}>searchFrom= densify idx {m.searchFromDensifyIdx} (≈ main track {m.searchFromOrigTrackIdx})</span></>:""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
-                    </span>}
-                  </div>);
-                  })}
-                </div>
-              </>}
-              {a.legDiagnostics.legBuild?.length>0&&<>
-                <div style={{fontSize:10,color:C.txM,margin:"10px 0 4px"}}>Legs (in order, after START/FINISH injection if set)</div>
-                <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.5}}>
-                  {a.legDiagnostics.legBuild.map((r,ix)=><div key={ix} style={{borderBottom:`1px solid ${C.bdr}`,padding:"6px 0"}}>
-                    <span style={{color:C.gld}}>{r.stepIndex+1}. {r.from}→{r.to}</span>{" "}
-                    <span style={{color:r.status==="included"?C.acc:r.status==="no_waypoints"?C.wrn:"#a8b5c4"}}>{r.status}</span>
-                    {` · idx ${r.startIdx}…${r.endIdx} · ${r.legPtsCount} pts · ${r.legPathDef||"—"}`}
-                    {r.r0GateOK===false||r.r1GateOK===false?" · clip to in/out idx (mark had no full gate on track)":""}
-                    {r.committeeLineCrossingIdx!=null&&r.committeeLineCrossingIdx>=0?` · committee crossing seg ${r.committeeLineCrossingIdx}`:""}{r.committeeLineCrossingIdx===null&&String(r.from)==="START"&&(r.legPathDef==="map_gates"||r.legPathDef==="perp")&&r.gateDebug&&!r.gateDebug.ok?" · no committee line crossing (widen crop / line)":""}
-                    {r.startLineDistanceSignedM!=null&&Number.isFinite(r.startLineDistanceSignedM)?` · signed m to line (vs mark B) ${Math.round(r.startLineDistanceSignedM)}`:""}
-                    {r.gateDebug?(()=>{const g=r.gateDebug;if(g.ok)return` · gate line cA=${g.cAIdx} cB=${g.cBIdx}${g.jSf!=null&&g.jSf>=0?` committeeSeg=${g.jSf}`:""}`;return` · ${g.fail||"gate"}`+(g.cAIdx!=null?` cA=${g.cAIdx}`:"")+(g.cBIdx!=null?` cB=${g.cBIdx}`:"")+(g.searchFrom!=null?` sF=${g.searchFrom}`:"");})():""}
-                    {r.roundingMNote?<><br/><span style={{color:C.txD,fontSize:7.5}}>{r.roundingMNote}</span></>:""}
-                  </div>)}
-                </div>
-              </>}
-            </div>
-          ):null}
           {a.legs.length>0?<>
             <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:6,padding:"6px 8px",marginBottom:4}}>
               <div style={{width:56}}>From→To</div>
@@ -6515,7 +6192,7 @@ function App(){
               return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:C.card,borderRadius:8,marginBottom:3,border:`1px solid ${C.bdr}`,fontSize:11}}>
                 <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
                 <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
-                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)?(<>Distance from line <span style={{color:Math.round(l.startLineDistanceM)<0?C.wrn:C.acc,fontWeight:600}}>{Math.round(l.startLineDistanceM)}m</span> · </>):(l.roundingM!=null&&Number.isFinite(l.roundingM)&&l.roundingM>0.05?<>Rnd <span style={{color:C.acc}}>{Math.round(l.roundingM)}m</span>{l.roundingStraightM!=null&&Number.isFinite(l.roundingStraightM)&&l.roundingStraightM>0.05?<> <span style={{color:C.txM}}>(st {Math.round(l.roundingStraightM)}m)</span></>:null} · </>:null)}Trk {m2nm(l.distance).toFixed(2)}nm</div>
+                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)?(<>Distance from line <span style={{color:Math.round(l.startLineDistanceM)<0?C.wrn:C.acc,fontWeight:600}}>{Math.round(l.startLineDistanceM)}m</span> · </>):null}Trk {m2nm(l.distance).toFixed(2)}nm</div>
                 <div style={{width:44,color:C.txM}}>{fT(l.duration)}</div>
                 <div style={{width:40,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
                 <div style={{width:36,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc.toFixed(1):(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG.toFixed(1):"—")}</div>
@@ -6547,7 +6224,7 @@ function App(){
             </div>
           </>:<div style={{textAlign:"center",color:C.txM,padding:30,maxWidth:480,margin:"0 auto"}}>
             {courseLetter?<>
-              <div style={{marginBottom:10,lineHeight:1.55}}>No leg stats in the table. Use the <strong>Leg detection trace</strong> above (each mark and leg window). Common issues: the time crop misses a mark, mark GPS is wrong, or the track never comes within a few kilometres of a mark in sequence.</div>
+              <div style={{marginBottom:10,lineHeight:1.55}}>No leg stats in the table. Common issues: the time crop misses a mark, mark GPS is wrong, or the track never comes close enough to a mark in sequence.</div>
               <div style={{fontSize:10,color:C.txD,marginBottom:12,lineHeight:1.5}}>After you change the crop, wind, or mark positions, use <strong>Analyse / Run analysis</strong> (or it auto-refreshes when the crop no longer matches the last run). Stale results used to show empty legs for the new crop.</div>
             </>:"Select a course for leg-by-leg breakdown."}
             <button onClick={()=>setView("course-setup")} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),marginTop:4,padding:"8px 16px",fontSize:12}}>← Setup</button>
