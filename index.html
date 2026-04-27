@@ -937,7 +937,9 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
   const mapG=computeMapMarkGateRaysForDetection(prev,curr,next,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg);
   if(mapG.chAlign&&mapG.alBearing!=null){
     const al=mapG.alBearing;
-    const sideJ=pp=>signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,al);
+    const gAlign=markGateSegmentEndsFromBearingTwd(curr.lat,curr.lon,al, MARK_GATE_LINE_ARM_M);
+    if(!gAlign)return{ok:false,gateDetDebug:{mode:"chAlign",fail:"bad_mark_gate_segment",mapG}};
+    const sideJ=pp=>signedMetersToABLineLikeCommittee(pp.lat,pp.lon, gAlign.aLat,gAlign.aLon, gAlign.bLat, gAlign.bLon);
     const fillAlign=(useTack)=>{
       const arr=[];
       for(let j=Math.max(1,sF+1);j<=jEnd;j++){
@@ -962,16 +964,19 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
   }
   const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
   if(mapG.inRayBr==null||!Number.isFinite(mapG.inRayBr))return{ok:false,gateDetDebug:{mode:"in_ray",fail:"no_in_ray",mapG}};
+  const gIn=markGateSegmentEndsFromBearingTwd(curr.lat,curr.lon,mapG.inRayBr, MARK_GATE_LINE_ARM_M);
+  if(!gIn)return{ok:false,gateDetDebug:{mode:"in",fail:"bad_mark_gate_segment",mapG}};
   const sideIn=pp=>{
-    let s0=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,mapG.inRayBr);
+    let s0=signedMetersToABLineLikeCommittee(pp.lat,pp.lon, gIn.aLat,gIn.aLon, gIn.bLat, gIn.bLon);
     if(useU135)s0*=ts;
     return s0;
   };
   const bOut0=enuMeters(curr.lat,curr.lon,next.lat,next.lon);
   const outWind135=mapG.apIsOutWind135&&mapG.outRayPre!=null&&Number.isFinite(wdf);
-  const sideOutBase=outWind135
-    ?(pp=>signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,pp.lat,pp.lon,mapG.outRayPre))
-    :(pp=>sideValuePerpAtAChordEnuA(curr.lat,curr.lon,pp.lat,pp.lon,bOut0.x*ts,bOut0.y*ts));
+  const gOut=mapG.outRayPre!=null&&Number.isFinite(mapG.outRayPre)?markGateSegmentEndsFromBearingTwd(curr.lat,curr.lon, mapG.outRayPre, MARK_GATE_LINE_ARM_M):null;
+  const sideOutBase=!gOut
+    ?(pp=>sideValuePerpAtAChordEnuA(curr.lat,curr.lon,pp.lat,pp.lon,bOut0.x*ts,bOut0.y*ts))
+    :(pp=>signedMetersToABLineLikeCommittee(pp.lat,pp.lon, gOut.aLat,gOut.aLon, gOut.bLat, gOut.bLon));
   return findFirstInOutMarkGatePair(pts,sF,jEnd,sideIn,sideOutBase,outWind135,tack,curr,next);
 }
 /** @returns {idx:number, neg:boolean} */
@@ -1187,15 +1192,19 @@ function signedInboundSideMetersForMapGate(prev,curr,next,p,currentMarkName,next
   if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{error:"chord_too_short",c1M:c1,c2M:c2};
   const mapG=computeMapMarkGateRaysForDetection(prev,curr,next,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg);
   if(mapG.chAlign&&mapG.alBearing!=null){
-    const sideM=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,p.lat,p.lon,mapG.alBearing);
+    const g=markGateSegmentEndsFromBearingTwd(curr.lat,curr.lon,mapG.alBearing, MARK_GATE_LINE_ARM_M);
+    if(!g)return{error:"bad_gate",mapG};
+    const sideM=signedMetersToABLineLikeCommittee(p.lat,p.lon,g.aLat,g.aLon,g.bLat,g.bLon);
     return{mapG,sideM,mode:"chAlign",inLineBearingTwd:mapG.alBearing};
   }
   const wdf=Number(windFromDeg);
   const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
   const ts=tackSignGates(tack);
   if(mapG.inRayBr==null||!Number.isFinite(mapG.inRayBr))return{error:"no_in_ray",mapG};
-  /** In-gate = infinite line through the mark in the same direction the map draws the magenta segment (`inRayBr`); P/S may flip the sign to match the engine. */
-  let sideM=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,p.lat,p.lon,mapG.inRayBr);
+  const g=markGateSegmentEndsFromBearingTwd(curr.lat,curr.lon,mapG.inRayBr, MARK_GATE_LINE_ARM_M);
+  if(!g)return{error:"bad_gate",mapG};
+  /** In-gate: same side test as committee line — A=mark, B=mark+5nm along inRay (magenta); U135 tacks *ts. */
+  let sideM=signedMetersToABLineLikeCommittee(p.lat,p.lon,g.aLat,g.aLon,g.bLat,g.bLon);
   if(useU135)sideM*=ts;
   return{mapG,sideM,mode:useU135?"U135_chord":(mapG.inMode||"ch"),inLineBearingTwd:mapG.inRayBr};
 }
@@ -1344,6 +1353,27 @@ function lineSideValue(lat,lon,aLat,aLon,bLat,bLon){
   const b=latLonToLocalM(bLat,bLon,refLat,refLon);
   const abx=b.x-a.x,aby=b.y-a.y,apx=p.x-a.x,apy=p.y-a.y;
   return abx*apy-aby*apx;
+}
+/**
+ * Long segment from the mark along the map gate (°T), like committee A–B: same **infinite** line for side tests as `lineSideValue` / Start line. 5nm default.
+ * @see `firstCommitteeLineSegmentCrossing`
+ */
+const MARK_GATE_LINE_ARM_M=5*1852;
+function markGateSegmentEndsFromBearingTwd(markLat,markLon,bearingTwd,armM=MARK_GATE_LINE_ARM_M){
+  const br=Number(bearingTwd);
+  if(!Number.isFinite(br)||!Number.isFinite(markLat)||!Number.isFinite(markLon))return null;
+  const b=destinationPoint(markLat,markLon,br%360,Math.max(10,armM));
+  return{aLat:markLat,aLon:markLon,bLat:b.lat,bLon:b.lon,armM};
+}
+/** Signed perpendicular distance (m) to the infinite line through A–B; same construction as `lineSideValue` / Start (cross / |AB| in local m). */
+function signedMetersToABLineLikeCommittee(pLat,pLon,aLat,aLon,bLat,bLon){
+  const s=lineSideValue(pLat,pLon,aLat,aLon,bLat,bLon);
+  const refLat=(aLat+bLat)/2,refLon=(aLon+bLon)/2;
+  const a=latLonToLocalM(aLat,aLon,refLat,refLon);
+  const b=latLonToLocalM(bLat,bLon,refLat,refLon);
+  const L=Math.hypot(b.x-a.x,b.y-a.y);
+  if(L<0.1)return 0;
+  return s/L;
 }
 /**
  * Project GPS forward to bow: along COG (° T) or segment bearing, by `forwardM` (m, ≥0).
@@ -5263,7 +5293,7 @@ function App(){
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
     const wn=windOvr!=null&&Number.isFinite(windOvr)?windOvr:curAnalysis?.windDir;
     const wwm=String(windwardMarkName||"").trim()||null;
-    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,200,wn!=null?Number(wn):null,wwm);
+    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,MARK_GATE_LINE_ARM_M,wn!=null?Number(wn):null,wwm);
   },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps,windOvr,curAnalysis?.windDir,windwardMarkName,courseGeomSig]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
@@ -6109,7 +6139,7 @@ function App(){
               <input type="number" min={0} value={gateStraddleB} onChange={e=>setGateStraddleB(e.target.value)} placeholder="511" style={{width:64,padding:"4px 6px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}/>
               <button type="button" onClick={copyTrackInspectToStraddle} style={{fontSize:10,padding:"4px 8px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.card,color:C.txt,cursor:"pointer"}} title="Set A and B to the “from → to” range above (or single index if “to” is empty)">Use track lookup range</button>
             </div>}
-            {gateLineInspector&&gateLineInspector.mapG&&!gateLineInspector.straddle&&<div style={{fontSize:9,color:C.txD,marginBottom:4,maxWidth:520,lineHeight:1.45}}>Enter two <strong>cropped</strong> indices (e.g. 510 and 511 for one GPS leg) to see signed side (m) of each point w.r.t. the <strong style={{color:"#c026d3"}}>magenta in-gate</strong> and whether the segment between them <strong>crosses</strong> that line. Or use the button to copy from “Cropped track point lookup”.</div>}
+            {gateLineInspector&&gateLineInspector.mapG&&!gateLineInspector.straddle&&<div style={{fontSize:9,color:C.txD,marginBottom:4,maxWidth:520,lineHeight:1.45}}>Enter two <strong>cropped</strong> indices (e.g. 510 and 511) to see signed side (m) and crossing. Same logic as the <strong>Start line</strong>: <code style={{fontSize:9}}>lineSideValue</code> on a long A→B segment (mark → 5nm along the in-gate bearing; same infinite line as the magenta overlay). Or use the button to copy from “Cropped track point lookup”.</div>}
             {gateLineInspector&&gateLineInspector.straddle&&!gateLineInspector.straddle.err&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,marginBottom:4,lineHeight:1.65}}>
               {gateLineInspector.straddle.segBearingTwd!=null&&Number.isFinite(gateLineInspector.straddle.segBearingTwd)&&gateLineInspector.straddle.inLineBearingTwd!=null&&Number.isFinite(gateLineInspector.straddle.inLineBearingTwd)&&<>
                 <div>Track <strong>seg {gateLineInspector.straddle.ia}→{gateLineInspector.straddle.ib}</strong> bearing <strong style={{color:C.gld}}>{(Math.round(gateLineInspector.straddle.segBearingTwd*10)/10).toFixed(1)}°T</strong> · in-gate line (magenta) <strong style={{color:"#c026d3"}}>{(Math.round(gateLineInspector.straddle.inLineBearingTwd*10)/10).toFixed(1)}°T</strong>
