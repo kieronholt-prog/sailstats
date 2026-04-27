@@ -1057,12 +1057,51 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
   const hasSf=e0&&e1&&Number.isFinite(e0.lat)&&Number.isFinite(e0.lon)&&Number.isFinite(e1.lat)&&Number.isFinite(e1.lon);
   const chLeg=bear(latA,lonA,latB,lonB);
   const mapTry=tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMark,toMarkName,tackFrom,tackTo,wdF,wwm,legMapCtx,e0,e1,hasSf);
-  let cA, cB, useU135, sideA, sideB, bChord, tsA, tsB, bNormAx, bNormAy, bNormBx, bNormBy, mapLegOk=false, gateGOut=null, gateGIn=null;
+  let cA, cB, useU135, sideA, sideB, bChord, tsA, tsB, bNormAx, bNormAy, bNormBx, bNormBy, mapLegOk=false, gateGOut=null, gateGIn=null, finishFallbackOk=false;
   const jEnd=pts.length-1;
   const sF=Math.max(0,searchFrom|0);
   if(mapTry){
     cA=mapTry.cA;cB=mapTry.cB;mapLegOk=true;gateGOut=mapTry.gOut;gateGIn=mapTry.gIn;
   }else{
+    const fromM0=String(fromMark||"");
+    const toM0=String(toMarkName||"");
+    const finishTried=toM0==="FINISH"&&hasSf&&e0&&e1&&fromM0!=="START";
+    if(finishTried&&legMapCtx){
+      const lctx=enrichLegMapCtxForGates(
+        {wPrev:legMapCtx.wPrev??null,wAfter:legMapCtx.wAfter??null,nameAfter:legMapCtx.nameAfter??null},
+        latA,lonA,latB,lonB,fromMark,toMarkName
+      );
+      const wPr=lctx&&lctx.wPrev;
+      if(wPr&&Number.isFinite(wPr.lat)&&Number.isFinite(wPr.lon)){
+        const gO=computeMapMarkGateRaysForDetection(
+          wPr,{lat:latA,lon:lonA},{lat:latB,lon:lonB},fromM0,"FINISH",wwm,tackFrom,wdF
+        );
+        if(gO.outRayPre!=null&&Number.isFinite(gO.outRayPre)){
+          const sFinA=p=>markGateSideMetersMapAlignedForLeg(p,latA,lonA,gO,"out",tackFrom,wdF);
+          const cAr=firstPerpCrossingWithNeg(pts,sF,jEnd,sFinA);
+          const cAt=cAr.idx;
+          if(cAt>=0){
+            const cBt=firstCommitteeLineSegmentCrossing(pts,Math.max(cAt|0,sF),jEnd,e0,e1);
+            if(cBt>=0&&cBt>cAt&&cBt-cAt+1>=LEG_MIN_TRACK_POINTS){
+              cA=cAt;
+              cB=cBt;
+              gateGOut=gO;
+              gateGIn=null;
+              useU135=false;
+              sideA=sFinA;
+              finishFallbackOk=true;
+            }
+          }
+        }
+      }
+    }
+    if(finishTried&&!finishFallbackOk){
+      return{
+        startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,
+        gateDebug:{fail:"finish_leg_gates",reason:"map_try_failed_out_or_committee",cAIdx:Number.isFinite(cA)?cA:null,cBIdx:Number.isFinite(cB)?cB:null,searchFrom:sF,legFallback:"finish_map_out_plus_committee"},
+      };
+    }
+    if(!finishFallbackOk){
     useU135=!!tackFrom&&!!tackTo&&Number.isFinite(wdF)&&(isWindwardMarkForMapGates(String(toMarkName||""),String(windwardMarkName||""),chLeg,wdF)||useUpwindEntryGateBearing(chLeg,wdF,toMarkName,windwardMarkName));
     bChord=enuMeters(latA,lonA,latB,lonB);
     tsA=tackSignGates(tackFrom);
@@ -1095,6 +1134,7 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
     const cBrF=firstPerpCrossingWithNeg(pts,cA,jEnd,sideB);
     cB=cBrF.idx;
     if(cB<0||cB<=cA)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"no_gate_crossing_at_leg_B",cAIdx:cA,cBIdx:null,searchFrom:sF,legFallback:"chord_perp_5nm"}};
+    }
   }
   if(cB-cA+1<LEG_MIN_TRACK_POINTS)return{startIdx:fbStart,endIdx:fbEnd,roundingM:0,startLineDistanceSignedM:null,legPathDef:"closest",roundingKind:null,gateDebug:{fail:"leg_gate_window_too_few_points",cAIdx:cA,cBIdx:cB,searchFrom:sF,mapLeg:mapLegOk}};
   let jSf=-1;
@@ -1128,7 +1168,8 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
       roundingKind="mark_path_m";
     }else{roundingM=0;roundingKind="mark_path_m";}
   }else if(String(fromMark||"")!=="START"&&mapLegOk)roundingM=0,roundingKind="map_in_out_leg_m";
-  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"map_gates",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null,gateDebug:{ok:true,useU135:mapLegOk?null:useU135,mapLeg:mapLegOk,legFallback:mapLegOk?null:"chord_perp_5nm",cAIdx:cA,cBIdx:cB,jSf,jSfOnLine:jSf>=0,legGatePts:cB-legStartIdx+1,fromMark:String(fromMark||""),gateGIn:mapLegOk?gateGIn:undefined,gateGOut:mapLegOk?gateGOut:undefined}};
+  const legFbTag=mapLegOk?null:finishFallbackOk?"finish_out_committee_b":"chord_perp_5nm";
+  return{startIdx:legStartIdx,endIdx:cB,roundingM,roundingKind,legPathDef:"map_gates",startLineDistanceSignedM,gatesAtA:legStartIdx,gatesAtB:cB,committeeLineCrossingIdx:jSf>=0?jSf:null,gateDebug:{ok:true,useU135:mapLegOk?null:useU135,mapLeg:mapLegOk,legFallback:legFbTag,cAIdx:cA,cBIdx:cB,jSf,jSfOnLine:jSf>=0,legGatePts:cB-legStartIdx+1,fromMark:String(fromMark||""),gateGIn:mapLegOk?gateGIn:undefined,gateGOut:mapLegOk?gateGOut:undefined,finishMapOutPlusCommittee:!!finishFallbackOk}};
 }
 /** Destination point (lat, lon °) from start, bearing ° clockwise from north, distance m. */
 function destinationPoint(lat,lon,bearingDeg,distM){
@@ -3306,6 +3347,7 @@ function buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBo
     const nameAfterR2=hasR2?String(r2.mark||""):null;
     const legMapCtx={wPrev:wPrevLL,wAfter:wAfterLL,nameAfter:nameAfterR2};
     const g=findMapLegGates(pts,wA.lat,wA.lon,wB.lat,wB.lon,nextFrom,si,ei,r0.mark,startFinishLine,gpsToBowM,windFromDeg,r0.tack??null,r1.tack??null,String(r1.mark||""),windwardMarkName,legMapCtx);
+    const gateFinderBeforeClip={startIdx:g.startIdx,endIdx:g.endIdx};
     row.gateDebug=g.gateDebug||null;
     row.legPathDef=g.legPathDef||"closest";
     row.committeeLineCrossingIdx=g.committeeLineCrossingIdx??null;
@@ -3331,6 +3373,14 @@ function buildLegsFromRoundingsArray(pts,roundings,sfMid,startFinishLine,gpsToBo
     }
     const fromStart=String(r0.mark)==="START"&&startLineDistanceM!=null;
     row.startIdx=startIdx;row.endIdx=endIdx;
+    if(row.usedGateIdxClip&&row.gateDebug&&(gateFinderBeforeClip.startIdx!==startIdx||gateFinderBeforeClip.endIdx!==endIdx)){
+      row.gateDebug={
+        ...row.gateDebug,
+        legWindowUsesRoundingClip:true,
+        gateFinderLegWindow:{startIdx:gateFinderBeforeClip.startIdx,endIdx:gateFinderBeforeClip.endIdx},
+        note:"row startIdx/endIdx follow mark exit/entry when set; cAIdx/cBIdx are from per-leg gate finder (see gateFinderLegWindow if they differ).",
+      };
+    }
     const legPts=pts.slice(startIdx,endIdx+1);
     row.legPtsCount=legPts.length;
     nextFrom=endIdx;
