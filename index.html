@@ -802,6 +802,106 @@ function firstValidOutboundPerpCrossingOpp(pts,iStart,jEnd,sideAt,tack,mLat,mLon
   }
   return-1;
 }
+function buildChAlignGateFailureDebug(pts,sF,jEnd,sideJ,tack,curr){
+  const fillL=[],fillT=[];
+  for(let j=Math.max(1,sF+1);j<=jEnd;j++){
+    const a=pts[j-1],b=pts[j];
+    if(!segmentSignCrosses(sideJ(a),sideJ(b)))continue;
+    fillL.push(j);
+    if(perpCrossingSatisfiesMarkTack(pts,j,tack,curr.lat,curr.lon))fillT.push(j);
+  }
+  const inUse=fillT.length?fillT:fillL;
+  const o={mode:"ch_align",trackRef:"gps_latlon",alignStraddlesLax:fillL.length,alignStraddlesTack:fillT.length,
+    failStage:!inUse.length?(!fillL.length?"no_straddle":"tack_rejected"):"no_valid_second_cross"};
+  if(inUse.length){
+    const eIn=inUse[0];
+    o.firstPerpSegEnd=eIn;
+    const eOut=firstPerpCrossing(pts,eIn,jEnd,sideJ);
+    o.secondPerpSegEnd=eOut<0?null:eOut;
+    o.secondMissingOrLeFirst=eOut<0||eOut<=eIn||eOut-eIn+1<2;
+  }
+  return o;
+}
+/**
+ * Diagnostic when in/out pairing fails. Mark gates use **GPS** lat/lon on densified points (not bow offset);
+ * bow is only for START/committee signed distance.
+ */
+function buildInOutGateFailureDebug(pts,sF,jEnd,sideIn,sideOutBase,outWind135,tack,curr,next){
+  const mLat=curr.lat,mLon=curr.lon,latN=next.lat,lonN=next.lon;
+  const runOutBase=(eIn,sideO)=>{
+    let eO=firstValidOutboundPerpCrossing(pts,eIn,jEnd,sideO,tack,mLat,mLon,latN,lonN);
+    if(eO<0)eO=firstValidOutboundPerpCrossingLoose(pts,eIn,jEnd,sideO,tack,mLat,mLon,latN,lonN);
+    if(eO<0)eO=firstValidOutboundPerpCrossingOpp(pts,eIn,jEnd,sideO,tack,mLat,mLon,latN,lonN,false);
+    if(eO<0)eO=firstValidOutboundPerpCrossingOpp(pts,eIn,jEnd,sideO,tack,mLat,mLon,latN,lonN,true);
+    return eO;
+  };
+  const runOutWithNeg=(eIn,sideO)=>{
+    let eO=runOutBase(eIn,sideO);
+    if((eO<0||eO<=eIn)&&outWind135)eO=runOutBase(eIn,pp=>-sideO(pp));
+    return eO;
+  };
+  const inLax=[],inTack=[];
+  for(let j=Math.max(1,sF+1);j<=jEnd;j++){
+    const a=pts[j-1],b=pts[j];
+    if(!segmentSignCrosses(sideIn(a),sideIn(b)))continue;
+    inLax.push(j);
+    if(perpCrossingSatisfiesMarkTack(pts,j,tack,mLat,mLon))inTack.push(j);
+  }
+  const inUse=inTack.length?inTack:inLax;
+  const out={
+    mode:"in_out",trackRef:"gps_latlon",searchFrom:sF,windowEndIdx:jEnd,gateSubPts:pts.length,
+    inboundStraddlesLax:inLax.length,inboundStraddlesTack:inTack.length,
+    tackFilterBlocksAllInbound:inLax.length>0&&inTack.length===0,
+    failStage:!inUse.length?(!inLax.length?"no_inbound_straddle":"tack_rejects_all_inbound"):"inbound_out_pairing",
+  };
+  if(!inUse.length){
+    if(out.tackFilterBlocksAllInbound)out.hintTack="Geometric in-straddles exist but P/S dropped every crossing at COG; try tack blank.";
+    return out;
+  }
+  const pairAttempts=inUse.map(eIn=>({eIn,eOut:runOutWithNeg(eIn,sideOutBase)})).map(p=>({eIn:p.eIn,eOut:p.eOut,ok:p.eOut>=0&&p.eOut>p.eIn&&p.eOut-p.eIn+1>=2}));
+  out.pairSample=pairAttempts.slice(0,4);
+  out.allInCandidatesFailed=pairAttempts.length>0&&pairAttempts.every(x=>!x.ok);
+  const e0=inUse[0];
+  out.firstInboundSegEnd=e0;
+  out.outboundStraddlesOnBaseSide=0;
+  for(let j=Math.max(1,e0+1);j<=jEnd;j++){
+    const a=pts[j-1],b=pts[j];
+    if(!segmentSignCrosses(sideOutBase(a),sideOutBase(b)))continue;
+    out.outboundStraddlesOnBaseSide++;
+  }
+  out.outIdxStrict=firstValidOutboundPerpCrossing(pts,e0,jEnd,sideOutBase,tack,mLat,mLon,latN,lonN);
+  out.outIdxLoose=firstValidOutboundPerpCrossingLoose(pts,e0,jEnd,sideOutBase,tack,mLat,mLon,latN,lonN);
+  const anyPerp=firstPerpCrossing(pts,e0,jEnd,sideOutBase);
+  out.anyOutSignChangeSegEnd=anyPerp<0?null:anyPerp;
+  if(anyPerp>0&&anyPerp<=jEnd){
+    const b=pts[anyPerp];
+    out.alongM_towardNext_atAnyOutEnd=alongChordFromMToN(mLat,mLon,b.lat,b.lon,latN,lonN);
+    out.suspectAlongChordBlock=out.alongM_towardNext_atAnyOutEnd!=null&&out.alongM_towardNext_atAnyOutEnd<OUTBOUND_MIN_ALONG_B_M;
+  }
+  if(out.tackFilterBlocksAllInbound)out.hintTack="Geometric in-straddles exist but P/S dropped every crossing at COG; try tack blank.";
+  if(!out.suspectAlongChordBlock&&out.outIdxStrict<0&&out.outIdxLoose<0&&anyPerp<0)out.suspectNoOutboundStraddle=1;
+  return out;
+}
+function formatMarkGateDetDebugText(d){
+  if(!d||typeof d!=="object")return"";
+  if(d.mode==="chord")
+    return`Leg segments too short for gates: P→M ${Math.round(d.c1M)}m, M→N ${Math.round(d.c2M)}m (need ≥${d.minM}m).`;
+  if(d.mode==="ch_align"){
+    if(d.secondMissingOrLeFirst&&d.firstPerpSegEnd!=null)
+      return`ch_align: line straddles lax=${d.alignStraddlesLax} with tack=${d.alignStraddlesTack} · 2nd crossing ${d.secondPerpSegEnd==null?"missing":`segEnd=${d.secondPerpSegEnd}`} (in then out on same line). ${d.failStage}.`;
+    return`ch_align: lax=${d.alignStraddlesLax} tack=${d.alignStraddlesTack} · ${d.failStage}.`;
+  }
+  if(d.mode==="in_out"){
+    const ps=(d.pairSample||[]).slice(0,2).map(p=>`in@${p.eIn}→out@${p.eOut}`).join(" · ");
+    const al=d.alongM_towardNext_atAnyOutEnd;
+    return`in_out: inbound straddles lax=${d.inboundStraddlesLax} tack=${d.inboundStraddlesTack}${d.tackFilterBlocksAllInbound?"; P/S blocked all; try blank tack.":""}`+
+      (ps?` · pair tries: ${ps}`:"")+
+      (al!=null&&Number.isFinite(al)?` · along toward next at first out flip ≈${al.toFixed(2)}m`:"")+
+      (d.suspectAlongChordBlock?" (likely along-chord / forward check).":d.suspectNoOutboundStraddle?" (no base-side outbound straddle after first in).":"")+
+      " Track for gates is GPS, not bow.";
+  }
+  return"";
+}
 /**
  * Inbound/outbound geometry matches `computeMapMarkGateRaysForDetection` (same as map gate overlay):
  * W135 in when mark is windward on map rules; chord otherwise; leeward→windward uses L135/R135 out;
@@ -839,12 +939,12 @@ function findFirstInOutMarkGatePair(pts,sF,jEnd,sideIn,sideOutBase,outWind135,ta
     const straightM=hav(pts[eIn].lat,pts[eIn].lon,pts[eOut].lat,pts[eOut].lon);
     return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
   }
-  return{ok:false};
+  return{ok:false,gateDetDebug:buildInOutGateFailureDebug(pts,sF,jEnd,sideIn,sideOutBase,outWind135,tack,curr,next)};
 }
 function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windFromDeg=null,currentMarkName=null,windwardMarkName=null,nextMarkName=null){
   const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
   const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
-  if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{ok:false};
+  if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{ok:false,gateDetDebug:{mode:"chord",fail:"chord_too_short",c1M:c1,c2M:c2,minM:LEG_CHORD_MIN_M,trackRef:"gps_latlon"}};
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
   const ts=tackSignGates(tack);
@@ -873,7 +973,7 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,windF
       const straightM=hav(pts[eIn].lat,pts[eIn].lon,pts[eOut].lat,pts[eOut].lon);
       return{ok:true,entryIdx:eIn,exitIdx:eOut,trackM,straightM};
     }
-    return{ok:false};
+    return{ok:false,gateDetDebug:buildChAlignGateFailureDebug(pts,sF,jEnd,sideJ,tack,curr)};
   }
   const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
   const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
@@ -3189,7 +3289,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
     if(g2.ok){
       const exitO=mapGateIdxToOrig(g2.exitIdx),entO=mapGateIdxToOrig(g2.entryIdx);
       const dExit=hav(gatePts[g2.exitIdx].lat,gatePts[g2.exitIdx].lon,m.lat,m.lon);
-      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:true,entryIdx:entO,exitIdx:exitO,roundingTrackM:g2.trackM,syntheticNeighbours:synN});
+      markSequenceLog.push({orderIndex:mi,mark:m.name,lap:m.lap,gateOk:true,entryIdx:entO,exitIdx:exitO,roundingTrackM:g2.trackM,syntheticNeighbours:synN,gateDetDebug:g2.gateDetDebug??null});
       roundings.push({
         mark:m.name,idx:exitO,dist:dExit,lap:m.lap,lat:m.lat,lon:m.lon,tack:m.tack??null,
         entryIdx:entO,exitIdx:exitO,roundingTrackM:g2.trackM,roundingStraightM:g2.straightM,roundingGateOK:true,
@@ -3209,6 +3309,7 @@ function detectLegsFromMarks(pts,markPositions,laps,preamble=null,startFinishLin
         orderIndex:mi,mark:m.name,lap:m.lap,gateOk:false,fail:"gates_not_found",
         hint:"In then out on the map gate lines (135°/chord/L135) not found in order from here — check wind, tack P/S, crop, or mark order. Nearest approach is diagnostic only.",
         nearestDistM:bestD,nearestIdx:bestI>=0?mapGateIdxToOrig(bestI):null,searchFrom,syntheticNeighbours:synN,
+        gateDetDebug:g2.gateDetDebug??null,
       });
       break;
     }
@@ -6277,18 +6378,21 @@ function App(){
           {a.legDiagnostics&&(a.legDiagnostics.markSequence?.length>0||a.legDiagnostics.legBuild?.length>0)?(
             <div style={{background:C.card,borderRadius:12,padding:12,border:`1px solid ${C.bdr}`,marginBottom:14}}>
               <div style={{fontSize:11,fontWeight:700,color:C.acc,marginBottom:6}}>Leg detection trace</div>
-              <div style={{fontSize:9,color:C.txD,lineHeight:1.5,marginBottom:10}}>
-                Map: each leg step uses a distinct colour; <span style={{color:"#64748b"}}>grey</span> = window rejected (or no points); <span style={{color:C.trkRound}}>orange</span> = mark-rounding band. Committee line: look for <span style={{color:C.txt}}>signed m to line</span> on START→… rows.
+                <div style={{fontSize:9,color:C.txD,lineHeight:1.5,marginBottom:10}}>
+                Map: each leg step uses a distinct colour; <span style={{color:"#64748b"}}>grey</span> = window rejected (or no points); <span style={{color:C.trkRound}}>orange</span> = mark-rounding band. Committee line: look for <span style={{color:C.txt}}>signed m to line</span> on START→… rows. Mark gate in/out uses <strong>GPS</strong> track points; bow offset applies to START/committee distance, not to mark gate line tests.
               </div>
               {a.legDiagnostics.markSequence?.length>0&&<>
                 <div style={{fontSize:10,color:C.txM,marginBottom:4}}>Marks (in course order)</div>
                 <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.65}}>
-                  {a.legDiagnostics.markSequence.map((m,ix)=><div key={ix}>
+                  {a.legDiagnostics.markSequence.map((m,ix)=>{
+                    const gateDbg=m.gateOk!==true&&m.gateDetDebug?formatMarkGateDetDebugText(m.gateDetDebug):"";
+                    return(<div key={ix}>
                     {m.orderIndex!=null?`#${m.orderIndex+1} `:""}{m.mark||"—"}{" "}
                     {m.error?<span style={{color:C.wrn}}>{m.error}</span>:m.gateOk===true?<span style={{color:"#10b981"}}>in/out gates OK</span>:<span style={{color:m.aborted?C.wrn:"#f59e0b"}}>
-                      {m.fail||"no gate"}{(m.nearestDistM!=null&&Number.isFinite(m.nearestDistM))||(m.closestDistM!=null&&Number.isFinite(m.closestDistM))?` (nearest ${Math.round(m.nearestDistM??m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.hint?<><br/><span style={{color:C.txD,fontSize:8.5}}>{m.hint}</span></>:""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
+                      {m.fail||"no gate"}{(m.nearestDistM!=null&&Number.isFinite(m.nearestDistM))||(m.closestDistM!=null&&Number.isFinite(m.closestDistM))?` (nearest ${Math.round(m.nearestDistM??m.closestDistM)}m)`:m.closestDistM===Infinity?" (no track points)":""}{m.hint?<><br/><span style={{color:C.txD,fontSize:8.5}}>{m.hint}</span></>:""}{gateDbg?<><br/><span style={{color:"#94a3b8",fontSize:8.2}}>{gateDbg}</span></>:""}{m.maxClosestM!=null?` / max ${m.maxClosestM}m`:""}{m.aborted?" — sequence stopped":""}
                     </span>}
-                  </div>)}
+                  </div>);
+                  })}
                 </div>
               </>}
               {a.legDiagnostics.legBuild?.length>0&&<>
