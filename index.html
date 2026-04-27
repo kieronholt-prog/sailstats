@@ -1140,6 +1140,72 @@ function virtualNextAfterLastMark(prev,curr,distM=500){
   const bPC=bear(prev.lat,prev.lon,curr.lat,curr.lon);
   return destinationPoint(curr.lat,curr.lon,bPC,distM);
 }
+/**
+ * Prev / curr / next for one row in the expanded course — same as `detectLegsFromMarks`
+ * (S/F mid, FINISH mid, virtual 500m when needed).
+ */
+function resolveMarkGateNeighboursForIndex(fullSeq,sfMid,mi){
+  const wpFromRow=row=>row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)?{lat:row.lat,lon:row.lon}:null;
+  if(!fullSeq||mi<0||mi>=fullSeq.length)return{error:"bad_index"};
+  const m=fullSeq[mi];
+  const curr=wpFromRow(m);
+  if(!curr)return{error:"no_mark_coords"};
+  let prev=null;
+  if(mi>0){
+    const pr=fullSeq[mi-1];
+    prev=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
+  }else if(sfMid)prev=sfMid;
+  let nextW=null;
+  if(mi+1<fullSeq.length){
+    const nx=fullSeq[mi+1];
+    nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
+  }else if(sfMid)nextW=sfMid;
+  const needVirtPrev=!prev&&!!nextW;
+  const needVirtNext=!nextW&&!!prev;
+  if(needVirtPrev)prev=virtualPrevForFirstMarkApproach(curr,nextW,500);
+  if(needVirtNext)nextW=virtualNextAfterLastMark(prev,curr,500);
+  if(!prev||!nextW)return{error:"incomplete_neighbours",hasPrev:!!prev,hasNext:!!nextW};
+  return{prev,curr,next:nextW,markName:String(m.name||""),nextName:mi+1<fullSeq.length?String((fullSeq[mi+1]||{}).name||""):"",tack:m.tack??null,synN:needVirtPrev||needVirtNext};
+}
+/** Normalise epoch sec vs ms, then return Δt in seconds. */
+function timeDeltaSecBetweenTrackSamples(t0,t1){
+  const t0n=Number(t0),t1n=Number(t1);
+  if(!Number.isFinite(t0n)||!Number.isFinite(t1n))return null;
+  const t0s=t0n>1e12?t0n/1000:t0n;
+  const t1s=t1n>1e12?t1n/1000:t1n;
+  const d=Math.abs(t1s-t0s);
+  return d>0?d:null;
+}
+/**
+ * Signed **metres** to the engine’s **in-gate** line at point `p` (same as `detectMarkInboundOutboundGates` `sideIn` sign).
+ * `inLineBearingTwd` matches the **map** in-gate ray direction through the mark (infinite line).
+ */
+function signedInboundSideMetersForMapGate(prev,curr,next,p,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg){
+  const c1=hav(prev.lat,prev.lon,curr.lat,curr.lon);
+  const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
+  if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))return{error:"chord_too_short",c1M:c1,c2M:c2};
+  const mapG=computeMapMarkGateRaysForDetection(prev,curr,next,currentMarkName,nextMarkName,windwardMarkName,tack,windFromDeg);
+  if(mapG.chAlign&&mapG.alBearing!=null){
+    const sideM=signedLateralMetersToLineFromMAlongBearingTwd(curr.lat,curr.lon,p.lat,p.lon,mapG.alBearing);
+    return{mapG,sideM,mode:"chAlign",inLineBearingTwd:mapG.alBearing};
+  }
+  const wdf=Number(windFromDeg);
+  const useU135=!!tack&&Number.isFinite(wdf)&&mapG.isWm;
+  const apU=useU135?upwindEntryGateBearingTwd(tack,wdf):null;
+  const ts=tackSignGates(tack);
+  const bPrevMark=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
+  const bBIn=enuMeters(prev.lat,prev.lon,curr.lat,curr.lon);
+  let bInNormX,bInNormY;
+  if(useU135&&apU!=null){
+    const s=enuVecFromBearingMetersTwd(apU,Math.max(c1,1));
+    bInNormX=s.x;bInNormY=s.y;
+  }else{
+    bInNormX=bPrevMark.x*ts;bInNormY=bPrevMark.y*ts;
+  }
+  const v=sideValuePerpAtBChordEnuA(prev.lat,prev.lon,curr.lat,curr.lon,p.lat,p.lon,bBIn.x,bBIn.y,bInNormX,bInNormY);
+  const sideM=useU135?v*ts:v;
+  return{mapG,sideM,mode:useU135?"U135_chord":"ch",inLineBearingTwd:mapG.inRayBr};
+}
 /** Cumulative distance along pts to index nearest (tlat, tlon); returns {alongM, nearestIdx, distToMarkM}. */
 function distanceAlongTrackToNearest(pts,tlat,tlon){
   if(!pts?.length)return{alongM:0,nearestIdx:0,distToMarkM:Infinity};
@@ -4372,15 +4438,25 @@ function App(){
     const copyParts=[],rows=[];
     for(let i=lo;i<=hi;i++){
       const p=croppedPoints[i];
-      const cogS=p.cog!=null&&Number.isFinite(p.cog)?`${Math.round(p.cog)}°`:"—";
-      const spdS=p.ss!=null&&Number.isFinite(p.ss)?`${ms2k(p.ss).toFixed(2)} kts`:"—";
-      let segInS="—";
+      const cogFile=p.cog!=null&&Number.isFinite(p.cog)?`${Math.round(p.cog)}°`:"—";
+      const spdFile=p.ss!=null&&Number.isFinite(p.ss)?`${ms2k(p.ss).toFixed(2)} kts`:"—";
+      let segInS="—",brgNum=null;
       if(i>0){
         const b=bear(croppedPoints[i-1].lat,croppedPoints[i-1].lon,p.lat,p.lon);
-        if(Number.isFinite(b))segInS=`${(Math.round(b*10)/10).toFixed(1)}°T`;
+        if(Number.isFinite(b)){ brgNum=b; segInS=`${(Math.round(b*10)/10).toFixed(1)}°T`; }
+      }
+      let cogS=cogFile,spdS=spdFile;
+      if(cogS==="—"&&brgNum!=null&&Number.isFinite(brgNum))cogS=`${Math.round(brgNum)}° (Δpos)`;
+      if(spdS==="—"&&i>0){
+        const dt=timeDeltaSecBetweenTrackSamples(croppedPoints[i-1].time,p.time);
+        if(dt && dt>0){
+          const dm=hav(croppedPoints[i-1].lat,croppedPoints[i-1].lon,p.lat,p.lon);
+          const mps=dm/dt;
+          if(Number.isFinite(mps)&&mps>0)spdS=`${ms2k(mps).toFixed(2)} kts (Δs/Δt)`;
+        }
       }
       copyParts.push(`i=${i} lat=${p.lat.toFixed(6)} lon=${p.lon.toFixed(6)} t=${formatTrackPointIsoTime(p.time)} COG=${cogS} spd=${spdS} segIn=${segInS}`);
-      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS,segInS});
+      rows.push({i,lat:p.lat,lon:p.lon,tIso:formatTrackPointIsoTime(p.time),cogS,spdS,segInS,cogFile,spdFile});
     }
     const segBrgBits=[];
     for(let k=lo+1;k<=hi;k++){
@@ -4408,6 +4484,42 @@ function App(){
     if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok).catch(fallback);
     else fallback();
   },[trackInspectBlock]);
+
+  const [gateInspectMi,setGateInspectMi]=useState("0");
+  const [gateStraddleA,setGateStraddleA]=useState("");
+  const [gateStraddleB,setGateStraddleB]=useState("");
+
+  const gateLineInspector=useMemo(()=>{
+    if(!courseMapLine||courseMapLine.length<1)return null;
+    const sfMid=sfLineEnds?.endA&&sfLineEnds?.endB?{
+      lat:(sfLineEnds.endA.lat+sfLineEnds.endB.lat)/2,
+      lon:(sfLineEnds.endA.lon+sfLineEnds.endB.lon)/2
+    }:null;
+    const miParsed=parseInt(String(gateInspectMi).trim(),10);
+    const mi=Number.isFinite(miParsed)?Math.max(0,Math.min(miParsed,courseMapLine.length-1)):0;
+    const ctx=resolveMarkGateNeighboursForIndex(courseMapLine,sfMid,mi);
+    if(ctx.error)return{error:ctx.error,mi,hasPrev:ctx.hasPrev,hasNext:ctx.hasNext};
+    const wdf=Number(effWind);
+    if(!Number.isFinite(wdf))return{error:"wind",ctx,mi,msg:"Set wind FROM (rose) so W135 / windward rules match the engine."};
+    const wwm=String(windwardMarkName||"").trim();
+    const mapG=computeMapMarkGateRaysForDetection(ctx.prev,ctx.curr,ctx.next,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+    let straddle=null;
+    const sAs=String(gateStraddleA).trim(),sBs=String(gateStraddleB).trim();
+    if(sAs!==""&&sBs!==""&&croppedPoints&&croppedPoints.length>0){
+      const ia=parseInt(sAs,10),ib=parseInt(sBs,10);
+      if(Number.isFinite(ia)&&Number.isFinite(ib)&&ia>=0&&ib>=0&&ia<croppedPoints.length&&ib<croppedPoints.length){
+        const pa=croppedPoints[ia],pb=croppedPoints[ib];
+        const ra=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pa,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+        const rb=signedInboundSideMetersForMapGate(ctx.prev,ctx.curr,ctx.next,pb,ctx.markName,ctx.nextName,wwm,ctx.tack,wdf);
+        if(ra.error||rb.error)straddle={err:ra.error||rb.error};
+        else if(ra.sideM!=null&&rb.sideM!=null){
+          const prod=ra.sideM*rb.sideM;
+          straddle={ia,ib,s0:ra.sideM,s1:rb.sideM,wouldStraddle:prod<0,onLine:ra.sideM===0||rb.sideM===0};
+        }
+      }
+    }
+    return{ctx,mapG,mi,straddle,wdf};
+  },[courseMapLine,sfLineEnds,effWind,windwardMarkName,gateInspectMi,gateStraddleA,gateStraddleB,croppedPoints]);
 
   // Do **not** reset crop in an effect on [rawPoints] — that ran after load/saved-crop/apply
   // and cleared DB + auto S/F crop. New-track resets are done in loadStrava / handleFile / openSaved only.
@@ -5944,8 +6056,45 @@ function App(){
                 </tbody>
               </table>
             </div>}
-            <div style={{fontSize:9,color:C.txD,marginTop:6,lineHeight:1.45}}>Indices are the <strong>auto-cropped</strong> polyline (same as map labels). Gate detection may use extra interpolated points between these.</div>
+            <div style={{fontSize:9,color:C.txD,marginTop:6,lineHeight:1.45}}>Indices are the <strong>auto-cropped</strong> polyline (same as map labels). Gate detection may use extra interpolated points between these. COG/spd: file first; if missing, <strong>Δpos</strong> (bearing and speed from successive positions), like the engine tack fallback.</div>
           </div>
+          {courseMapLine&&courseMapLine.length>0&&<div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.bdr}`}}>
+            <div style={{fontSize:10,color:C.txM,marginBottom:6}}>In-gate line (engine = map)</div>
+            <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,marginBottom:8}}>
+              <label style={{fontSize:11,color:C.txt}}>Mark row
+                <select value={gateInspectMi} onChange={e=>setGateInspectMi(e.target.value)} style={{marginLeft:6,minWidth:220,padding:"5px 8px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11}}>
+                  {courseMapLine.map((m,idx)=><option key={idx} value={String(idx)}>L{Number(m.lap)|0} {m.name} · row {idx}</option>)}
+                </select>
+              </label>
+            </div>
+            {gateLineInspector&&gateLineInspector.error&&gateLineInspector.error!=="wind"&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>
+              {gateLineInspector.error}{gateLineInspector.hasPrev!=null?` (has prev: ${gateLineInspector.hasPrev}, has next: ${gateLineInspector.hasNext})`:""}
+            </div>}
+            {gateLineInspector&&gateLineInspector.error==="wind"&&<div style={{fontSize:10,color:C.wrn,marginBottom:6}}>{gateLineInspector.msg}</div>}
+            {gateLineInspector&&gateLineInspector.ctx&&gateLineInspector.mi!=null&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,lineHeight:1.7,marginBottom:8}}>
+              <div>Mark <strong style={{color:C.acc}}>{gateLineInspector.ctx.markName}</strong> · {gateLineInspector.ctx.curr.lat.toFixed(6)}°, {gateLineInspector.ctx.curr.lon.toFixed(6)}°</div>
+              {gateLineInspector.ctx.synN&&<div style={{color:C.txD,fontSize:9}}>Synthetic 500m prev/next (missing S/F or neighbour coordinates).</div>}
+              {gateLineInspector.wdf!=null&&Number.isFinite(gateLineInspector.wdf)&&<div>Wind FROM <strong style={{color:C.gld}}>{gateLineInspector.wdf}°</strong> · windward “{String(windwardMarkName||"—")}” · tack {gateLineInspector.ctx.tack??"—"} · isWm {gateLineInspector.mapG?String(gateLineInspector.mapG.isWm):"—"}</div>}
+              {gateLineInspector.mapG&&<>
+                <div><span style={{color:"#c026d3"}}>In-gate</span> (magenta) ray °T through mark: <strong style={{color:"#c026d3"}}>{gateLineInspector.mapG.inRayBr!=null&&Number.isFinite(gateLineInspector.mapG.inRayBr)?(Math.round(gateLineInspector.mapG.inRayBr*10)/10).toFixed(1)+"°":"—"}</strong> · {gateLineInspector.mapG.inMode} {gateLineInspector.mapG.chAlign?<span style={{color:C.acc}}> · chAlign</span>:null}</div>
+                <div><span style={{color:"#06b6d4"}}>Out-gate</span> (cyan) ray °T: <strong style={{color:"#06b6d4"}}>{gateLineInspector.mapG.outRayPre!=null&&Number.isFinite(gateLineInspector.mapG.outRayPre)?(Math.round(gateLineInspector.mapG.outRayPre*10)/10).toFixed(1)+"°":"—"}</strong> · {gateLineInspector.mapG.outModePre}</div>
+                <div style={{color:C.txD,fontSize:9}}>Chords: prev→this {gateLineInspector.mapG.chIn!=null?(Math.round(gateLineInspector.mapG.chIn*10)/10).toFixed(1)+"°":"—"} · this→next {gateLineInspector.mapG.chOut!=null?(Math.round(gateLineInspector.mapG.chOut*10)/10).toFixed(1)+"°":"—"}</div>
+              </>}
+            </div>}
+            {gateLineInspector&&gateLineInspector.mapG&&<div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,marginTop:4,marginBottom:6}}>
+              <span style={{fontSize:10,color:C.txM}}>Straddle test (cropped index A → B)</span>
+              <input type="number" min={0} value={gateStraddleA} onChange={e=>setGateStraddleA(e.target.value)} placeholder="510" style={{width:64,padding:"4px 6px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}/>
+              <span style={{fontSize:10,color:C.txt}}>→</span>
+              <input type="number" min={0} value={gateStraddleB} onChange={e=>setGateStraddleB(e.target.value)} placeholder="511" style={{width:64,padding:"4px 6px",background:C.card,color:C.txt,border:`1px solid ${C.bdr}`,borderRadius:6,fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </div>}
+            {gateLineInspector&&gateLineInspector.straddle&&!gateLineInspector.straddle.err&&<div style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:C.txt,marginBottom:4}}>
+              Signed in-gate (m): s({gateLineInspector.straddle.ia})={gateLineInspector.straddle.s0.toFixed(2)} · s({gateLineInspector.straddle.ib})={gateLineInspector.straddle.s1.toFixed(2)} ·{" "}
+              {gateLineInspector.straddle.wouldStraddle?<span style={{color:C.acc}}>Opposite signs → these two positions straddle the in-gate (same test as the engine on this track).</span>:
+                gateLineInspector.straddle.onLine?<span style={{color:C.wrn}}>One side is 0 (on the line); the engine does not count that as a sign flip.</span>:
+                <span style={{color:C.wrn}}>Same sign → no straddle. The densified gate track may still flip between inserted points.</span>}
+            </div>}
+            {gateLineInspector&&gateLineInspector.straddle&&gateLineInspector.straddle.err&&<div style={{fontSize:10,color:C.wrn}}>{String(gateLineInspector.straddle.err)}</div>}
+          </div>}
           <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.5}}>
             Auto window = <strong style={{color:C.txM}}>start time nearest track point − 15s</strong> through <strong style={{color:C.txM}}>detected finish time</strong> (closest line point on final Mark → FINISH leg). No manual crop controls.
           </div>
