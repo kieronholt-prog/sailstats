@@ -5569,7 +5569,7 @@ function App(){
     const pinFull=!!(fullTrackAnalysis&&fullTrackAnalysis.points&&fullTrackAnalysis.points.length>=20);
     return{
       ...full.diagnostics,
-      seriesSource:pinFull?"Pinned: fullTrackAnalysis — same object for cropped + series args (deterministic)","Pinned: cropped analysis only (full track <20 pts or missing)",
+      seriesSource:pinFull?"Pinned: fullTrackAnalysis — same object for cropped + series args (deterministic)":"Pinned: cropped analysis only (full track <20 pts or missing)",
       startLinePinnedFullTrack:pinFull,
       trackFirst_unix:workPoints[0]?.time??null,
     };
