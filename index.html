@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.0";
+const SAILSTATS_APP_VERSION="1.6.1";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -3006,7 +3006,7 @@ function manoeuvreIndexMaskNarrow(pts,tacks,gybes,halfWidth=8){
  * with segment index ∈ [1 … START leg end] (includes crossings before `startIdx` when START idx is closest-point).
  * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±120 s (see `GUN_CLOCK_REFINE_PAD_SEC`) at 0.5 s steps for bow distance & speeds.
  */
-function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
+function computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
   if(!distAnalysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
   const ser=seriesAnalysis&&seriesAnalysis.points?.length?seriesAnalysis:distAnalysis;
   const sPts=ser.points;
@@ -3014,12 +3014,16 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
   if(!sPts.length||!sLeg||sLeg.startIdx==null||sLeg.endIdx==null)return null;
   const dLeg=distAnalysis.legs?.find(l=>l.from==="START");
   const e0=sfEnds.endA,e1=sfEnds.endB;
+  const ll=(la,lo)=>`${Number(la).toFixed(5)}, ${Number(lo).toFixed(5)}`;
 
   let tGun=tSignalAbs;
+  let gunRefineApplied=false;
+  let gunSeedIdx=-1;
+  let gunRefinedValue=null;
   if(raceClockSec!=null&&Number.isFinite(raceClockSec)){
-    const gx=nearestTimeIndexInSortedGps(sPts,tSignalAbs);
-    const rg=refinedUnixGunFromClockNearby(sPts,raceClockSec,gx);
-    if(rg!=null&&Number.isFinite(rg))tGun=rg;
+    gunSeedIdx=nearestTimeIndexInSortedGps(sPts,tSignalAbs);
+    const rg=refinedUnixGunFromClockNearby(sPts,raceClockSec,gunSeedIdx);
+    if(rg!=null&&Number.isFinite(rg)){tGun=rg;gunRefineApplied=true;gunRefinedValue=rg;}
   }
 
   const coarseFromCourse=()=>{
@@ -3031,23 +3035,41 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
   const fm=firstName?effectiveMarks?.[firstName]:null;
   const si0=Math.max(0,Math.min(sPts.length-1,sLeg.startIdx|0));
   const bowM=Number(gpsToBowM)||0;
-  let distM=null;
+  let distM=null,distSource="";
+  let antDm=null,bowDm=null;
+
+  const signAt=(latP,lonP,label)=>{
+    if(!(fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon)&&latP!=null&&lonP!=null))return null;
+    return signedDistanceToCommitteeLineM(latP,lonP,e0,e1,fm.lat,fm.lon);
+  };
+  const antPt=interpolatePointByTime(sPts,tGun);
+  if(antPt)antDm=signAt(antPt.lat,antPt.lon,"antenna");
+
   if(fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon)){
     const bow=gpsPositionToBowAtTime(sPts,tGun,bowM)||gpsPositionToBow(sPts,si0,bowM);
     const refLat=bow?.lat??sPts[si0]?.lat,refLon=bow?.lon??sPts[si0]?.lon;
-    if(refLat!=null&&refLon!=null)distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+    if(refLat!=null&&refLon!=null){
+      distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+      bowDm=distM;
+      distSource="bow @ interpolated tGun (+ committee vs first-mark ref)";
+    }
   }
-  if(!Number.isFinite(distM))distM=Number.isFinite(sLeg.startLineDistanceM)?sLeg.startLineDistanceM:null;
-  if(!Number.isFinite(distM)&&dLeg&&Number.isFinite(dLeg.startLineDistanceM))distM=dLeg.startLineDistanceM;
+  if(!Number.isFinite(distM)){
+    distM=Number.isFinite(sLeg.startLineDistanceM)?sLeg.startLineDistanceM:null;
+    if(Number.isFinite(distM))distSource="fallback: START leg.startLineDistanceM (map gate)";
+  }
+  if(!Number.isFinite(distM)&&dLeg&&Number.isFinite(dLeg.startLineDistanceM)){
+    distM=dLeg.startLineDistanceM;
+    distSource="fallback: distAnalysis START leg.startLineDistanceM";
+  }
   if(!Number.isFinite(distM)&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon)){
     const bow=gpsPositionToBow(sPts,si0,bowM);
     const refLat=bow?.lat??sPts[si0]?.lat,refLon=bow?.lon??sPts[si0]?.lon;
-    if(refLat!=null)distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+    if(refLat!=null){distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);distSource="fallback: bow @ START leg.startIdx";}
   }
 
-  /** Last segment index for START→mark1 window (committee crossing may lie before START `startIdx`). */
   const endSeg=Math.max(1,Math.min(sPts.length-1,sLeg.endIdx|0));
-  let tCross=null;
+  let tCross=null,tCrossSource="",tCrossSegIdx=null,tCrossDir=null,fallbackSegJ=null;
   const lb=ser?.legDiagnostics&&Array.isArray(ser.legDiagnostics.legBuild)?ser.legDiagnostics.legBuild:null;
   const startRow=lb?.find?.(r=>String(r.status)==="included"&&String(r.from)==="START")??null;
   const jc=startRow?.committeeLineCrossingIdx;
@@ -3055,26 +3077,41 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
     const jj=jc|0;
     if(jj>=1&&jj<sPts.length){
       const tIc=interpolatedCommitteeLineCrossingTime(sPts,jj,e0,e1);
-      if(tIc!=null&&Number.isFinite(tIc))tCross=tIc;
+      if(tIc!=null&&Number.isFinite(tIc)){
+        tCross=tIc;
+        tCrossSource="legBuild.committeeLineCrossingIdx";
+        tCrossSegIdx=jj;
+      }
     }
   }
+  const allCross=detectLineCrossings(sPts,e0,e1);
+  const crossFiltered=allCross.filter(c=>{
+    const i=c.idx|0;
+    return i>=1&&i<=endSeg&&Number.isFinite(c.time);
+  }).map(c=>({idx:c.idx|0,time:c.time,direction:c.direction||"",deltaSec:c.time-tGun}));
+  crossFiltered.sort((a,b)=>Math.abs(a.deltaSec)-Math.abs(b.deltaSec));
   if(tCross==null||!Number.isFinite(tCross)){
-    const crossings=detectLineCrossings(sPts,e0,e1).filter(c=>{
-      const i=c.idx|0;
-      return i>=1&&i<=endSeg&&Number.isFinite(c.time);
-    });
-    if(crossings.length){
-      let best=crossings[0],bd=Math.abs(crossings[0].time-tGun);
-      for(const cc of crossings){
+    if(crossFiltered.length){
+      let best=crossFiltered[0],bd=Math.abs(crossFiltered[0].time-tGun);
+      for(const cc of crossFiltered){
         const dd=Math.abs(cc.time-tGun);
         if(dd<bd){bd=dd;best=cc;}
       }
       tCross=best.time;
+      tCrossSource="nearest |t−tGun| among detectLineCrossings ∩ [1..START.endIdx]";
+      tCrossSegIdx=best.idx;
+      tCrossDir=best.direction||"";
     }else{
       let j=firstCommitteeLineSegmentCrossing(sPts,0,endSeg,e0,e1);
+      fallbackSegJ=j;
       if(j<0&&Number.isFinite(sLeg.startIdx)&&sLeg.startIdx>1)
         j=firstCommitteeLineSegmentCrossing(sPts,Math.max(0,(sLeg.startIdx|0)-1),endSeg,e0,e1);
-      if(j>=0)tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
+      fallbackSegJ=j;
+      if(j>=0){
+        tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
+        tCrossSource=`firstCommitteeLineSegmentCrossing fallback (seg endpoint j=${j})`;
+        tCrossSegIdx=j;
+      }
     }
   }
   const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tGun:null;
@@ -3096,12 +3133,70 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
     if(avg>0.05)speedPct=100*vGun/avg;
   }
 
-  return{
+  const badges={
     hasLine:true,
     distM:Number.isFinite(distM)?distM:null,
     timeDeltaSec:timeDeltaSec!=null&&Number.isFinite(timeDeltaSec)?timeDeltaSec:null,
     speedPct:Number.isFinite(speedPct)?speedPct:null,
   };
+  const allCrossPreview=allCross.slice(0,35).map(c=>({idx:c.idx|0,time:c.time,tRelGun:Math.round((c.time-tGun)*10)/10,dir:c.direction}));
+  const diag={
+    seriesPoints:sPts.length,
+    cropSeriesPoints:(distAnalysis.points||[]).length,
+    samePointArrayAsCrop:distAnalysis.points===ser.points,
+    committeeEndA:ll(e0.lat,e0.lon),
+    committeeEndB:ll(e1.lat,e1.lon),
+    tNearestClockToRaceStart_unix:tSignalAbs,
+    raceClockSec:raceClockSec!=null&&Number.isFinite(raceClockSec)?raceClockSec:null,
+    gun_unix:tGun,
+    gunRefinement:{
+      padSec:GUN_CLOCK_REFINE_PAD_SEC,
+      stepSec:LINE_CROSS_REFINE_STEP_SEC,
+      seedNearestTrackIdx:gunSeedIdx>=0?gunSeedIdx:null,
+      applied:gunRefineApplied,
+      unixIfApplied:gunRefinedValue,
+    },
+    STARTLeg:{startIdx:sLeg.startIdx,endIdx:sLeg.endIdx,endSeg,to:String(sLeg.to||""),startLineDistanceM:sLeg.startLineDistanceM},
+    legBuildSTART:gatingRowJSON(startRow),
+    tCross_unix:tCross,
+    tCrossSource,
+    tCrossSegIdx,
+    tCrossDir,
+    timeDeltaSec,
+    firstMarkRef:firstName||null,
+    firstMarkLatLon:fm&&Number.isFinite(fm.lat)?ll(fm.lat,fm.lon):null,
+    bowOffsetM:bowM,
+    signedDistM_bowUsedForBadge:Number.isFinite(distM)?distM:null,
+    signedDistM_antennaAtGun:antDm,
+    signedDistM_bowAtGunIfComputed:bowDm,
+    distSource,
+    crossingCandidatesWindow:crossFiltered.slice(0,12),
+    crossingAllTrackFirst35:allCrossPreview,
+    fallbackSegmentJ:fallbackSegJ,
+    note:"Signed distance = committee line vs first-mark side (same as Overview). Time = committee perpendicular crossing − tGun. Early means tCross < tGun.",
+  };
+  return{badges,diagnostics:diag};
+}
+function gatingRowJSON(row){
+  if(!row)return null;
+  try{
+    const o={
+      status:row.status,
+      stepIndex:row.stepIndex,
+      from:row.from,
+      to:row.to,
+      startIdx:row.startIdx,
+      endIdx:row.endIdx,
+      committeeLineCrossingIdx:row.committeeLineCrossingIdx,
+      gateDebug:row.gateDebug,
+    };
+    const s=JSON.stringify(o);
+    return s.length>2500?s.slice(0,2500)+"\u2026":s;
+  }catch(_){ return"{}";}
+}
+function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
+  const r=computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec,firstMarkRefName);
+  return r?r.badges:null;
 }
 
 /** Metres — expand “rounding zone” around closest approach for turn geometry. */
@@ -5459,6 +5554,21 @@ function App(){
     return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
   },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
 
+  const overviewStartDiag=useMemo(()=>{
+    if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
+    const si=nearestPointIndexByClockTime(workPoints,raceStartSecParsed);
+    if(si<0||!workPoints[si])return null;
+    const tSig=workPoints[si].time;
+    const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
+    const full=computeStartLineDetails(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
+    if(!full)return null;
+    return{
+      ...full.diagnostics,
+      seriesSource:series===fullTrackAnalysis&&fullTrackAnalysis?.points?.length>=20?"fullTrackAnalysis (STREAM points, ≥20)":"cropped curAnalysis.points",
+      trackFirst_unix:workPoints[0]?.time??null,
+    };
+  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
+
   const markGateMapFC=useMemo(()=>{
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
     return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,MARK_GATE_LINE_ARM_M);
@@ -6360,7 +6470,8 @@ function App(){
   /* ─── ANALYSIS ─── */
   if(view==="analysis"&&curAnalysis){
     const a=curAnalysis;
-    const tabs=["overview","manoeuvres","legs","speed"];
+    const tabs=["overview","startDiag","manoeuvres","legs","speed"];
+    const tabDisp=t=>t==="startDiag"?"Start diagnostic":t;
 
     return(<div style={{background:C.bg,minHeight:"100vh"}}>
       <div style={hdr}>
@@ -6371,7 +6482,7 @@ function App(){
 
       {/* Tabs */}
       <div style={{display:"flex",gap:0,padding:"0 14px",borderBottom:`1px solid ${C.bdr}`,overflowX:"auto"}}>
-        {tabs.map(t=><button key={t} onClick={()=>setTab(t)} style={{background:"none",border:"none",padding:"11px 16px",color:tab===t?C.acc:C.txM,fontWeight:tab===t?700:400,fontSize:12,textTransform:"capitalize",borderBottom:tab===t?`2px solid ${C.acc}`:"2px solid transparent",whiteSpace:"nowrap"}}>{t}</button>)}
+        {tabs.map(t=><button key={t} onClick={()=>setTab(t)} style={{background:"none",border:"none",padding:"11px 16px",color:tab===t?C.acc:C.txM,fontWeight:tab===t?700:400,fontSize:12,textTransform:t==="startDiag"?"none":"capitalize",borderBottom:tab===t?`2px solid ${C.acc}`:"2px solid transparent",whiteSpace:"nowrap"}}>{tabDisp(t)}</button>)}
       </div>
 
       <div style={{maxWidth:700,margin:"0 auto",padding:"16px 14px"}}>
@@ -6812,6 +6923,68 @@ function App(){
               ))}
             </div>
           </div>
+        </>}
+
+        {/* START DIAGNOSTIC */}
+        {tab==="startDiag"&&<>
+          <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:6}}>Start line diagnostics</div>
+          <p style={{fontSize:11,color:C.txM,lineHeight:1.55,margin:"0 0 12px"}}>
+            Uses the same committee line, gun refinement, START leg indices, crossing detection, and first-mark committee distance as Overview. Compare <strong style={{color:C.txt}}>signedDist</strong> (bow at gun) with <strong style={{color:C.txt}}>tCross − tGun</strong> — if they contradict, inspect earlier line crossings below or gate debug.
+          </p>
+          {!overviewStartDiag&&<div style={{padding:16,background:C.card,border:`1px solid ${C.bdr}`,borderRadius:10,color:C.txM}}>
+            No diagnostic payload — need track, Setup race-start time matching a fix, committee A/B, cropped analysis with START leg. Open Setup and run analysis, or widen crop.
+          </div>}
+          {overviewStartDiag&&<>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div style={{background:C.card,borderRadius:10,padding:12,border:`1px solid ${C.bdr}`}}>
+                <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Track / series</div>
+                <div style={{fontSize:11,color:C.txD,lineHeight:1.6}}>
+                  Series points: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.seriesPoints}</strong>
+                  {" · "}Crop points in analysis: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.cropSeriesPoints}</strong><br/>
+                  Same array ref as crop: <strong style={{color:C.txt}}>{overviewStartDiag.samePointArrayAsCrop?"yes":"no"}</strong> — {overviewStartDiag.samePointArrayAsCrop?"using cropped track for both":"full-track series for line/crossing"}<br/>
+                  <span style={{fontSize:10}}>{overviewStartDiag.seriesSource}</span>
+                </div>
+              </div>
+              <div style={{background:C.card,borderRadius:10,padding:12,border:`1px solid ${C.bdr}`}}>
+                <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Gun &amp; delta</div>
+                <div style={{fontSize:11,color:C.txD,lineHeight:1.6}}>
+                  tGun (unix): <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{overviewStartDiag.gun_unix!=null?Number(overviewStartDiag.gun_unix).toFixed(3):"—"}</strong><br/>
+                  tCross (unix): <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{overviewStartDiag.tCross_unix!=null?Number(overviewStartDiag.tCross_unix).toFixed(3):"—"}</strong><br/>
+                  Δ (s): <strong style={{color:overviewStartDiag.timeDeltaSec!=null&&overviewStartDiag.timeDeltaSec<0?C.wrn:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.timeDeltaSec!=null&&Number.isFinite(overviewStartDiag.timeDeltaSec)?Math.round(overviewStartDiag.timeDeltaSec*10)/10:"—"}</strong>
+                  {" · "}<span style={{fontSize:10}}>{String(overviewStartDiag.tCrossSource||"")}</span>
+                </div>
+              </div>
+            </div>
+            <div style={{background:C.card,borderRadius:10,padding:12,border:`1px solid ${C.bdr}`,marginBottom:12}}>
+              <div style={{fontSize:10,color:C.txM,marginBottom:8}}>Signed distance (committee vs first-mark plane)</div>
+              <div style={{fontSize:11,color:C.txD,lineHeight:1.65}}>
+                Bow GPS→bow <strong>{overviewStartDiag.bowOffsetM ?? "—"} m</strong>
+                {" · "}Badge distance (m): <strong style={{color:C.txt}}>{overviewStartDiag.signedDistM_bowUsedForBadge!=null?Math.round(overviewStartDiag.signedDistM_bowUsedForBadge*10)/10:"—"}</strong>
+                <br/>
+                Antenna @ tGun (m): <strong>{overviewStartDiag.signedDistM_antennaAtGun!=null?Math.round(overviewStartDiag.signedDistM_antennaAtGun*10)/10:"—"}</strong>
+                {" · "}Bow interp @ tGun (m): <strong>{overviewStartDiag.signedDistM_bowAtGunIfComputed!=null?Math.round(overviewStartDiag.signedDistM_bowAtGunIfComputed*10)/10:"—"}</strong>
+                <br/>
+                Source: <span style={{fontSize:10}}>{overviewStartDiag.distSource||"—"}</span><br/>
+                Ref mark: <strong style={{color:C.txt}}>{overviewStartDiag.firstMarkRef||"—"}</strong>
+                {" "}{overviewStartDiag.firstMarkLatLon?<span style={{fontSize:10}}>({overviewStartDiag.firstMarkLatLon})</span>:null}
+              </div>
+            </div>
+            <div style={{fontSize:10,color:C.txM,marginBottom:6,textTransform:"uppercase",letterSpacing:0.8}}>Crossings nearest gun (filtered window)</div>
+            {Array.isArray(overviewStartDiag.crossingCandidatesWindow)&&overviewStartDiag.crossingCandidatesWindow.length>0?<div style={{overflowX:"auto",marginBottom:12}}>
+              <table style={{width:"100%",fontSize:10,borderCollapse:"collapse",border:`1px solid ${C.bdr}`}}>
+                <thead><tr style={{background:`${C.bg}cc`,color:C.txM}}><th style={{textAlign:"left",padding:6}}>seg idx</th><th style={{textAlign:"left",padding:6}}>Δ vs gun (s)</th><th style={{textAlign:"left",padding:6}}>dir</th></tr></thead>
+                <tbody>
+                  {overviewStartDiag.crossingCandidatesWindow.map((c,i)=>(<tr key={`cx${i}`} style={{borderTop:`1px solid ${C.bdr}`}}>
+                    <td style={{padding:6,color:C.txt}}>{c.idx}</td>
+                    <td style={{padding:6,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{Number.isFinite(c.deltaSec)?Math.round(c.deltaSec*10)/10:"—"}</td>
+                    <td style={{padding:6,color:C.txD}}>{c.direction||"—"}</td>
+                  </tr>))}
+                </tbody>
+              </table>
+            </div>:<div style={{fontSize:11,color:C.wrn,marginBottom:12}}>No crossings in [1 … START.endIdx].</div>}
+            <div style={{fontSize:10,color:C.txM,marginBottom:4}}>Full export (copy for support)</div>
+            <pre style={{fontSize:9,lineHeight:1.45,background:`${C.bg}`,border:`1px solid ${C.bdr}`,borderRadius:8,padding:12,overflow:"auto",maxHeight:420,color:C.txD,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{JSON.stringify(overviewStartDiag,null,2)}</pre>
+          </>}
         </>}
 
       </div>
