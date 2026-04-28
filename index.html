@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.5.1";
+const SAILSTATS_APP_VERSION="1.5.2";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -1118,9 +1118,10 @@ function signedMetersToRoundingBisectorAtMark(pLat,pLon,markLat,markLon,bearingD
   return signedMetersToABLineLikeCommittee(pLat,pLon,g.aLat,g.aLon,g.bLat,g.bLon);
 }
 /**
- * ~80 m on outbound port beam (P: `out−90°`) vs starboard beam (S: `out+90°`). Flip the bisector ray so the ref
- * lies on the physically correct rounding sector for `signedMetersToABLineLikeCommittee` — **invert the flip rule
- * for Starboard vs Port** (`s<0` ⇒ flip for P; `s>=0` ⇒ flip for S) so magenta rays match gates on the water.
+ * ~80 m on outbound port beam (P: `out−90°`) vs starboard beam (S: `out+90°`).
+ * Orient the infinite bisector (same underlying line either way): flip **`br0` by 180°** when the beam ref lands on
+ * the **positive** signed (`s>0`) committee-style half-plane — **`signedMetersToABLineLikeCommittee`** and the old
+ * `s<0` flip were consistently inverted vs the map/gate visuals for both tack labels; one rule fixes P & S alike.
  */
 const ORIENT_ROUNDING_REF_M=80;
 function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,tack){
@@ -1133,8 +1134,7 @@ function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,t
   if(!g)return br0;
   const s=signedMetersToABLineLikeCommittee(ref.lat,ref.lon,g.aLat,g.aLon,g.bLat,g.bLon);
   if(!Number.isFinite(s)||Math.abs(s)<1e-4)return br0;
-  const flipNeg=tack==="S"?s>=0:s<0;
-  return flipNeg?((br0+180)%360):br0;
+  return s>=0?((br0+180)%360):br0;
 }
 function roundingBisectorSideFn(prev,curr,next,tack){
   const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack);
