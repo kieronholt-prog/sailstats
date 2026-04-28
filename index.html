@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.4";
+const SAILSTATS_APP_VERSION="1.6.5";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -4021,6 +4021,48 @@ function legTypeAtAbsTime(analysis,absTime){
   return null;
 }
 
+/**
+ * Two polar histograms — heading relative to wind (15° bins) with avg/max VMG (kt) within mark-split legs only.
+ * Upwind rows: VMG toward wind (SOG×cos TWA vs wind-from). Downwind: progress away (−that component).
+ */
+function radarDualVmgBinsByWindHeading(analysis,windFromDeg){
+  const mkBuckets=()=>{const ab={};for(let i=0;i<360;i+=15)ab[i]=[];return ab;};
+  const upAb=mkBuckets(), dnAb=mkBuckets();
+  let nUp=0,nDn=0;
+  const pts=analysis?.points;
+  if(pts?.length){
+    const wd=windFromDeg;
+    for(const p of pts){
+      const s=ms2k(p.ss||0);
+      if(s<0.5)continue;
+      const lt=legTypeAtAbsTime(analysis,p.time);
+      if(lt!=="upwind"&&lt!=="downwind")continue;
+      const vw=vmgToWindKts(s,p.cog,wd);
+      if(vw==null||!Number.isFinite(vw))continue;
+      const vm=lt==="downwind"?-vw:vw;
+      const rH=((p.cog-wd+360)%360);
+      const bk=Math.round(rH/15)*15%360;
+      const bag=(lt==="upwind"?upAb:dnAb)[bk];
+      if(bag){
+        bag.push(vm);
+        lt==="upwind"?nUp++:nDn++;
+      }
+    }
+  }
+  const pack=(ab)=>({
+    series:(()=>{
+      const pd=[];
+      for(let k=0;k<360;k+=15){
+        const v=ab[k];
+        const n=v.length;
+        pd.push({label:`${k}°`,avg:n?v.reduce((s,x)=>s+x,0)/n:0,max:n?Math.max(...v):0,n});
+      }
+      return pd;
+    })(),
+  });
+  return{up:{...pack(upAb),sampleCount:nUp},down:{...pack(dnAb),sampleCount:nDn}};
+}
+
 function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=null,detSettings=DETECTION_DEFAULTS,startFinishLine=null,windTuning=null,gpsToBowM=2,windwardMarkName=null){
   if(!rawPts||rawPts.length<20)return null;
   const sorted=[...rawPts].sort((a,b)=>a.time-b.time);
@@ -7026,21 +7068,39 @@ function App(){
             })()}
           </div>
 
-          <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`,marginBottom:14}}>
-            <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Speed by Heading (relative to wind)</div>
-            {(()=>{
-              const ab={};for(let i=0;i<360;i+=15)ab[i]=[];
-              a.points.forEach(p=>{const s=ms2k(p.ss||0);if(s<0.5)return;const r=((p.cog-effWind+360)%360);ab[Math.round(r/15)*15%360]?.push(s)});
-              const pd=Object.entries(ab).map(([k,v])=>({label:`${k}°`,avg:v.length?v.reduce((a,b)=>a+b,0)/v.length:0,max:v.length?Math.max(...v):0})).sort((a,b)=>parseInt(a.label)-parseInt(b.label));
-              return(<ResponsiveContainer width="100%" height={220}>
-                <RadarChart data={pd}><PolarGrid stroke={C.bdr}/><PolarAngleAxis dataKey="label" tick={{fill:C.txD,fontSize:8}}/>
-                <PolarRadiusAxis tick={{fill:C.txD,fontSize:8}}/>
-                <Radar name="Avg" dataKey="avg" stroke={C.acc} fill={C.acc} fillOpacity={0.15} strokeWidth={2}/>
-                <Radar name="Max" dataKey="max" stroke={C.gld} fill="none" strokeWidth={1} strokeDasharray="4 4"/>
-                <Legend wrapperStyle={{fontSize:10,color:C.txM}}/></RadarChart>
-              </ResponsiveContainer>);
-            })()}
-          </div>
+          {(()=>{
+            const{up:RW,down:RD}=radarDualVmgBinsByWindHeading(a,effWind);
+            const vmTip={contentStyle:{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,fontSize:11},formatter:(val,name)=>[`${typeof val==="number"?val.toFixed(2):val} kt`, name]};
+            const oneRadar=(titleKey,title,subAccent,captionEl,cfg)=>(
+              <div style={{flex:1,minWidth:260,background:C.card,borderRadius:12,padding:14,border:`1px solid ${C.bdr}`}} key={titleKey}>
+                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{title}</div>
+                <div style={{fontSize:10,color:C.txD,lineHeight:1.45,marginBottom:8}}>{captionEl(cfg.sampleCount)}</div>
+                <ResponsiveContainer width="100%" height={216}>
+                  <RadarChart data={cfg.series}>
+                    <PolarGrid stroke={C.bdr}/>
+                    <PolarAngleAxis dataKey="label" tick={{fill:C.txD,fontSize:8}}/>
+                    <PolarRadiusAxis tick={{fill:C.txD,fontSize:8}} domain={[0,"auto"]}/>
+                    <Radar name="Avg VMG" dataKey="avg" stroke={subAccent} fill={subAccent} fillOpacity={0.14} strokeWidth={2}/>
+                    <Radar name="Max VMG" dataKey="max" stroke={C.gld} fill="none" strokeWidth={1} strokeDasharray="4 4"/>
+                    <Tooltip {...vmTip}/>
+                    <Legend wrapperStyle={{fontSize:10,color:C.txM}}/>
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+            );
+            return(
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>VMG by heading (wind at 0°)</div>
+                <div style={{fontSize:10,color:C.txD,lineHeight:1.5,marginBottom:12}}>
+                  Separate polars by <strong style={{color:C.txt}}>mark-split leg type</strong> (same classification as the legs table). Heading = COG relative to wind-from (0°). Upwind: toward-wind VMG = SOG×cos(TWA). Downwind: −(toward-wind) so larger spokes mean a stronger away-from-wind component.
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
+                  {oneRadar("upVMG","Upwind VMG","#4eb0ff",(n)=>(<><strong style={{color:C.txt}}>{n||0}</strong> GPS samples on <strong style={{color:C.up}}>upwind</strong> legs</>),{series:RW.series,sampleCount:RW.sampleCount})}
+                  {oneRadar("dnVMG","Downwind VMG",C.gld,(n)=>(<><strong style={{color:C.txt}}>{n||0}</strong> GPS samples on <strong style={{color:C.dn}}>downwind</strong> legs</>),{series:RD.series,sampleCount:RD.sampleCount})}
+                </div>
+              </div>
+            );
+          })()}
 
           <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.bdr}`}}>
             <div style={{fontSize:11,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Streak Records</div>
