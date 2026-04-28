@@ -1420,9 +1420,16 @@ async function fetchActs(page=1){
   return r.json();
 }
 
+/** Strava `/streams`; also returns `{ok,status}` so callers can distinguish 401 vs empty streams vs snapshot fallback. */
 async function fetchStreams(activityId){
   const r=await workerFetch(`/strava/streams/${encodeURIComponent(activityId)}`,{method:"GET"});
-  return r.json();
+  let data={};
+  try{
+    data=await r.json();
+  }catch(e){
+    data={fetchJsonError:String(e&&e.message?e.message:e)};
+  }
+  return{ok:r.ok,status:r.status,data};
 }
 
 /** Deep clone for JSONB (full analysis for file uploads). */
@@ -1793,7 +1800,8 @@ function mergeActivitiesWithSaved(acts,savedByActId){
       start_date_local:row.activity_date||row.updated_at||null,
       elapsed_time:stats&&Number.isFinite(stats.duration)?stats.duration:null,
       distance:stats&&Number.isFinite(stats.totalDist)?stats.totalDist:null,
-      type:"Upload",
+      /** Numeric id = saved Strava activity not in recent /feed pull; GPX uploads use type elsewhere. */
+      type:/^\d+$/.test(String(id))? "Sail" : "Upload",
       __fromSupabaseOnly:true,
       __savedRow:row,
     });
@@ -4398,39 +4406,75 @@ function App(){
     if(!startRef){alert("Activity has no start time.");setProcessing(false);return;}
     const startMs=new Date(startRef).getTime();
     if(!Number.isFinite(startMs)){alert("Invalid activity start time.");setProcessing(false);return;}
+    const sid=session?.strava?.athlete?.id ?? sAth?.id;
+    let row=preSaved;
+    if(sid!=null&&!row){
+      try{
+        row=await loadAnalysisRow(sid,String(act.id));
+      }catch(_){}
+    }
     try{
-      const streams=await fetchStreams(act.id);
-      if(streams.latlng&&streams.time){
-        const pts=streams.time.data.map((t,i)=>({time:startMs/1000+t,lat:streams.latlng.data[i][0],lon:streams.latlng.data[i][1]}));
-        setRawPoints(pts);
-        setAnalysis(null);
-        setDetSettings(DETECTION_DEFAULTS);
-        setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);setWindwardMarkName("");
-        setCropStartText("00:00:00");setCropDurationText("");
-        setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
-        setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
-        setRaceStartText(DEFAULT_RACE_START_TEXT);
-        const sid=session?.strava?.athlete?.id ?? sAth?.id;
-        if(sid!=null){
-          const row=await loadAnalysisRow(sid,String(act.id));
-          if(row){
-            if(row.activity_name&&String(row.activity_name).trim())setActName(String(row.activity_name).trim());
-            if(row.course_letter)setCourseLetter(String(row.course_letter));
-            if(row.laps!=null)setLaps(Math.max(1,parseInt(row.laps,10)||1));
-            if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
-            if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
-            applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
-            applySfLineEndsFromRow(row.course_setup,setSfLineEndAText,setSfLineEndBText);
-            applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
-            const maybeSnap=parseAnalysisSnapshotField(row.analysis_snapshot);
-            if(maybeSnap&&maybeSnap.detSettings&&typeof maybeSnap.detSettings==="object")
-              setDetSettings({...DETECTION_DEFAULTS,...maybeSnap.detSettings});
-          }
+      const streamRes=await fetchStreams(act.id);
+      const streams=streamRes.data;
+      let pts=null;
+      if(
+        streamRes.ok&&streams&&
+        streams.latlng&&streams.time&&
+        streams.latlng.data&&streams.time.data&&
+        streams.latlng.data.length===streams.time.data.length
+      ){
+        pts=streams.time.data.map((t,i)=>({
+          time:startMs/1000+t,
+          lat:streams.latlng.data[i][0],
+          lon:streams.latlng.data[i][1],
+        }));
+      }
+      if(!pts){
+        const snap=row?parseAnalysisSnapshotField(row.analysis_snapshot):null;
+        if(snap&&Array.isArray(snap.points)&&snap.points.length>=2){
+          pts=snap.points;
         }
-        setView(nextView);
-        if(opts.autoAnalyze&&nextView==="course-setup")pendingAutoAnalysisAfterStravaLoadRef.current=true;
-      }else{alert("No GPS stream for this activity.");}
-    }catch(e){console.error(e);alert("Failed to load activity")}
+      }
+      if(!pts){
+        const d=streams||{};
+        const hint=d.error==="sign_in_first"||streamRes.status===401
+          ? "Strava/session not accepted on this device — sign out and sign in again, or disable cross-site blocking for this site."
+          :d.message!=null&&String(d.message).trim()?String(d.message).trim()
+            :typeof d==="string"?d
+              :streamRes.ok===false?`worker HTTP ${streamRes.status}`
+                :"No latitude/longitude in Strava reply.";
+        alert(`GPS from Strava failed: ${hint} If you already analysed this on another device while signed in, run Analyse once more there — a saved GPS snapshot unlocks reopening without Strava streams.`);
+        setProcessing(false);
+        return;
+      }
+      setRawPoints(pts);
+      setAnalysis(null);
+      setDetSettings(DETECTION_DEFAULTS);
+      setCourseLetter("");setLaps(1);setMarkOverrides({});setWindOvr(null);setWindwardMarkName("");
+      setCropStartText("00:00:00");setCropDurationText("");
+      setSfLineEndAText(`${DEFAULT_SF_LINE_ENDS.endA.lat}, ${DEFAULT_SF_LINE_ENDS.endA.lon}`);
+      setSfLineEndBText(`${DEFAULT_SF_LINE_ENDS.endB.lat}, ${DEFAULT_SF_LINE_ENDS.endB.lon}`);
+      setRaceStartText(DEFAULT_RACE_START_TEXT);
+      if(row){
+        if(row.activity_name&&String(row.activity_name).trim())setActName(String(row.activity_name).trim());
+        if(row.course_letter)setCourseLetter(String(row.course_letter));
+        if(row.laps!=null)setLaps(Math.max(1,parseInt(row.laps,10)||1));
+        if(row.mark_overrides&&typeof row.mark_overrides==="object")setMarkOverrides(row.mark_overrides);
+        if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
+        applyCourseSetupCropFromRow(row.course_setup,setCropStartText,setCropDurationText);
+        applySfLineEndsFromRow(row.course_setup,setSfLineEndAText,setSfLineEndBText);
+        applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
+        const maybeSnap=parseAnalysisSnapshotField(row.analysis_snapshot);
+        if(maybeSnap&&maybeSnap.detSettings&&typeof maybeSnap.detSettings==="object"){
+          setDetSettings({...DETECTION_DEFAULTS,...maybeSnap.detSettings});
+        }
+      }
+      setView(nextView);
+      if(opts.autoAnalyze&&nextView==="course-setup")pendingAutoAnalysisAfterStravaLoadRef.current=true;
+    }catch(e){
+      console.error(e);
+      alert("Failed to load activity");
+    }
     setProcessing(false);
   },[session,sAth,savedByActId]);
 
