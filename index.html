@@ -63,6 +63,8 @@ const DEFAULT_SF_LINE_ENDS={
   endA:{lat:50.851722,lon:-1.309129},
   endB:{lat:50.851762,lon:-1.307463},
 };
+/** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
+const SAILSTATS_APP_VERSION="1.5.1";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -1115,10 +1117,14 @@ function signedMetersToRoundingBisectorAtMark(pLat,pLon,markLat,markLon,bearingD
   if(!g)return NaN;
   return signedMetersToABLineLikeCommittee(pLat,pLon,g.aLat,g.aLon,g.bLat,g.bLon);
 }
-/** ~80 m on outbound port/starboard beam; flip bisector ray 180° if ref lies on − side of infinite bisector (same line, P/S half-plane). */
+/**
+ * ~80 m on outbound port beam (P: `out−90°`) vs starboard beam (S: `out+90°`). Flip the bisector ray so the ref
+ * lies on the physically correct rounding sector for `signedMetersToABLineLikeCommittee` — **invert the flip rule
+ * for Starboard vs Port** (`s<0` ⇒ flip for P; `s>=0` ⇒ flip for S) so magenta rays match gates on the water.
+ */
 const ORIENT_ROUNDING_REF_M=80;
 function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,tack){
-  if(tack!=="P"&&tack!=="S"||br0==null||!Number.isFinite(br0))return br0;
+  if((tack!=="P"&&tack!=="S")||br0==null||!Number.isFinite(br0))return br0;
   const out=bear(currLat,currLon,nextLat,nextLon);
   if(!Number.isFinite(out))return br0;
   const beamBr=((tack==="P"?out-90:out+90)%360+360)%360;
@@ -1127,7 +1133,8 @@ function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,t
   if(!g)return br0;
   const s=signedMetersToABLineLikeCommittee(ref.lat,ref.lon,g.aLat,g.aLon,g.bLat,g.bLon);
   if(!Number.isFinite(s)||Math.abs(s)<1e-4)return br0;
-  return s<0?((br0+180)%360):br0;
+  const flipNeg=tack==="S"?s>=0:s<0;
+  return flipNeg?((br0+180)%360):br0;
 }
 function roundingBisectorSideFn(prev,curr,next,tack){
   const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack);
@@ -1251,6 +1258,7 @@ function clockSecondsFromUnix(unixSec){
 
 function nearestPointIndexByClockTime(pts,targetClockSec){
   if(!pts?.length)return-1;
+  if(targetClockSec==null||!Number.isFinite(targetClockSec))return-1;
   let bestIdx=0,bestDiff=Infinity;
   for(let i=0;i<pts.length;i++){
     const s=clockSecondsFromUnix(pts[i].time);
@@ -1372,15 +1380,19 @@ function gpsPositionToBowAtTime(pts,tAbs,forwardM){
   return gpsPositionToBow(pts,j,forwardM);
 }
 
+const GUN_CLOCK_REFINE_PAD_SEC=120;
 /**
- * Refine unix time on the track whose clock-of-day best matches `raceClockSec` (0…86400), searching ±2 segments
- * around `idxGuess` on a 0.5 s raster (start-line distance/time accuracy).
+ * Refine unix time on the track whose clock-of-day best matches `raceClockSec` (0…86400), on a 0.5 s raster.
+ * Uses a ±`GUN_CLOCK_REFINE_PAD_SEC` s wall-time window around the seed index (±2 GPS points was too narrow for Hz rates or drift).
  */
 function refinedUnixGunFromClockNearby(pts,raceClockSec,idxGuess){
   if(!pts?.length||!Number.isFinite(raceClockSec))return null;
   const si=Math.max(0,Math.min(pts.length-1,idxGuess|0));
-  const ta=pts[Math.max(0,si-2)].time;
-  const tb=pts[Math.min(pts.length-1,si+2)].time;
+  const mid=pts[si].time;
+  const pad=GUN_CLOCK_REFINE_PAD_SEC;
+  let ta=mid-pad,tb=mid+pad;
+  const t0=pts[0].time,t1=pts[pts.length-1].time;
+  ta=Math.max(t0,ta);tb=Math.min(t1,tb);
   if(!(tb>ta))return null;
   let bestT=null,best=null;
   for(let u=ta;u<=tb+1e-9;u+=LINE_CROSS_REFINE_STEP_SEC){
@@ -2846,6 +2858,22 @@ function manoeuvreIndexMask(pts,tacks,gybes){
   return m;
 }
 
+/** Exclude only a short span around each turn index (not full pre→post segments) — for start-line % speed so a busy pre-start does not blank the whole 30s window. */
+function manoeuvreIndexMaskNarrow(pts,tacks,gybes,halfWidth=8){
+  const n=pts?.length||0;
+  if(!n)return new Uint8Array(0);
+  const m=new Uint8Array(n);
+  const w=Math.max(1,halfWidth|0);
+  const mark=(ev)=>{
+    const c=ev?.turnIdx??ev?.idx??-1;
+    if(c<0)return;
+    for(let k=Math.max(0,c-w);k<=Math.min(n-1,c+w);k++)m[k]=1;
+  };
+  (tacks||[]).forEach(mark);
+  (gybes||[]).forEach(mark);
+  return m;
+}
+
 /**
  * Start-line summary for Overview: signed distance, time early/late (tCross − tStart),
  * % speed at gun vs mean next 30s (excl. manoeuvres).
@@ -2853,9 +2881,9 @@ function manoeuvreIndexMask(pts,tacks,gybes){
  * (when it differs from `distAnalysis`) distance-from-line all use the same point array so a tight crop cannot
  * strip pre-start samples needed for those calculations. `distAnalysis` supplies the leg-table distance only
  * when there is no separate full-track run (or as fallback if the series START leg has no line distance).
- * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±2 segments @ ${LINE_CROSS_REFINE_STEP_SEC}s for bow distance & speeds.
+ * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±120 s (see `GUN_CLOCK_REFINE_PAD_SEC`) at 0.5 s steps for bow distance & speeds.
  */
-function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null){
+function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
   if(!distAnalysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
   const ser=seriesAnalysis&&seriesAnalysis.points?.length?seriesAnalysis:distAnalysis;
   const sPts=ser.points;
@@ -2865,23 +2893,33 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
   const e0=sfEnds.endA,e1=sfEnds.endB;
 
   let tGun=tSignalAbs;
-  if(Number.isFinite(raceClockSec)){
+  if(raceClockSec!=null&&Number.isFinite(raceClockSec)){
     const gx=nearestTimeIndexInSortedGps(sPts,tSignalAbs);
     const rg=refinedUnixGunFromClockNearby(sPts,raceClockSec,gx);
     if(rg!=null&&Number.isFinite(rg))tGun=rg;
   }
 
-  let distM=Number.isFinite(sLeg.startLineDistanceM)?sLeg.startLineDistanceM:null;
+  const coarseFromCourse=()=>{
+    const m=courseLetter&&WSC_COURSES[courseLetter]?WSC_COURSES[courseLetter].marks?.[0]:null;
+    if(Array.isArray(m))return m[0];
+    return typeof m==="string"?m:null;
+  };
+  const firstName=(typeof firstMarkRefName==="string"&&firstMarkRefName.trim()?firstMarkRefName.trim():null)||coarseFromCourse();
+  const fm=firstName?effectiveMarks?.[firstName]:null;
+  const si0=Math.max(0,Math.min(sPts.length-1,sLeg.startIdx|0));
+  const bowM=Number(gpsToBowM)||0;
+  let distM=null;
+  if(fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon)){
+    const bow=gpsPositionToBowAtTime(sPts,tGun,bowM)||gpsPositionToBow(sPts,si0,bowM);
+    const refLat=bow?.lat??sPts[si0]?.lat,refLon=bow?.lon??sPts[si0]?.lon;
+    if(refLat!=null&&refLon!=null)distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+  }
+  if(!Number.isFinite(distM))distM=Number.isFinite(sLeg.startLineDistanceM)?sLeg.startLineDistanceM:null;
   if(!Number.isFinite(distM)&&dLeg&&Number.isFinite(dLeg.startLineDistanceM))distM=dLeg.startLineDistanceM;
-  if(!Number.isFinite(distM)){
-    const firstSpec=WSC_COURSES[courseLetter]?.marks?.[0];
-    const firstName=Array.isArray(firstSpec)?firstSpec[0]:firstSpec;
-    const fm=firstName?effectiveMarks?.[firstName]:null;
-    const si=Math.max(0,Math.min(sPts.length-1,sLeg.startIdx|0));
-    const bow=gpsPositionToBowAtTime(sPts,tGun,Number(gpsToBowM)||0)||gpsPositionToBow(sPts,si,Number(gpsToBowM)||0);
-    const refLat=bow?.lat??sPts[si]?.lat,refLon=bow?.lon??sPts[si]?.lon;
-    if(refLat!=null&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon))
-      distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
+  if(!Number.isFinite(distM)&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon)){
+    const bow=gpsPositionToBow(sPts,si0,bowM);
+    const refLat=bow?.lat??sPts[si0]?.lat,refLon=bow?.lon??sPts[si0]?.lon;
+    if(refLat!=null)distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
   }
 
   const onStartLeg=c=>c.idx>sLeg.startIdx&&c.idx<=sLeg.endIdx;
@@ -2901,7 +2939,7 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
   const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tGun:null;
 
   const vGun=speedKtsAtTime(sPts,tGun);
-  const mask=manoeuvreIndexMask(sPts,ser.tacks,ser.gybes);
+  const mask=manoeuvreIndexMaskNarrow(sPts,ser.tacks,ser.gybes,8);
   const speeds=[];
   for(let i=0;i<sPts.length;i++){
     const t=sPts[i].time;
@@ -2912,7 +2950,7 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
     if(s>0.05)speeds.push(s);
   }
   let speedPct=null;
-  if(speeds.length&&vGun!=null&&vGun>0.05){
+  if(speeds.length&&vGun!=null&&Number.isFinite(vGun)){
     const avg=speeds.reduce((a,b)=>a+b,0)/speeds.length;
     if(avg>0.05)speedPct=100*vGun/avg;
   }
@@ -4748,7 +4786,7 @@ function App(){
 
   const raceStartSecParsed=useMemo(()=>{
     const p=parseHMS(raceStartText);
-    return p==null?0:Math.max(0,p);
+    return p==null?null:Math.max(0,p);
   },[raceStartText]);
 
   // Per-lap mark sequence (coordinates + tack); preamble handled separately
@@ -4772,6 +4810,13 @@ function App(){
     }).filter(Boolean);
     return arr.length?arr:null;
   },[courseLetter,effectiveMarks]);
+
+  /** Course-side reference for committee-line sign (must match leg START → first rounding). Preamble first when set. */
+  const firstRoundingMarkRefName=useMemo(()=>{
+    if(coursePreambleSeq&&coursePreambleSeq.length)return coursePreambleSeq[0].name||null;
+    if(courseMarkSeq&&courseMarkSeq.length)return courseMarkSeq[0].name||null;
+    return null;
+  },[coursePreambleSeq,courseMarkSeq]);
 
   const courseMapLine=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return[];
@@ -4839,8 +4884,9 @@ function App(){
     const refLat=bow?.lat??startPt?.lat,refLon=bow?.lon??startPt?.lon;
     const startDist=refLat!=null?distPointToSegmentM(refLat,refLon,e0.lat,e0.lon,e1.lat,e1.lon):null;
     let signedStartDist=null,startOnCourseSide=null;
-    const firstMarkSpec=WSC_COURSES[courseLetter]?.marks?.[0];
-    const firstMarkName=Array.isArray(firstMarkSpec)?firstMarkSpec[0]:firstMarkSpec;
+    const coarseFirst=WSC_COURSES[courseLetter]?.marks?.[0];
+    const coarseNm=Array.isArray(coarseFirst)?coarseFirst[0]:coarseFirst;
+    const firstMarkName=firstRoundingMarkRefName||coarseNm;
     const firstMark=firstMarkName?effectiveMarks[firstMarkName]:null;
     if(refLat!=null&&refLon!=null&&firstMark&&Number.isFinite(startDist)){
       signedStartDist=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,firstMark.lat,firstMark.lon);
@@ -4882,7 +4928,7 @@ function App(){
       if(p.idx>=0&&p.dist<300)finishCross={time:linePts[p.idx].time,idx:p.idx,dist:p.dist};
     }
     return{startDist,signedStartDist,startOnCourseSide,startCross,finishCross,startPointTime:startPt?.time??null};
-  },[workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM]);
+  },[workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,fullTrackAnalysis,gpsToBowM,firstRoundingMarkRefName]);
 
   useEffect(()=>{
     if(!workPoints||workPoints.length<2||!startFinishStats)return;
@@ -5234,8 +5280,8 @@ function App(){
     if(si<0||!workPoints[si])return null;
     const tSig=workPoints[si].time;
     const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
-    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed);
-  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis]);
+    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
+  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
 
   const markGateMapFC=useMemo(()=>{
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
@@ -5383,6 +5429,9 @@ function App(){
               </>}
             </form>
           </>}
+          <div style={{fontSize:10,color:C.txD,fontFamily:"'JetBrains Mono',monospace",marginTop:14,paddingTop:12,borderTop:`1px solid ${C.bdr}`,textAlign:"center",letterSpacing:0.4}} title="Port (P) and starboard (S) roundings use the same infinite bisector line; the drawn ray may be the opposite direction (~180°) so the magenta arm lies in the correct leave-to-port / starboard half-plane">
+            v{SAILSTATS_APP_VERSION}
+          </div>
         </div>
 
         <div style={{fontSize:12,color:C.txD,margin:"16px 0"}}>— or —</div>
