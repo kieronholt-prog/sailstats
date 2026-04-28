@@ -417,10 +417,10 @@ function markGateLinesEqual(a,b){
  * bisector (b−a in NE) and committee half-plane flip; this API uses **bearing-in / bearing-out** as **compass
  * directions of travel** and sums their (sin,cos) unit vectors. Do not replace leg detection with this.
  *
- * Port/starboard: S → (bisectorTwd+90)%360, P → (bisectorTwd+270)%360. This is not the same construction as
- * `orientRoundingRayForPortStarboard` (outbound±90° reference + committee sign + optional 180° flip on the
- * bisector ray); the old magenta “rnd” bisector overlay used that path. This one-sided line follows the spec
- * above; if it ever disagrees with magenta rays, adjust here rather than silently inverting.
+ * Port/starboard: raw S → (bisectorTwd+90)%360, P → (bisectorTwd+270)%360, then **`+180`** so the outward ray
+ * lies on the rounding half-plane (raw rotation pointed the opposite way on the map vs track rounding).
+ * This is not the same construction as `orientRoundingRayForPortStarboard` (committee / beam flip on the leg
+ * bisector).
  *
  * @param {{lat:number, lon:number}} mark
  * @param {number|null} bearingInTwd  °T prev→this (approach); null = start mark
@@ -446,7 +446,8 @@ function computeOneSidedGateLine(mark,bearingInTwd,bearingOutTwd,roundingTack,ha
   }else if(vIn)vBisector=vIn;
   else vBisector=vOut;
   const bisectorTwd=(Math.atan2(vBisector.x,vBisector.y)/D+360)%360;
-  const gateBearingTwd=roundingTack==="S"?(bisectorTwd+90)%360:(bisectorTwd+270)%360;
+  const rawGate=roundingTack==="S"?(bisectorTwd+90)%360:(bisectorTwd+270)%360;
+  const gateBearingTwd=(rawGate+180)%360;
   const arm=Math.max(1,Number.isFinite(Number(halfLenM))?Number(halfLenM):180);
   const end=destinationPoint(mark.lat,mark.lon,gateBearingTwd,arm);
   return{start:{lat:mark.lat,lon:mark.lon},end,gateBearingTwd};
@@ -511,12 +512,12 @@ function __gateLineSelfTest(){
     const g=r&&Number.isFinite(r.gateBearingTwd)?Math.round(r.gateBearingTwd*100)/100:NaN;
     rows.push({label,bearingIn:bIn,bearingOut:bOut,tack,gateBearingTwd:g,note});
   };
-  add("Windward port (180/270 P)",180,270,"P","~135° per spec (not ~315 — see vector-sum bisector)");
-  add("Wraparound 355/10 S",355,10,"S","~93°E, no NaN");
-  add("Passing 90/95 P",90,95,"P","~2.5°N");
-  add("Hairpin 0/180 S",0,180,"S","~90°E, no NaN");
-  add("Start null/0 S",null,0,"S","~90°E");
-  add("Finish 270/P",270,null,"P","~180°S");
+  add("Windward port (180/270 P)",180,270,"P","~315°T after +180 correction");
+  add("Wraparound 355/10 S",355,10,"S","~272.5°, no NaN");
+  add("Passing 90/95 P",90,95,"P","~182.5°T");
+  add("Hairpin 0/180 S",0,180,"S","~270°T, no NaN");
+  add("Start null/0 S",null,0,"S","~270°T");
+  add("Finish 270/P",270,null,"P","~0°T (north)");
   console.table(rows);
   return rows;
 }
