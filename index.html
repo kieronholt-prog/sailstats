@@ -368,19 +368,23 @@ function bearTwdFromNE(n,e){return((Math.atan2(e,n)/D)+360)%360;}
  * angle at the mark between **inbound** (prev→curr) and **outbound** (curr→next). Uses unit(prev→curr) and
  * unit(curr→next): bisector direction ∝ **b − a** (`a`=inbound bearing vector, `b`=outbound). Fallback when
  * `a ‖ −b`: line ⟂ course (straight-line or reversal). (Using **curr→prev − curr→next** equiv. `−b−a` was wrong—perpendicular.)
+ * @param tack `P`|`S`|null — orients the **ray** °T so gate half-planes match leave-to-port / leave-to-starboard (`orientRoundingRayForPortStarboard`).
  */
-function computeRoundingOutsideBisectorBearingDeg(prev,curr,next){
+function computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack=null){
   if(!prev||!curr||!next)return null;
   const a=vecFromBearTwd(bear(prev.lat,prev.lon,curr.lat,curr.lon)); // inbound
   const b=vecFromBearTwd(bear(curr.lat,curr.lon,next.lat,next.lon)); // outbound
   const sn=b.n-a.n,se=b.e-a.e; // −a+b = bisector toward rounding side vs acute supplement
+  let brRaw;
   if(Math.hypot(sn,se)<1e-9){
     const pn=-a.e,pe=a.n;
     const ne=normNEDouble({n:pn,e:pe});
-    return bearTwdFromNE(ne.n,ne.e);
+    brRaw=bearTwdFromNE(ne.n,ne.e);
+  }else{
+    const ne=normNEDouble({n:sn,e:se});
+    brRaw=bearTwdFromNE(ne.n,ne.e);
   }
-  const ne=normNEDouble({n:sn,e:se});
-  return bearTwdFromNE(ne.n,ne.e);
+  return orientRoundingRayForPortStarboard(brRaw,curr.lat,curr.lon,next.lat,next.lon,tack);
 }
 /**
  * Map overlay: **one** magenta-style line per rounding mark — the infinite bisector ray for outside-angle rounding
@@ -416,7 +420,7 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
       nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
     }else if(sfMid)nextW=sfMid;
     if(!prev||!nextW)continue;
-    const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,nextW);
+    const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,nextW,m.tack??null);
     if(br==null||!Number.isFinite(br))continue;
     const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,br,halfLenM);
     if(!seg||seg.length<2)continue;
@@ -425,7 +429,8 @@ function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
     seen.add(key);
     const gi=++gNum;
     const name=String(m.name||"?");
-    const tag=`Rnd bisector ${shortN(name)} ${Math.round(br*10)/10}\u00b0T \u00b7L${Number(m.lap)|0}`;
+    const ps=m.tack==="P"||m.tack==="S"?` \u00b7${m.tack}`:"";
+    const tag=`Rnd bisector ${shortN(name)} ${Math.round(br*10)/10}\u00b0T${ps} \u00b7L${Number(m.lap)|0}`;
     feats.push({type:"Feature",properties:{kind:"rnd",g:gi,mark:name,lap:Number(m.lap)||0,bisDeg:br,tag},geometry:{type:"LineString",coordinates:seg}});
     const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
     {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"rnd"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
@@ -619,7 +624,7 @@ function detectMarkInboundOutboundGates(pts,prev,curr,next,searchFrom,tack,_wf,_
   const c2=hav(curr.lat,curr.lon,next.lat,next.lon);
   if(c1<LEG_CHORD_MIN_M||c2<LEG_CHORD_MIN_M||!Number.isFinite(c1)||!Number.isFinite(c2))
     return{ok:false,gateDetDebug:{mode:"chord",fail:"chord_too_short",c1M:c1,c2M:c2,minM:LEG_CHORD_MIN_M,trackRef:"gps_latlon"}};
-  const bis=computeRoundingOutsideBisectorBearingDeg(prev,curr,next);
+  const bis=computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack);
   if(bis==null||!Number.isFinite(bis))return{ok:false,gateDetDebug:{mode:"bisector",fail:"no_bearing"}};
   const sF=Math.max(0,searchFrom|0);
   const jEnd=pts.length-1;
@@ -666,7 +671,7 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
     cAmap=true;
     if(cA<0)return null;
     if(!wAfter||!Number.isFinite(wAfter.lat)||!Number.isFinite(wAfter.lon))return null;
-    const brTo=computeRoundingOutsideBisectorBearingDeg(WA,WB,wAfter);
+    const brTo=computeRoundingOutsideBisectorBearingDeg(WA,WB,wAfter,tackTo??null);
     if(brTo==null||!Number.isFinite(brTo))return null;
     gIn={bisDeg:brTo};
     const sideB=p=>signedMetersToRoundingBisectorAtMark(p.lat,p.lon,latB,lonB,brTo);
@@ -674,7 +679,7 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
     cB=cBr.idx;
     cBmap=true;
   }else if(toM==="FINISH"&&hasSf&&e0&&e1&&wPrev&&fromM!=="START"){
-    const brFrom=computeRoundingOutsideBisectorBearingDeg(wPrev,WA,WB);
+    const brFrom=computeRoundingOutsideBisectorBearingDeg(wPrev,WA,WB,tackFrom??null);
     if(brFrom==null||!Number.isFinite(brFrom))return null;
     gOut={bisDeg:brFrom};
     const sideA=p=>signedMetersToRoundingBisectorAtMark(p.lat,p.lon,latA,lonA,brFrom);
@@ -685,8 +690,8 @@ function tryMapAlignedLegPerpCrossings(pts,latA,lonA,latB,lonB,searchFrom,fromMa
     cB=firstCommitteeLineSegmentCrossing(pts,Math.max(cA|0,sF),jEnd,e0,e1);
     cBmap=true;
   }else if(wPrev&&wAfter&&fromM!=="START"&&toM!=="FINISH"){
-    const brFrom=computeRoundingOutsideBisectorBearingDeg(wPrev,WA,WB);
-    const brTo=computeRoundingOutsideBisectorBearingDeg(WA,WB,wAfter);
+    const brFrom=computeRoundingOutsideBisectorBearingDeg(wPrev,WA,WB,tackFrom??null);
+    const brTo=computeRoundingOutsideBisectorBearingDeg(WA,WB,wAfter,tackTo??null);
     if(brFrom==null||brTo==null||!Number.isFinite(brFrom)||!Number.isFinite(brTo))return null;
     gOut={bisDeg:brFrom};
     gIn={bisDeg:brTo};
@@ -737,7 +742,7 @@ function findMapLegGates(pts,latA,lonA,latB,lonB,searchFrom,fbStart,fbEnd,fromMa
       );
       const wPr=lctx&&lctx.wPrev;
       if(wPr&&Number.isFinite(wPr.lat)&&Number.isFinite(wPr.lon)){
-        const brFinish=computeRoundingOutsideBisectorBearingDeg(wPr,{lat:latA,lon:lonA},{lat:latB,lon:lonB});
+        const brFinish=computeRoundingOutsideBisectorBearingDeg(wPr,{lat:latA,lon:lonA},{lat:latB,lon:lonB},tackFrom??null);
         const gO=brFinish!=null&&Number.isFinite(brFinish)?{bisDeg:brFinish}:null;
         if(gO){
           const sFinA=p=>signedMetersToRoundingBisectorAtMark(p.lat,p.lon,latA,lonA,gO.bisDeg);
@@ -1042,8 +1047,22 @@ function signedMetersToRoundingBisectorAtMark(pLat,pLon,markLat,markLon,bearingD
   if(!g)return NaN;
   return signedMetersToABLineLikeCommittee(pLat,pLon,g.aLat,g.aLon,g.bLat,g.bLon);
 }
+/** ~80 m on outbound port/starboard beam; flip bisector ray 180° if ref lies on − side of infinite bisector (same line, P/S half-plane). */
+const ORIENT_ROUNDING_REF_M=80;
+function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,tack){
+  if(tack!=="P"&&tack!=="S"||br0==null||!Number.isFinite(br0))return br0;
+  const out=bear(currLat,currLon,nextLat,nextLon);
+  if(!Number.isFinite(out))return br0;
+  const beamBr=((tack==="P"?out-90:out+90)%360+360)%360;
+  const ref=destinationPoint(currLat,currLon,beamBr,ORIENT_ROUNDING_REF_M);
+  const g=markGateSegmentEndsFromBearingTwd(currLat,currLon,br0,MARK_GATE_LINE_ARM_M);
+  if(!g)return br0;
+  const s=signedMetersToABLineLikeCommittee(ref.lat,ref.lon,g.aLat,g.aLon,g.bLat,g.bLon);
+  if(!Number.isFinite(s)||Math.abs(s)<1e-4)return br0;
+  return s<0?((br0+180)%360):br0;
+}
 function roundingBisectorSideFn(prev,curr,next,tack){
-  const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next);
+  const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack);
   if(br==null||!Number.isFinite(br))return()=>0;
   return pp=>signedMetersToRoundingBisectorAtMark(pp.lat,pp.lon,curr.lat,curr.lon,br);
 }
