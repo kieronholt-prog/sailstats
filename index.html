@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.2";
+const SAILSTATS_APP_VERSION="1.6.3";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -5545,29 +5545,35 @@ function App(){
     if(recalc)setAnalysis(recalc);
   },[analysis,croppedPoints,windOvr,courseMarkSeq,coursePreambleSeq,laps,detSettings,sfLineEnds,windTuning,gpsToBowM,windwardMarkName]);
 
+  /** Single analysis object for start-line maths: full-track run when available (same legs + GPS array for dist & crossing), else cropped analysis — avoids first-entry vs re-entry drift. */
+  const analysisForStartLine=useMemo(()=>{
+    if(fullTrackAnalysis&&fullTrackAnalysis.points&&fullTrackAnalysis.points.length>=20)return fullTrackAnalysis;
+    return curAnalysis||null;
+  },[fullTrackAnalysis,curAnalysis]);
+
   const overviewStartBadges=useMemo(()=>{
-    if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
+    if(!analysisForStartLine||!workPoints?.length||!sfLineEnds)return null;
     const si=nearestPointIndexByClockTime(workPoints,raceStartSecParsed);
     if(si<0||!workPoints[si])return null;
     const tSig=workPoints[si].time;
-    const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
-    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
-  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
+    return computeStartLineOverviewBadges(analysisForStartLine,analysisForStartLine,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
+  },[analysisForStartLine,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,firstRoundingMarkRefName]);
 
   const overviewStartDiag=useMemo(()=>{
-    if(!curAnalysis||!workPoints?.length||!sfLineEnds)return null;
+    if(!analysisForStartLine||!workPoints?.length||!sfLineEnds)return null;
     const si=nearestPointIndexByClockTime(workPoints,raceStartSecParsed);
     if(si<0||!workPoints[si])return null;
     const tSig=workPoints[si].time;
-    const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
-    const full=computeStartLineDetails(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
+    const full=computeStartLineDetails(analysisForStartLine,analysisForStartLine,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
     if(!full)return null;
+    const pinFull=!!(fullTrackAnalysis&&fullTrackAnalysis.points&&fullTrackAnalysis.points.length>=20);
     return{
       ...full.diagnostics,
-      seriesSource:series===fullTrackAnalysis&&fullTrackAnalysis?.points?.length>=20?"fullTrackAnalysis (STREAM points, ≥20)":"cropped curAnalysis.points",
+      seriesSource:pinFull?"Pinned: fullTrackAnalysis — same object for cropped + series args (deterministic)","Pinned: cropped analysis only (full track <20 pts or missing)",
+      startLinePinnedFullTrack:pinFull,
       trackFirst_unix:workPoints[0]?.time??null,
     };
-  },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
+  },[analysisForStartLine,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis,firstRoundingMarkRefName]);
 
   const markGateMapFC=useMemo(()=>{
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
@@ -6939,9 +6945,10 @@ function App(){
               <div style={{background:C.card,borderRadius:10,padding:12,border:`1px solid ${C.bdr}`}}>
                 <div style={{fontSize:10,color:C.txM,marginBottom:6}}>Track / series</div>
                 <div style={{fontSize:11,color:C.txD,lineHeight:1.6}}>
-                  Series points: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.seriesPoints}</strong>
-                  {" · "}Crop points in analysis: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.cropSeriesPoints}</strong><br/>
-                  Same array ref as crop: <strong style={{color:C.txt}}>{overviewStartDiag.samePointArrayAsCrop?"yes":"no"}</strong> — {overviewStartDiag.samePointArrayAsCrop?"using cropped track for both":"full-track series for line/crossing"}<br/>
+                  Points in START calc: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.seriesPoints}</strong>
+                  {" · "}Legacy “crop” column: <strong style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{overviewStartDiag.cropSeriesPoints}</strong> (matches when pinned)<br/>
+                  One analysis for dist + crossing: <strong style={{color:C.txt}}>{overviewStartDiag.samePointArrayAsCrop?"yes":"no"}</strong>
+                  {" · "}<strong style={{color:C.txt}}>{overviewStartDiag.startLinePinnedFullTrack?"Full track (≥20 pts)":"Short / crop only"}</strong><br/>
                   <span style={{fontSize:10}}>{overviewStartDiag.seriesSource}</span>
                 </div>
               </div>
