@@ -34,7 +34,7 @@ button{font-family:inherit;cursor:pointer}a{color:inherit}
 
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef}=React;
-const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ReferenceLine,ReferenceDot,ReferenceArea,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart}=Recharts;
+const {LineChart,Line,XAxis,YAxis,ResponsiveContainer,Tooltip,BarChart,Bar,Cell,CartesianGrid,Area,AreaChart,ReferenceLine,ReferenceDot,ReferenceArea,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,Radar,RadarChart,ComposedChart}=Recharts;
 
 const PEAK_MARK_ORANGE="#ff9500";
 function PeakLightningRefShape(props){
@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.3";
+const SAILSTATS_APP_VERSION="1.6.4";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -1853,6 +1853,69 @@ async function renameActivityName(stravaId, activityId, newName) {
 function meanNumeric(arr){
   const v=(arr||[]).filter(x=>Number.isFinite(x));
   return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
+}
+
+/** Signed committee-line distance on START legs from persisted `leg_summary`. */
+function startLineMetersFromSavedLegSummary(legSummary){
+  if(!Array.isArray(legSummary)||!legSummary.length)return null;
+  const leg=legSummary.find(l=>l&&String(l.from)==="START");
+  const v=leg?.startLineDistanceM;
+  return v!=null&&Number.isFinite(v)?v:null;
+}
+
+/** Weighted σ SOG / σ COG across port vs starboard upwind tack samples from saved `stats.tackStatsByLegType.upwind`. */
+function upwindVariationFromStoredTackStats(upwind){
+  if(!upwind||typeof upwind!=="object")return{speedStd:null,courseStd:null};
+  const p=upwind.port||{}, s=upwind.stbd||{};
+  const np=Number(p.n)||0, ns=Number(s.n)||0;
+  const w=np+ns;
+  const blend=(getter)=>{
+    const a=getter(p), b=getter(s);
+    if(w>0&&Number.isFinite(a)&&Number.isFinite(b))return (a*np+b*ns)/w;
+    if(Number.isFinite(a))return a;
+    if(Number.isFinite(b))return b;
+    return null;
+  };
+  return{
+    speedStd:blend(x=>x.speedStd),
+    courseStd:blend(x=>x.courseStd),
+  };
+}
+
+/** One row per saved analysis (oldest → newest) for cross-activity charts. */
+function buildSavedTrendChartRows(savedByActId){
+  const rows=Object.values(savedByActId||{}).filter(r=>r&&r.activity_id!=null);
+  rows.sort((a,b)=>{
+    const ta=a.activity_date?new Date(a.activity_date).getTime():0;
+    const tb=b.activity_date?new Date(b.activity_date).getTime():0;
+    return ta-tb;
+  });
+  const out=[];
+  for(const r of rows){
+    const raw=r.stats;
+    const s=raw&&typeof raw==="object"?raw:{};
+    const nm=(r.activity_name&&String(r.activity_name).trim())||`#${r.activity_id}`;
+    const slug=nm.length>18?`${nm.slice(0,16)}…`:nm;
+    const d=r.activity_date?new Date(r.activity_date):null;
+    const dl=d&&Number.isFinite(d.getTime())
+      ?d.toLocaleDateString("en-GB",{day:"numeric",month:"short"})
+      :"—";
+    const label=`${dl} · ${slug}`;
+    const uw=s.tackStatsByLegType&&typeof s.tackStatsByLegType==="object"?s.tackStatsByLegType.upwind:null;
+    const{speedStd:speedVar,courseStd:courseVar}=upwindVariationFromStoredTackStats(uw);
+    out.push({
+      id:String(r.activity_id),
+      label,
+      shortLabel:slug,
+      dateMs:d&&Number.isFinite(d.getTime())?d.getTime():0,
+      startLineM:startLineMetersFromSavedLegSummary(r.leg_summary),
+      upwindSpeedStd:speedVar,
+      upwindCourseStd:courseVar,
+      tackQ:Number.isFinite(s.avgTackQuality)?s.avgTackQuality:null,
+      gybeQ:Number.isFinite(s.avgGybeQuality)?s.avgGybeQuality:null,
+    });
+  }
+  return out;
 }
 
 function formatCompareRowSubtitle(row,stravaAct){
@@ -4761,6 +4824,10 @@ function App(){
   },[view,session?.strava?.linked,refreshSavedAnalyses]);
 
   useEffect(()=>{
+    if(view==="trends"&&session?.strava?.linked)refreshSavedAnalyses();
+  },[view,session?.strava?.linked,refreshSavedAnalyses]);
+
+  useEffect(()=>{
     if(!compareMode)setComparePick([]);
   },[compareMode]);
 
@@ -4785,6 +4852,8 @@ function App(){
   },[view,compareIds,session,sAth]);
 
   const activitiesListMerged=useMemo(()=>mergeActivitiesWithSaved(acts,savedByActId),[acts,savedByActId]);
+  /** Saved-analysis rows → trend chart points (sorted by activity date ascending). */
+  const savedTrendRows=useMemo(()=>buildSavedTrendChartRows(savedByActId),[savedByActId]);
 
   useEffect(()=>{
     if(view!=="saved-summary"||!savedSummaryId){
@@ -5785,6 +5854,15 @@ function App(){
           <div style={{fontSize:22,fontWeight:700}}>Your Activities</div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
             <button type="button" onClick={()=>setCompareMode(c=>!c)} style={{...btn(compareMode?`${C.acc}25`:"transparent",compareMode?C.acc:C.txM,C.bdr),padding:"7px 12px",fontSize:15}}>{compareMode?"Cancel compare":"Compare"}</button>
+            <button
+              type="button"
+              title="Charts from saved analyses (needs at least one Analyse save)"
+              disabled={!savedTrendRows.length}
+              onClick={()=>setView("trends")}
+              style={{...btn("transparent",savedTrendRows.length?C.acc:C.txD,C.bdr),padding:"7px 12px",fontSize:15,opacity:savedTrendRows.length?1:0.45,cursor:savedTrendRows.length?"pointer":"not-allowed"}}
+            >
+              Trends
+            </button>
             <button type="button" onClick={()=>fileRef.current?.click()} style={{...btn(`${C.acc}18`,C.acc,`${C.acc}44`),padding:"7px 12px",fontSize:15}}>+ Upload File</button>
           </div>
           <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
@@ -5869,6 +5947,52 @@ function App(){
           <button type="button" onClick={()=>setComparePick([])} style={{...btn("transparent",C.txM,C.bdr),padding:"12px 16px",fontSize:16}}>Clear</button>
         </div>
       )}
+    </div>);
+  }
+
+  /* ─── CROSS-ACTIVITY TRENDS (saved analyses) ─── */
+  if(view==="trends"){
+    const tr=savedTrendRows;
+    const axisProps={tick:{fill:C.txD,fontSize:10},interval:0,angle:-32,textAnchor:"end",height:68};
+    const tooltipStyle={
+      labelStyle:{color:C.txM,fontSize:11,marginBottom:4},
+      itemStyle:{color:C.txt,fontSize:12},
+      contentStyle:{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:8,padding:"10px 12px"},
+    };
+    return(<div style={{background:C.bg,minHeight:"100vh",paddingBottom:24}}>
+      <div style={hdr}>
+        <button type="button" onClick={()=>setView("activities")} style={{background:"none",border:"none",color:C.txM,fontSize:16}}>← Activities</button>
+        <div style={{fontSize:17,fontWeight:700,color:C.txt}}>Trends</div>
+        <div style={{width:40}}/>
+      </div>
+      <div style={{maxWidth:920,margin:"0 auto",padding:"16px"}}>
+        <p style={{fontSize:14,color:C.txD,lineHeight:1.55,marginBottom:14}}>
+          Charts use your <strong style={{color:C.txt}}>saved analyses</strong> only (same data as Compare), oldest → newest. Re-run <strong style={{color:C.txt}}>Analyse</strong> after meaningful sessions so aggregates stay current.
+        </p>
+        {!tr.length?(
+          <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:12,padding:22,color:C.txM,fontSize:15,lineHeight:1.5}}>
+            No rows with persisted <strong style={{color:C.txt}}>stats</strong> yet — open an activity, complete course setup, and run analysis with sign-in so results sync to SailStats.
+          </div>
+        ):(
+          <div style={{display:"flex",flexDirection:"column",gap:22}}>
+            <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:14,padding:"14px 16px"}}>
+              <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Start line · signed distance</div>
+              <div style={{fontSize:11,color:C.txD,marginBottom:10,lineHeight:1.45}}>Bow distance from committee line on the START leg (<strong style={{color:C.txt}}>leg_summary</strong>). Negative = course side per saved diagnostics.</div>
+              <div style={{width:"100%",height:268}}><ResponsiveContainer><BarChart data={tr} margin={{top:12,right:8,left:8,bottom:4}}><CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/><XAxis type="category" dataKey="label" stroke={C.txM} {...axisProps}/><YAxis stroke={C.txM} tick={{fill:C.txD,fontSize:10}} domain={["auto","auto"]} tickFormatter={(v)=>Math.round(Number(v)).toString()} label={{value:"m",angle:-90,position:"insideLeft",fill:C.txD,fontSize:10}}/><Tooltip {...tooltipStyle} formatter={(v)=>[`${typeof v==="number"?Math.round(v*10)/10:v} m`,"distance"]}/><ReferenceLine y={0} stroke={C.acc} strokeOpacity={0.6}/><Bar dataKey="startLineM" name="distance" fill={C.acc} radius={[4,4,0,0]}>{tr.map((d,i)=>{const ok=d.startLineM!=null&&Number.isFinite(d.startLineM);const col=ok?(d.startLineM<0?C.wrn:C.acc):"#445577";return<Cell key={d.id||i} fill={col} fillOpacity={ok?1:0.25}/>;})}</Bar></BarChart></ResponsiveContainer></div>
+            </div>
+            <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:14,padding:"14px 16px"}}>
+              <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Upwind · speed & COG variability</div>
+              <div style={{fontSize:11,color:C.txD,marginBottom:10,lineHeight:1.45}}>σ SOG & σ COG from <strong style={{color:C.txt}}>upwind</strong> legs, port/starboard pooled by sample weight (saved tack split).</div>
+              <div style={{width:"100%",height:288}}><ResponsiveContainer><ComposedChart data={tr} margin={{top:12,right:12,left:8,bottom:4}}><CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/><XAxis type="category" dataKey="label" stroke={C.txM} {...axisProps}/><YAxis yAxisId="spd" stroke={C.txM} orientation="left" tick={{fill:C.txD,fontSize:10}} domain={["auto","auto"]} label={{value:"σ SOG (kt)",angle:-90,position:"insideLeft",fill:C.txD,fontSize:10,width:44}}/><YAxis yAxisId="cog" stroke="#7eb8ff" orientation="right" tick={{fill:"#94b8dc",fontSize:10}} domain={["auto","auto"]} label={{value:"σ COG (°)",angle:90,position:"insideRight",fill:"#94b8dc",fontSize:10,width:52}}/><Tooltip {...tooltipStyle}/><Legend wrapperStyle={{fontSize:11,paddingTop:10}}/><Line yAxisId="spd" type="monotone" dataKey="upwindSpeedStd" name="σ SOG (kt)" stroke={C.acc} strokeWidth={2} dot={{r:3}} connectNulls/><Line yAxisId="cog" type="monotone" dataKey="upwindCourseStd" name="σ COG (°)" stroke="#6ec8ff" strokeWidth={2} dot={{r:3}} connectNulls/></ComposedChart></ResponsiveContainer></div>
+            </div>
+            <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:14,padding:"14px 16px"}}>
+              <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Manoeuvre quality (racing tacks / gybes)</div>
+              <div style={{fontSize:11,color:C.txD,marginBottom:10,lineHeight:1.45}}>Session averages stored with each save (<strong style={{color:C.txt}}>avgTackQuality</strong> · <strong style={{color:C.txt}}>avgGybeQuality</strong>) — manoeuvres flagged at marks excluded.</div>
+              <div style={{width:"100%",height:288}}><ResponsiveContainer><ComposedChart data={tr} margin={{top:12,right:8,left:8,bottom:4}}><CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/><XAxis type="category" dataKey="label" stroke={C.txM} {...axisProps}/><YAxis stroke={C.txM} tick={{fill:C.txD,fontSize:10}} domain={[0,100]} label={{value:"%",angle:-90,position:"insideLeft",fill:C.txD,fontSize:10,width:44}}/><Tooltip {...tooltipStyle} formatter={(v)=>[`${typeof v==="number"?Math.round(v):v}%`,""]}/><Legend wrapperStyle={{fontSize:11,paddingTop:10}}/><Line type="monotone" dataKey="tackQ" name="Avg tack %" stroke={C.tack} strokeWidth={2} dot={{r:3}} connectNulls/><Line type="monotone" dataKey="gybeQ" name="Avg gybe %" stroke={C.gybe} strokeWidth={2} dot={{r:3}} connectNulls/></ComposedChart></ResponsiveContainer></div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>);
   }
 
