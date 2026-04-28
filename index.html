@@ -270,6 +270,11 @@ const C={
   trk:"#00d4aa",trkRound:"#ff9500",course:"#ffb84a",
 };
 
+/** Per-leg track colours on map (`leg0`…`leg15`, then repeat). Must match `mapboxTrackLineColorByKindExpr`. */
+const TRACK_LEG_SEGMENT_PALETTE=["#3b82f6","#f59e0b","#10b981","#a855f7","#ef4444","#06b6d4","#eab308","#f472b6","#94a3b8","#6366f1","#14b8a6","#ec4899","#84cc16","#f97316","#8b5cf6","#22c55e"];
+const TRACK_LEG_SKIP_COLOR="#64748b";
+const MAP_RND_BISECTOR_LINE="#a855f7";
+
 /* ═══════════════════════════════════════════════════════════════════
    GEO / MATH
    ═══════════════════════════════════════════════════════════════════ */
@@ -2868,11 +2873,10 @@ function buildTrackSegmentFeatureCollectionWithLegDiagnostics(pts,legBuildLog,ro
 }
 /** Mapbox GL `line-color` expression: rounding (orange), leg0…15, leg_skip_0…15 (grey), base (teal). */
 function mapboxTrackLineColorByKindExpr(defaultTrkColor,roundingColor){
-  const legPal=["#3b82f6","#f59e0b","#10b981","#a855f7","#ef4444","#06b6d4","#eab308","#f472b6","#94a3b8","#6366f1","#14b8a6","#ec4899","#84cc16","#f97316","#8b5cf6","#22c55e"];
   const pairs=["rounding",roundingColor,"base",defaultTrkColor,"normal",defaultTrkColor];
   for(let i=0;i<16;i++){
-    pairs.push(`leg${i}`,legPal[i%legPal.length]);
-    pairs.push(`leg_skip_${i}`,"#64748b");
+    pairs.push(`leg${i}`,TRACK_LEG_SEGMENT_PALETTE[i%TRACK_LEG_SEGMENT_PALETTE.length]);
+    pairs.push(`leg_skip_${i}`,TRACK_LEG_SKIP_COLOR);
   }
   pairs.push(defaultTrkColor);
   return["match",["get","kind"],...pairs];
@@ -3794,6 +3798,59 @@ function WindRose({wd,onChange,compact,hint}){
 /* ═══════════════════════════════════════════════════════════════════
    MAP COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
+/** Legend under Setup map: GPS track segments, overlays, manoeuvre badges. */
+function MapSetupLegend(){
+  const row=(label,color,dash)=>(
+    <div style={{display:"flex",alignItems:"center",gap:8,minHeight:20,marginBottom:3}}>
+      <span style={{width:28,height:0,borderTop:`3px ${dash?"dashed":"solid"} ${color}`,flexShrink:0,opacity:0.92}} aria-hidden/>
+      <span style={{fontSize:11,color:C.txD,lineHeight:1.35}}>{label}</span>
+    </div>
+  );
+  const dot=(color)=>(
+    <span style={{width:10,height:10,borderRadius:5,background:color,border:`1px solid ${C.bdr}`,flexShrink:0}} aria-hidden/>
+  );
+  return(
+    <div style={{marginTop:10,background:C.card,borderRadius:10,padding:"10px 12px",border:`1px solid ${C.bdr}`}}>
+      <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Map key</div>
+      <div style={{fontSize:11,color:C.txM,marginBottom:4}}>GPS track</div>
+      {row(`Default / unused leg window`,C.trk,false)}
+      <div style={{fontSize:10,color:C.txM,margin:"2px 0 6px"}}>Included leg segments — colour encodes step index 0…15 (palette repeats beyond that):</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:5,alignItems:"flex-end",margin:"0 0 8px"}}>
+        {TRACK_LEG_SEGMENT_PALETTE.map((col,i)=>(
+          <span key={i} title={`Leg segment ${i} (included)`} style={{display:"inline-flex",flexDirection:"column",alignItems:"center",gap:2}}>
+            <span style={{width:20,height:5,borderRadius:2,background:col,border:`1px solid ${C.bdr}`}}/>
+            <span style={{fontSize:7,color:C.txD,fontFamily:"'JetBrains Mono',monospace",lineHeight:1}}>{i}</span>
+          </span>
+        ))}
+      </div>
+      {row(`Skipped leg (not analysed)`,TRACK_LEG_SKIP_COLOR,true)}
+      {row(`Mark-rounding band (near mark / manoeuvre mask)`,C.trkRound,false)}
+      {row(`Course connector (planned order)`,C.course,true)}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+        <span style={{width:28,height:0,borderTop:"3px solid #ffffff",boxShadow:`0 0 5px ${C.acc}`,opacity:0.95}} aria-hidden/>
+        <span style={{fontSize:11,color:C.txD,lineHeight:1.35}}>Start / finish line (white; aqua glow underneath)</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+        <span style={{width:28,height:0,borderTop:`3px dashed ${MAP_RND_BISECTOR_LINE}`}} aria-hidden/>
+        <span style={{fontSize:11,color:C.txD,lineHeight:1.35}}>Rounding bisectors — dashed magenta when “Show mark rounding lines” is on</span>
+      </div>
+      <div style={{fontSize:11,color:C.txM,marginBottom:4}}>Samples & manoeuvres</div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+        {dot("#d9fff7")}
+        <span style={{fontSize:11,color:C.txD}}>GPS sample dots (when zoomed in)</span>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,fontSize:11,color:C.txD,lineHeight:1.45}}>
+        <span><span style={{color:C.tack,fontWeight:700}}>T</span> tack · <span style={{color:C.gybe,fontWeight:700}}>G</span> gybe</span>
+        <span><span style={{color:C.port,fontWeight:700}}>P→S</span> / <span style={{color:C.stbd,fontWeight:700}}>S→P</span> crossing</span>
+        <span style={{color:C.trkRound}}>* excluded mark-rounding manoeuvre</span>
+      </div>
+      <div style={{fontSize:10,color:C.txD,marginTop:10,lineHeight:1.45}}>
+        Bisectors use leave-to-port/starboard where the course specifies P/S. Leg colours follow gate-based leg indices (rounding order preview). Map overlay timing can differ slightly from full analysis.
+      </div>
+    </div>
+  );
+}
+
 function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFinishLine,trackSegmentFC,legGatesFC,legGatesKey,showPointIndices=false}){
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
@@ -3955,7 +4012,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         if(map.getSource("leg-gates")){map.getSource("leg-gates").setData(fc);return;}
         if(typeof map.isStyleLoaded==="function"&&!map.isStyleLoaded()){map.once("idle",apply);return;}
         map.addSource("leg-gates",{type:"geojson",data:fc});
-        if(!map.getLayer("leg-gate-rnd"))map.addLayer({id:"leg-gate-rnd",type:"line",source:"leg-gates",filter:["==",["get","kind"],"rnd"],paint:{"line-color":"#a855f7","line-width":2.4,"line-opacity":0.92,"line-dasharray":[0.15,0.15,1,0.15]}});
+        if(!map.getLayer("leg-gate-rnd"))map.addLayer({id:"leg-gate-rnd",type:"line",source:"leg-gates",filter:["==",["get","kind"],"rnd"],paint:{"line-color":MAP_RND_BISECTOR_LINE,"line-width":2.4,"line-opacity":0.92,"line-dasharray":[0.15,0.15,1,0.15]}});
         if(!map.getLayer("leg-gate-txt"))map.addLayer({id:"leg-gate-txt",type:"symbol",source:"leg-gates",filter:["==",["get","kind"],"gLbl"],layout:{"text-field":["get","tag"],"text-size":9,"text-offset":[0,0.75],"text-allow-overlap":true,"text-optional":true,"text-max-width":22},paint:{"text-color":"#f2ecff","text-halo-color":"#0a1020","text-halo-width":1.2}});
       }catch(e){console.warn("[CourseMap] leg gates",e);}
     };
@@ -5706,13 +5763,7 @@ function App(){
               legGatesKey={courseGeomSig}
               showPointIndices={showTrackPointIndices}
             />
-            <div style={{fontSize:10,color:C.txD,marginTop:8,lineHeight:1.45}}>
-              <span style={{color:C.trk}}>■</span> Normal track · <span style={{color:C.trkRound}}>■</span> Rounding (Manoeuvres) ·
-              <span style={{color:"#c026d3"}}> ―</span> In-gate (in) ·
-              <span style={{color:"#06b6d4"}}> ―</span> Out: <code style={{fontSize:9}}>ch</code> at a windward mark; leeward (next is windward) <code style={{fontSize:9}}>L135</code> port (wind+135°) · <code style={{fontSize:9}}>R135</code> stbd (wind−135°) ·
-              <span style={{color:C.txD}}> <code style={{fontSize:9}}>#N</code> in <code style={{fontSize:9}}>W135</code>|<code style={{fontSize:9}}>ch</code> · <code style={{fontSize:9}}>#N</code> out <code style={{fontSize:9}}>ch</code>|<code style={{fontSize:9}}>L135</code>|<code style={{fontSize:9}}>R135</code> · windward = Setup field, name <code style={{fontSize:9}}>Windward</code>, or upwind track to/next mark (vs wind FROM) · nudged · map ≠ full detection · </span>
-              <span style={{color:C.txD}}>Upwind det. uses same COG as engine — not shown on lines.</span>
-            </div>
+            <MapSetupLegend/>
           </div>
           <div style={{flex:1,minWidth:200,maxWidth:320,minHeight:380}}>
             <WindRose
