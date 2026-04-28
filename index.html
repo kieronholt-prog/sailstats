@@ -411,6 +411,121 @@ function markGateLinesEqual(a,b){
   }
   return true;
 }
+/**
+ * One-sided gate line through a mark (vector-sum unit bisector, then +90°/ +270° for S/P). Sits alongside
+ * `computeRoundingOutsideBisectorBearingDeg` + `orientRoundingRayForPortStarboard` — those use the **turn**
+ * bisector (b−a in NE) and committee half-plane flip; this API uses **bearing-in / bearing-out** as **compass
+ * directions of travel** and sums their (sin,cos) unit vectors. Do not replace leg detection with this.
+ *
+ * Port/starboard: S → (bisectorTwd+90)%360, P → (bisectorTwd+270)%360. This is not the same construction as
+ * `orientRoundingRayForPortStarboard` (outbound±90° reference + committee sign + optional 180° flip on the
+ * bisector ray); the old magenta “rnd” bisector overlay used that path. This one-sided line follows the spec
+ * above; if it ever disagrees with magenta rays, adjust here rather than silently inverting.
+ *
+ * @param {{lat:number, lon:number}} mark
+ * @param {number|null} bearingInTwd  °T prev→this (approach); null = start mark
+ * @param {number|null} bearingOutTwd °T this→next (exit); null = finish mark
+ * @param {"P"|"S"} roundingTack
+ * @param {number} [halfLenM=180]
+ * @returns {{ start:{lat:number,lon:number}, end:{lat:number,lon:number}, gateBearingTwd:number } | null}
+ */
+function computeOneSidedGateLine(mark,bearingInTwd,bearingOutTwd,roundingTack,halfLenM=180){
+  if(!mark||!Number.isFinite(mark.lat)||!Number.isFinite(mark.lon))return null;
+  if(roundingTack!=="P"&&roundingTack!=="S")return null;
+  const hasIn=bearingInTwd!=null&&Number.isFinite(Number(bearingInTwd));
+  const hasOut=bearingOutTwd!=null&&Number.isFinite(Number(bearingOutTwd));
+  if(!hasIn&&!hasOut)return null;
+  const vIn=hasIn?{x:Math.sin(Number(bearingInTwd)*D),y:Math.cos(Number(bearingInTwd)*D)}:null;
+  const vOut=hasOut?{x:Math.sin(Number(bearingOutTwd)*D),y:Math.cos(Number(bearingOutTwd)*D)}:null;
+  let vBisector;
+  if(vIn&&vOut){
+    const sx=vIn.x+vOut.x,sy=vIn.y+vOut.y;
+    const len=Math.hypot(sx,sy);
+    if(len<1e-6)vBisector=vIn;
+    else vBisector={x:sx/len,y:sy/len};
+  }else if(vIn)vBisector=vIn;
+  else vBisector=vOut;
+  const bisectorTwd=(Math.atan2(vBisector.x,vBisector.y)/D+360)%360;
+  const gateBearingTwd=roundingTack==="S"?(bisectorTwd+90)%360:(bisectorTwd+270)%360;
+  const arm=Math.max(1,Number.isFinite(Number(halfLenM))?Number(halfLenM):180);
+  const end=destinationPoint(mark.lat,mark.lon,gateBearingTwd,arm);
+  return{start:{lat:mark.lat,lon:mark.lon},end,gateBearingTwd};
+}
+/**
+ * GeoJSON FeatureCollection: one-sided gate LineStrings (+ gLbl points), [lon, lat].
+ * @param {Array<{name:string,lat:number,lon:number,tack?:string,lap?:number}>} orderedMarks  e.g. `expandCourseMarks` output
+ * @param {number} [halfLenM=180]
+ * @param {null|{endA:{lat:number,lon:number},endB:{lat:number,lon:number}}} [sfEnds]  S/F line — midpoint anchors virtual prev/next for course ends (same pattern as prior `buildMarkGateDebugFC`).
+ */
+function buildOneSidedGateFC(orderedMarks,halfLenM=180,sfEnds=null){
+  if(!orderedMarks?.length)return{type:"FeatureCollection",features:[]};
+  const sfMid=sfEnds?.endA&&sfEnds?.endB?{
+    lat:(sfEnds.endA.lat+sfEnds.endB.lat)/2,
+    lon:(sfEnds.endA.lon+sfEnds.endB.lon)/2
+  }:null;
+  const wpFromRow=row=>(row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)
+    ?{lat:row.lat,lon:row.lon}:null);
+  const shortN=n=>n&&String(n).length>10?String(n).slice(0,9)+"\u2006\u2026":String(n);
+  const feats=[],seen=new Set();
+  let gNum=0;
+  const arm=Math.max(1,Number.isFinite(Number(halfLenM))?Number(halfLenM):180);
+  for(let mi=0;mi<orderedMarks.length;mi++){
+    const m=orderedMarks[mi];
+    const tack=m.tack;
+    if(tack!=="P"&&tack!=="S")continue;
+    const curr=wpFromRow(m);
+    if(!curr)continue;
+    let prevWp=null;
+    if(mi>0){
+      const pr=orderedMarks[mi-1];
+      prevWp=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
+    }else if(sfMid)prevWp=sfMid;
+    let nextWp=null;
+    if(mi+1<orderedMarks.length){
+      const nx=orderedMarks[mi+1];
+      nextWp=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
+    }else if(sfMid)nextWp=sfMid;
+    const bearingIn=prevWp?bear(prevWp.lat,prevWp.lon,curr.lat,curr.lon):null;
+    const bearingOut=nextWp?bear(curr.lat,curr.lon,nextWp.lat,nextWp.lon):null;
+    const res=computeOneSidedGateLine(curr,bearingIn,bearingOut,tack,arm);
+    if(!res||!Number.isFinite(res.gateBearingTwd))continue;
+    const seg=[[res.start.lon,res.start.lat],[res.end.lon,res.end.lat]];
+    const key=gateLineCoordsKey(seg);
+    if(seen.has(key))continue;
+    seen.add(key);
+    const gi=++gNum;
+    const name=String(m.name||"?");
+    const ps=` \u00b7${tack}`;
+    const tag=`One-sided gate ${shortN(name)} ${Math.round(res.gateBearingTwd*10)/10}\u00b0T${ps} \u00b7L${Number(m.lap)|0}`;
+    feats.push({type:"Feature",properties:{kind:"oneSided",g:gi,name,mark:name,lap:Number(m.lap)||0,gateDeg:res.gateBearingTwd,tack,tag},geometry:{type:"LineString",coordinates:seg}});
+    const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
+    {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"oneSided"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+  }
+  return{type:"FeatureCollection",features:feats};
+}
+/** Dev-only: call `__gateLineSelfTest()` from the console; not attached on production hosts. */
+function __gateLineSelfTest(){
+  const rows=[];
+  const add=(label,bIn,bOut,tack,note)=>{
+    const r=computeOneSidedGateLine({lat:0,lon:0},bIn,bOut,tack,180);
+    const g=r&&Number.isFinite(r.gateBearingTwd)?Math.round(r.gateBearingTwd*100)/100:NaN;
+    rows.push({label,bearingIn:bIn,bearingOut:bOut,tack,gateBearingTwd:g,note});
+  };
+  add("Windward port (180/270 P)",180,270,"P","~135° per spec (not ~315 — see vector-sum bisector)");
+  add("Wraparound 355/10 S",355,10,"S","~93°E, no NaN");
+  add("Passing 90/95 P",90,95,"P","~2.5°N");
+  add("Hairpin 0/180 S",0,180,"S","~90°E, no NaN");
+  add("Start null/0 S",null,0,"S","~90°E");
+  add("Finish 270/P",270,null,"P","~180°S");
+  console.table(rows);
+  return rows;
+}
+try{
+  const h=typeof location!=="undefined"&&location.hostname;
+  const proto=typeof location!=="undefined"&&location.protocol;
+  const allowDev=!h||h==="localhost"||h==="127.0.0.1"||proto==="file:";
+  if(typeof window!=="undefined"&&allowDev)window.__gateLineSelfTest=__gateLineSelfTest;
+}catch(_){}
 /** Lateral distance (m) in local ENU from P to the infinite line through C along bearing `lineBearingTwd` (°T). */
 function lateralDistMToLineAtCFromP(latC,lonC,latP,lonP,lineBearingTwd){
   if(!Number.isFinite(lineBearingTwd))return NaN;
@@ -457,55 +572,14 @@ function computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack=null){
   return orientRoundingRayForPortStarboard(brRaw,curr.lat,curr.lon,next.lat,next.lon,tack);
 }
 /**
- * Map overlay: **one** magenta-style line per rounding mark — the infinite bisector ray for outside-angle rounding
- * (`computeRoundingOutsideBisectorBearingDeg`), clipped to `halfLenM` for display (`segmentOneRayBearingTwd`).
+ * Map overlay: one-sided gate line per rounded mark (`buildOneSidedGateFC`); legacy name kept for callers.
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
   const markPositions=lapMarks||[];
   if(!markPositions.length)return{type:"FeatureCollection",features:[]};
   const fullSeq=expandCourseMarks(preamble,markPositions,Math.max(1,Number(laps)||1));
-  if(fullSeq.length<2)return{type:"FeatureCollection",features:[]};
-  const sfMid=sfEnds?.endA&&sfEnds?.endB?{
-    lat:(sfEnds.endA.lat+sfEnds.endB.lat)/2,
-    lon:(sfEnds.endA.lon+sfEnds.endB.lon)/2
-  }:null;
-  const wpFromRow=row=>(row&&row.lat!=null&&row.lon!=null&&Number.isFinite(row.lat)&&Number.isFinite(row.lon)
-    ?{lat:row.lat,lon:row.lon}:null);
-  const shortN=n=>n&&String(n).length>10?String(n).slice(0,9)+"\u2006\u2026":String(n);
-  const feats=[];
-  const seen=new Set();
-  let gNum=0;
-  for(let mi=0;mi<fullSeq.length;mi++){
-    const m=fullSeq[mi];
-    const curr=wpFromRow(m);
-    if(!curr)continue;
-    let prev=null;
-    if(mi>0){
-      const pr=fullSeq[mi-1];
-      prev=wpFromRow(pr)??(String(pr.name)==="START"&&sfMid?sfMid:null);
-    }else if(sfMid)prev=sfMid;
-    let nextW=null;
-    if(mi+1<fullSeq.length){
-      const nx=fullSeq[mi+1];
-      nextW=wpFromRow(nx)??(String(nx.name)==="FINISH"&&sfMid?sfMid:null);
-    }else if(sfMid)nextW=sfMid;
-    if(!prev||!nextW)continue;
-    const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,nextW,m.tack??null);
-    if(br==null||!Number.isFinite(br))continue;
-    const seg=segmentOneRayBearingTwd(curr.lat,curr.lon,br,halfLenM);
-    if(!seg||seg.length<2)continue;
-    const key=gateLineCoordsKey(seg);
-    if(seen.has(key))continue;
-    seen.add(key);
-    const gi=++gNum;
-    const name=String(m.name||"?");
-    const ps=m.tack==="P"||m.tack==="S"?` \u00b7${m.tack}`:"";
-    const tag=`Rnd bisector ${shortN(name)} ${Math.round(br*10)/10}\u00b0T${ps} \u00b7L${Number(m.lap)|0}`;
-    feats.push({type:"Feature",properties:{kind:"rnd",g:gi,mark:name,lap:Number(m.lap)||0,bisDeg:br,tag},geometry:{type:"LineString",coordinates:seg}});
-    const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
-    {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"rnd"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
-  }
-  return{type:"FeatureCollection",features:feats};
+  if(fullSeq.length<1)return{type:"FeatureCollection",features:[]};
+  return buildOneSidedGateFC(fullSeq,halfLenM,sfEnds);
 }
 
 /**
@@ -4231,7 +4305,7 @@ function CourseMap({marks,trackPoints,courseMarks,onMarkDrag,manoeuvres,startFin
         if(map.getSource("leg-gates")){map.getSource("leg-gates").setData(fc);return;}
         if(typeof map.isStyleLoaded==="function"&&!map.isStyleLoaded()){map.once("idle",apply);return;}
         map.addSource("leg-gates",{type:"geojson",data:fc});
-        if(!map.getLayer("leg-gate-rnd"))map.addLayer({id:"leg-gate-rnd",type:"line",source:"leg-gates",filter:["==",["get","kind"],"rnd"],paint:{"line-color":MAP_RND_BISECTOR_LINE,"line-width":2.4,"line-opacity":0.92,"line-dasharray":[0.15,0.15,1,0.15]}});
+        if(!map.getLayer("leg-gate-rnd"))map.addLayer({id:"leg-gate-rnd",type:"line",source:"leg-gates",filter:["==",["get","kind"],"oneSided"],paint:{"line-color":MAP_RND_BISECTOR_LINE,"line-width":2.4,"line-opacity":0.92,"line-dasharray":[0.15,0.15,1,0.15]}});
         if(!map.getLayer("leg-gate-txt"))map.addLayer({id:"leg-gate-txt",type:"symbol",source:"leg-gates",filter:["==",["get","kind"],"gLbl"],layout:{"text-field":["get","tag"],"text-size":9,"text-offset":[0,0.75],"text-allow-overlap":true,"text-optional":true,"text-max-width":22},paint:{"text-color":"#f2ecff","text-halo-color":"#0a1020","text-halo-width":1.2}});
       }catch(e){console.warn("[CourseMap] leg gates",e);}
     };
