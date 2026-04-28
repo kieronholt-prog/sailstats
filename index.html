@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.5.3";
+const SAILSTATS_APP_VERSION="1.5.5";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -2952,10 +2952,11 @@ function manoeuvreIndexMaskNarrow(pts,tacks,gybes,halfWidth=8){
 /**
  * Start-line summary for Overview: signed distance, time early/late (tCross − tStart),
  * % speed at gun vs mean next 30s (excl. manoeuvres).
- * `seriesAnalysis` should be full-track analysis when available: line crossing, gun refine, bow-at-gun and
- * (when it differs from `distAnalysis`) distance-from-line all use the same point array so a tight crop cannot
- * strip pre-start samples needed for those calculations. `distAnalysis` supplies the leg-table distance only
- * when there is no separate full-track run (or as fallback if the series START leg has no line distance).
+ * `seriesAnalysis` should be full-track analysis when available: committee **crossing time** (interpolated),
+ * gun refine, bow-at-gun and (when it differs from `distAnalysis`) distance-from-line all use the same point array
+ * so a tight crop cannot strip pre-start samples. Time early/late = `tCross − tGun` (s), with `tCross` from
+ * `legDiagnostics.legBuild` `committeeLineCrossingIdx` when present, otherwise the line crossing nearest the gun
+ * with segment index ∈ [1 … START leg end] (includes crossings before `startIdx` when START idx is closest-point).
  * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±120 s (see `GUN_CLOCK_REFINE_PAD_SEC`) at 0.5 s steps for bow distance & speeds.
  */
 function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
@@ -2997,19 +2998,37 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
     if(refLat!=null)distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
   }
 
-  const onStartLeg=c=>c.idx>sLeg.startIdx&&c.idx<=sLeg.endIdx;
-  const crossings=detectLineCrossings(sPts,e0,e1).filter(onStartLeg);
+  /** Last segment index for START→mark1 window (committee crossing may lie before START `startIdx`). */
+  const endSeg=Math.max(1,Math.min(sPts.length-1,sLeg.endIdx|0));
   let tCross=null;
-  if(crossings.length){
-    let best=crossings[0],bd=Math.abs(crossings[0].time-tGun);
-    for(const c of crossings){
-      const d=Math.abs(c.time-tGun);
-      if(d<bd){bd=d;best=c;}
+  const lb=ser?.legDiagnostics&&Array.isArray(ser.legDiagnostics.legBuild)?ser.legDiagnostics.legBuild:null;
+  const startRow=lb?.find?.(r=>String(r.status)==="included"&&String(r.from)==="START")??null;
+  const jc=startRow?.committeeLineCrossingIdx;
+  if(jc!=null&&Number.isFinite(jc)){
+    const jj=jc|0;
+    if(jj>=1&&jj<sPts.length){
+      const tIc=interpolatedCommitteeLineCrossingTime(sPts,jj,e0,e1);
+      if(tIc!=null&&Number.isFinite(tIc))tCross=tIc;
     }
-    tCross=best.time;
-  }else{
-    const j=firstCommitteeLineSegmentCrossing(sPts,sLeg.startIdx,sLeg.endIdx,e0,e1);
-    if(j>=0)tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
+  }
+  if(tCross==null||!Number.isFinite(tCross)){
+    const crossings=detectLineCrossings(sPts,e0,e1).filter(c=>{
+      const i=c.idx|0;
+      return i>=1&&i<=endSeg&&Number.isFinite(c.time);
+    });
+    if(crossings.length){
+      let best=crossings[0],bd=Math.abs(crossings[0].time-tGun);
+      for(const cc of crossings){
+        const dd=Math.abs(cc.time-tGun);
+        if(dd<bd){bd=dd;best=cc;}
+      }
+      tCross=best.time;
+    }else{
+      let j=firstCommitteeLineSegmentCrossing(sPts,0,endSeg,e0,e1);
+      if(j<0&&Number.isFinite(sLeg.startIdx)&&sLeg.startIdx>1)
+        j=firstCommitteeLineSegmentCrossing(sPts,Math.max(0,(sLeg.startIdx|0)-1),endSeg,e0,e1);
+      if(j>=0)tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
+    }
   }
   const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tGun:null;
 
@@ -6316,7 +6335,7 @@ function App(){
                 if(t<0)return`${Math.round(-t)}s early`;
                 return`${Math.round(t)}s late`;
               })()}
-              sub="Time from line crossing to start (early) or from start to crossing (late); start = clock time in Setup"
+              sub="Seconds: interpolated committee-line crossing − start signal time (early if negative); uses leg-builder crossing index when available"
               color={(()=>{
                 const t=overviewStartBadges.timeDeltaSec;
                 if(t==null||!Number.isFinite(t))return C.txM;
