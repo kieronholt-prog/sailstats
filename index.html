@@ -1261,6 +1261,62 @@ function nearestPointIndexByClockTime(pts,targetClockSec){
   return bestIdx;
 }
 
+/** Grid step (s) across the segment window bracketing a committee crossing; ~0.5 s target. */
+const LINE_CROSS_REFINE_STEP_SEC=0.5;
+/** Stop bisection refine when |signed perpendicular distance| ≤ this (≈10 cm). */
+const LINE_CROSS_REFINE_DIST_SNAP_M=0.1;
+
+/**
+ * Zero-crossing time (unix s) of signed distance-to-infinite-line (meters) sampled on a 0.5 s time grid across
+ * the segment window [segJ-2→segJ+1] (three chords). On sign change, linear estimate then bisection to
+ * `LINE_CROSS_REFINE_DIST_SNAP_M`. Keeps coarse geometric fallback if the bracket does not straddle zero.
+ */
+function refinedInfinityLineCrossUnixTime(pts,segJ,signedMetersAt,stepSec,fallbackUnix){
+  if(!pts||pts.length<2||segJ<1||segJ>=pts.length||typeof signedMetersAt!=="function")return fallbackUnix??null;
+  const iLo=Math.max(0,segJ-2),iHi=Math.min(pts.length-1,segJ+1);
+  const tA=pts[iLo].time,tB=pts[iHi].time;
+  if(!(tB>tA)||!Number.isFinite(fallbackUnix))return fallbackUnix??null;
+  const step=Math.max(0.1,Math.min(2,Number(stepSec)||LINE_CROSS_REFINE_STEP_SEC));
+  const pStart=interpolatePointByTime(pts,tA);
+  if(!pStart)return fallbackUnix??null;
+  let tPrev=tA,dPrev=signedMetersAt(pStart.lat,pStart.lon);
+  if(!Number.isFinite(dPrev))return fallbackUnix;
+  for(let t=tA+step;t<=tB+1e-9;t+=step){
+    const tt=Math.min(t,tB);
+    const pm=interpolatePointByTime(pts,tt);
+    if(!pm)break;
+    const dm=signedMetersAt(pm.lat,pm.lon);
+    if(!Number.isFinite(dm))break;
+    if(dm===0||(dPrev!==0&&dPrev*dm<=0)){
+      let lo=tPrev,hi=tt,flo=dPrev;
+      const denom=dm-dPrev;
+      let tMid=Math.abs(denom)>1e-14?tPrev+(tt-tPrev)*(-dPrev)/denom:(tPrev+tt)*0.5;
+      for(let k=0;k<18;k++){
+        const pm=interpolatePointByTime(pts,tMid);
+        if(!pm)return fallbackUnix;
+        const fm=signedMetersAt(pm.lat,pm.lon);
+        if(!Number.isFinite(fm))return fallbackUnix;
+        if(Math.abs(fm)<=LINE_CROSS_REFINE_DIST_SNAP_M)return tMid;
+        if(fm===0)break;
+        if(flo!==0&&Math.sign(fm)===Math.sign(flo)){lo=tMid;flo=fm;}
+        else hi=tMid;
+        tMid=(lo+hi)*0.5;
+      }
+      return tMid;
+    }
+    tPrev=tt;dPrev=dm;
+  }
+  return fallbackUnix;
+}
+
+function refinedCommitteeLineCrossUnixTime(pts,segJ,endA,endB){
+  const coarse=interpolatedCommitteeLineCrossingTimeCoarse(pts,segJ,endA,endB);
+  if(coarse==null||!Number.isFinite(coarse))return coarse;
+  const fn=(la,lo)=>signedMetersToABLineLikeCommittee(la,lo,endA.lat,endA.lon,endB.lat,endB.lon);
+  const r=refinedInfinityLineCrossUnixTime(pts,segJ,fn,LINE_CROSS_REFINE_STEP_SEC,coarse);
+  return r!=null&&Number.isFinite(r)?r:coarse;
+}
+
 function detectLineCrossings(pts,endA,endB){
   const out=[];
   if(!pts||pts.length<2||!endA||!endB)return out;
@@ -1272,15 +1328,17 @@ function detectLineCrossings(pts,endA,endB){
     if((s1===0&&s2===0)||s1*s2>0)continue;
     const den=Math.abs(s1)+Math.abs(s2);
     const u=den>1e-9?Math.abs(s1)/den:0.5;
-    const t=p1.time+(p2.time-p1.time)*u;
+    const coarse=p1.time+(p2.time-p1.time)*u;
+    const fn=(la,lo)=>signedMetersToABLineLikeCommittee(la,lo,endA.lat,endA.lon,endB.lat,endB.lon);
+    const t=refinedInfinityLineCrossUnixTime(pts,i,fn,LINE_CROSS_REFINE_STEP_SEC,coarse)??coarse;
     const dir=s2>s1?"A→B":"B→A";
     out.push({time:t,direction:dir,idx:i});
   }
   return out;
 }
 
-/** Interpolated crossing time (Unix s) for segment p[segP2Idx-1]→p[segP2Idx], same as `detectLineCrossings`. */
-function interpolatedCommitteeLineCrossingTime(pts,segP2Idx,endA,endB){
+/** Coarse chord crossing (segment plane); used as seed for `refinedCommitteeLineCrossUnixTime`. */
+function interpolatedCommitteeLineCrossingTimeCoarse(pts,segP2Idx,endA,endB){
   if(!pts||segP2Idx<1||segP2Idx>=pts.length||!endA||!endB)return null;
   const p1=pts[segP2Idx-1],p2=pts[segP2Idx];
   const s1=lineSideValue(p1.lat,p1.lon,endA.lat,endA.lon,endB.lat,endB.lon);
@@ -1290,6 +1348,49 @@ function interpolatedCommitteeLineCrossingTime(pts,segP2Idx,endA,endB){
   const den=Math.abs(s1)+Math.abs(s2);
   const u=den>1e-9?Math.abs(s1)/den:0.5;
   return p1.time+(p2.time-p1.time)*u;
+}
+/** Interpolated crossing time (Unix s) for segment p[segP2Idx-1]→p[segP2Idx]; refined via 0.5 s grid + linear zero-cross on signed perpendicular distance (m). */
+function interpolatedCommitteeLineCrossingTime(pts,segP2Idx,endA,endB){
+  return refinedCommitteeLineCrossUnixTime(pts,segP2Idx,endA,endB);
+}
+
+/** Bow at absolute unix time: linear track interp + segment COG (same as sample-based `gpsPositionToBow`). */
+function gpsPositionToBowAtTime(pts,tAbs,forwardM){
+  if(!pts?.length||!Number.isFinite(tAbs))return null;
+  const p=interpolatePointByTime(pts,tAbs);
+  if(!p)return null;
+  if(!(forwardM>0.05))return{lat:p.lat,lon:p.lon};
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1],b=pts[i];
+    if(tAbs>=a.time&&tAbs<=b.time){
+      const cog=bear(a.lat,a.lon,b.lat,b.lon);
+      if(!Number.isFinite(cog))return{lat:p.lat,lon:p.lon};
+      return destinationPoint(p.lat,p.lon,cog,forwardM);
+    }
+  }
+  const j=nearestTimeIndexInSortedGps(pts,tAbs);
+  return gpsPositionToBow(pts,j,forwardM);
+}
+
+/**
+ * Refine unix time on the track whose clock-of-day best matches `raceClockSec` (0…86400), searching ±2 segments
+ * around `idxGuess` on a 0.5 s raster (start-line distance/time accuracy).
+ */
+function refinedUnixGunFromClockNearby(pts,raceClockSec,idxGuess){
+  if(!pts?.length||!Number.isFinite(raceClockSec))return null;
+  const si=Math.max(0,Math.min(pts.length-1,idxGuess|0));
+  const ta=pts[Math.max(0,si-2)].time;
+  const tb=pts[Math.min(pts.length-1,si+2)].time;
+  if(!(tb>ta))return null;
+  let bestT=null,best=null;
+  for(let u=ta;u<=tb+1e-9;u+=LINE_CROSS_REFINE_STEP_SEC){
+    const tt=Math.min(u,tb);
+    const cs=clockSecondsFromUnix(tt);
+    const d0=Math.abs(cs-raceClockSec);
+    const diff=Math.min(d0,86400-d0);
+    if(best==null||diff<best){best=diff;bestT=tt;}
+  }
+  return bestT;
 }
 
 /** Course row: string name or [name, "P"|"S"] from Course Selector */
@@ -2746,29 +2847,39 @@ function manoeuvreIndexMask(pts,tacks,gybes){
 }
 
 /**
- * Start-line summary for Overview: signed distance (from distAnalysis), time early/late (tCross − tStart),
+ * Start-line summary for Overview: signed distance, time early/late (tCross − tStart),
  * % speed at gun vs mean next 30s (excl. manoeuvres).
- * `seriesAnalysis` should be full-track analysis when available so line crossing and post-start speed use the same time base as Setup (wall-clock start). `distAnalysis` is usually cropped and drives the distance figure.
+ * `seriesAnalysis` should be full-track analysis when available: line crossing, gun refine, bow-at-gun and
+ * (when it differs from `distAnalysis`) distance-from-line all use the same point array so a tight crop cannot
+ * strip pre-start samples needed for those calculations. `distAnalysis` supplies the leg-table distance only
+ * when there is no separate full-track run (or as fallback if the series START leg has no line distance).
+ * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±2 segments @ ${LINE_CROSS_REFINE_STEP_SEC}s for bow distance & speeds.
  */
-function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM){
+function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null){
   if(!distAnalysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
   const ser=seriesAnalysis&&seriesAnalysis.points?.length?seriesAnalysis:distAnalysis;
   const sPts=ser.points;
   const sLeg=ser.legs?.find(l=>l.from==="START");
   if(!sPts.length||!sLeg||sLeg.startIdx==null||sLeg.endIdx==null)return null;
   const dLeg=distAnalysis.legs?.find(l=>l.from==="START");
-  if(!dLeg||dLeg.startIdx==null||dLeg.endIdx==null)return null;
-  const dPts=distAnalysis.points;
   const e0=sfEnds.endA,e1=sfEnds.endB;
 
-  let distM=dLeg.startLineDistanceM;
+  let tGun=tSignalAbs;
+  if(Number.isFinite(raceClockSec)){
+    const gx=nearestTimeIndexInSortedGps(sPts,tSignalAbs);
+    const rg=refinedUnixGunFromClockNearby(sPts,raceClockSec,gx);
+    if(rg!=null&&Number.isFinite(rg))tGun=rg;
+  }
+
+  let distM=Number.isFinite(sLeg.startLineDistanceM)?sLeg.startLineDistanceM:null;
+  if(!Number.isFinite(distM)&&dLeg&&Number.isFinite(dLeg.startLineDistanceM))distM=dLeg.startLineDistanceM;
   if(!Number.isFinite(distM)){
     const firstSpec=WSC_COURSES[courseLetter]?.marks?.[0];
     const firstName=Array.isArray(firstSpec)?firstSpec[0]:firstSpec;
     const fm=firstName?effectiveMarks?.[firstName]:null;
-    const si=Math.max(0,Math.min(dPts.length-1,dLeg.startIdx|0));
-    const bow=gpsPositionToBow(dPts,si,Number(gpsToBowM)||0);
-    const refLat=bow?.lat??dPts[si]?.lat,refLon=bow?.lon??dPts[si]?.lon;
+    const si=Math.max(0,Math.min(sPts.length-1,sLeg.startIdx|0));
+    const bow=gpsPositionToBowAtTime(sPts,tGun,Number(gpsToBowM)||0)||gpsPositionToBow(sPts,si,Number(gpsToBowM)||0);
+    const refLat=bow?.lat??sPts[si]?.lat,refLon=bow?.lon??sPts[si]?.lon;
     if(refLat!=null&&fm&&Number.isFinite(fm.lat)&&Number.isFinite(fm.lon))
       distM=signedDistanceToCommitteeLineM(refLat,refLon,e0,e1,fm.lat,fm.lon);
   }
@@ -2777,9 +2888,9 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
   const crossings=detectLineCrossings(sPts,e0,e1).filter(onStartLeg);
   let tCross=null;
   if(crossings.length){
-    let best=crossings[0],bd=Math.abs(crossings[0].time-tSignalAbs);
+    let best=crossings[0],bd=Math.abs(crossings[0].time-tGun);
     for(const c of crossings){
-      const d=Math.abs(c.time-tSignalAbs);
+      const d=Math.abs(c.time-tGun);
       if(d<bd){bd=d;best=c;}
     }
     tCross=best.time;
@@ -2787,15 +2898,15 @@ function computeStartLineOverviewBadges(distAnalysis,seriesAnalysis,sfEnds,tSign
     const j=firstCommitteeLineSegmentCrossing(sPts,sLeg.startIdx,sLeg.endIdx,e0,e1);
     if(j>=0)tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
   }
-  const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tSignalAbs:null;
+  const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tGun:null;
 
-  const vGun=speedKtsAtTime(sPts,tSignalAbs);
+  const vGun=speedKtsAtTime(sPts,tGun);
   const mask=manoeuvreIndexMask(sPts,ser.tacks,ser.gybes);
   const speeds=[];
   for(let i=0;i<sPts.length;i++){
     const t=sPts[i].time;
-    if(t<=tSignalAbs)continue;
-    if(t>tSignalAbs+30)break;
+    if(t<=tGun)continue;
+    if(t>tGun+30)break;
     if(mask[i])continue;
     const s=ms2k(sPts[i].ss||0);
     if(s>0.05)speeds.push(s);
@@ -5123,7 +5234,7 @@ function App(){
     if(si<0||!workPoints[si])return null;
     const tSig=workPoints[si].time;
     const series=fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20?fullTrackAnalysis:curAnalysis;
-    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM);
+    return computeStartLineOverviewBadges(curAnalysis,series,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed);
   },[curAnalysis,workPoints,sfLineEnds,raceStartSecParsed,courseLetter,effectiveMarks,gpsToBowM,fullTrackAnalysis]);
 
   const markGateMapFC=useMemo(()=>{
