@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.1";
+const SAILSTATS_APP_VERSION="1.6.2";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -3002,9 +3002,11 @@ function manoeuvreIndexMaskNarrow(pts,tacks,gybes,halfWidth=8){
  * `seriesAnalysis` should be full-track analysis when available: committee **crossing time** (interpolated),
  * gun refine, bow-at-gun and (when it differs from `distAnalysis`) distance-from-line all use the same point array
  * so a tight crop cannot strip pre-start samples. Time early/late = `tCross − tGun` (s), with `tCross` from
- * `legDiagnostics.legBuild` `committeeLineCrossingIdx` when present, otherwise the line crossing nearest the gun
+ * line crossing with **nearest** **`|time − gun|`** in-window (not raw leg-build `committeeLineCrossingIdx` — that mirrors map **`cA`**, sometimes an earlier line cross). Fallbacks below.
  * with segment index ∈ [1 … START leg end] (includes crossings before `startIdx` when START idx is closest-point).
  * `raceClockSec`: Setup race-start as seconds 0–86400 — refines unix gun time on ±120 s (see `GUN_CLOCK_REFINE_PAD_SEC`) at 0.5 s steps for bow distance & speeds.
+ * **Crossing time:** Use **nearest** **`|t_cross − t_gun|`** among `detectLineCrossings` ∩ [1 … START.endIdx].
+ * (`legBuild.committeeLineCrossingIdx` aligns with map-gate **`cA`**, often the first crossing of that leg window — including an early OCS/pass-through — so it is **not** used when any crossing exists in-window.)
  */
 function computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,courseLetter,effectiveMarks,gpsToBowM,raceClockSec=null,firstMarkRefName=null){
   if(!distAnalysis?.points?.length||!sfEnds?.endA||!sfEnds?.endB||!Number.isFinite(tSignalAbs))return null;
@@ -3070,48 +3072,45 @@ function computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,c
 
   const endSeg=Math.max(1,Math.min(sPts.length-1,sLeg.endIdx|0));
   let tCross=null,tCrossSource="",tCrossSegIdx=null,tCrossDir=null,fallbackSegJ=null;
+  let tCommitteeIdxCross=null,jc=null;
   const lb=ser?.legDiagnostics&&Array.isArray(ser.legDiagnostics.legBuild)?ser.legDiagnostics.legBuild:null;
   const startRow=lb?.find?.(r=>String(r.status)==="included"&&String(r.from)==="START")??null;
-  const jc=startRow?.committeeLineCrossingIdx;
+  jc=startRow?.committeeLineCrossingIdx;
   if(jc!=null&&Number.isFinite(jc)){
     const jj=jc|0;
     if(jj>=1&&jj<sPts.length){
       const tIc=interpolatedCommitteeLineCrossingTime(sPts,jj,e0,e1);
-      if(tIc!=null&&Number.isFinite(tIc)){
-        tCross=tIc;
-        tCrossSource="legBuild.committeeLineCrossingIdx";
-        tCrossSegIdx=jj;
-      }
+      if(tIc!=null&&Number.isFinite(tIc))tCommitteeIdxCross=tIc;
     }
   }
+
   const allCross=detectLineCrossings(sPts,e0,e1);
   const crossFiltered=allCross.filter(c=>{
     const i=c.idx|0;
     return i>=1&&i<=endSeg&&Number.isFinite(c.time);
   }).map(c=>({idx:c.idx|0,time:c.time,direction:c.direction||"",deltaSec:c.time-tGun}));
   crossFiltered.sort((a,b)=>Math.abs(a.deltaSec)-Math.abs(b.deltaSec));
-  if(tCross==null||!Number.isFinite(tCross)){
-    if(crossFiltered.length){
-      let best=crossFiltered[0],bd=Math.abs(crossFiltered[0].time-tGun);
-      for(const cc of crossFiltered){
-        const dd=Math.abs(cc.time-tGun);
-        if(dd<bd){bd=dd;best=cc;}
-      }
-      tCross=best.time;
-      tCrossSource="nearest |t−tGun| among detectLineCrossings ∩ [1..START.endIdx]";
-      tCrossSegIdx=best.idx;
-      tCrossDir=best.direction||"";
-    }else{
-      let j=firstCommitteeLineSegmentCrossing(sPts,0,endSeg,e0,e1);
-      fallbackSegJ=j;
-      if(j<0&&Number.isFinite(sLeg.startIdx)&&sLeg.startIdx>1)
-        j=firstCommitteeLineSegmentCrossing(sPts,Math.max(0,(sLeg.startIdx|0)-1),endSeg,e0,e1);
-      fallbackSegJ=j;
-      if(j>=0){
-        tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
-        tCrossSource=`firstCommitteeLineSegmentCrossing fallback (seg endpoint j=${j})`;
-        tCrossSegIdx=j;
-      }
+
+  if(crossFiltered.length){
+    const best=crossFiltered[0];
+    tCross=best.time;
+    tCrossSource="nearest |t−tGun| among detectLineCrossings ∩ [1..START.endIdx]";
+    tCrossSegIdx=best.idx;
+    tCrossDir=best.direction||"";
+  }else if(tCommitteeIdxCross!=null&&Number.isFinite(tCommitteeIdxCross)){
+    tCross=tCommitteeIdxCross;
+    tCrossSegIdx=(jc|0)||null;
+    tCrossSource="fallback: legBuild.committeeLineCrossingIdx (no committee crossings detected in-window)";
+  }else{
+    let j=firstCommitteeLineSegmentCrossing(sPts,0,endSeg,e0,e1);
+    fallbackSegJ=j;
+    if(j<0&&Number.isFinite(sLeg.startIdx)&&sLeg.startIdx>1)
+      j=firstCommitteeLineSegmentCrossing(sPts,Math.max(0,(sLeg.startIdx|0)-1),endSeg,e0,e1);
+    fallbackSegJ=j;
+    if(j>=0){
+      tCross=interpolatedCommitteeLineCrossingTime(sPts,j,e0,e1);
+      tCrossSource=`firstCommitteeLineSegmentCrossing fallback (seg endpoint j=${j})`;
+      tCrossSegIdx=j;
     }
   }
   const timeDeltaSec=tCross!=null&&Number.isFinite(tCross)?tCross-tGun:null;
@@ -3159,6 +3158,7 @@ function computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,c
     STARTLeg:{startIdx:sLeg.startIdx,endIdx:sLeg.endIdx,endSeg,to:String(sLeg.to||""),startLineDistanceM:sLeg.startLineDistanceM},
     legBuildSTART:gatingRowJSON(startRow),
     tCross_unix:tCross,
+    tCross_fromCommitteeLineCrossingIdx_unix:tCommitteeIdxCross,
     tCrossSource,
     tCrossSegIdx,
     tCrossDir,
@@ -3173,7 +3173,7 @@ function computeStartLineDetails(distAnalysis,seriesAnalysis,sfEnds,tSignalAbs,c
     crossingCandidatesWindow:crossFiltered.slice(0,12),
     crossingAllTrackFirst35:allCrossPreview,
     fallbackSegmentJ:fallbackSegJ,
-    note:"Signed distance = committee line vs first-mark side (same as Overview). Time = committee perpendicular crossing − tGun. Early means tCross < tGun.",
+    note:"Signed distance = committee line vs first-mark side (same as Overview). Time = chosen crossing − tGun; chosen = nearest |Δt| among in-window crossings (not raw leg-build index, which is map-gate cA). Early means tCross < tGun.",
   };
   return{badges,diagnostics:diag};
 }
@@ -6531,7 +6531,7 @@ function App(){
                 if(t<0)return`${Math.round(-t)}s early`;
                 return`${Math.round(t)}s late`;
               })()}
-              sub="Seconds: interpolated committee-line crossing − start signal time (early if negative); uses leg-builder crossing index when available"
+              sub="Interpolated crossing time − gun: picks the committee-line crossing nearest to gun time within the START leg window (see Start diagnostic)."
               color={(()=>{
                 const t=overviewStartBadges.timeDeltaSec;
                 if(t==null||!Number.isFinite(t))return C.txM;
