@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.5.5";
+const SAILSTATS_APP_VERSION="1.6.0";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -995,6 +995,42 @@ function destinationPoint(lat,lon,bearingDeg,distM){
   while(lonDeg<-180)lonDeg+=360;
   return{lat:φ2/D,lon:lonDeg};
 }
+/**
+ * Appendix S-style course shapes (schematic). `windFromDeg` = meteorological wind FROM (°); beat = `(windFrom+180)%360` °T.
+ * Origin should be committee line midpoint when set, else track start — marks rotate with wind.
+ * Distances approximate championship-style legs (editable by dragging marks).
+ */
+function worldSailingLayoutPositions(wsKind,originLat,originLon,windFromDeg,opts){
+  const leg=opts?.legM??430,off=opts.offM??125,trap=opts?.trapM??410;
+  const wf=((((Number(windFromDeg)||0)%360)+360)%360);
+  const up=((wf+180)%360+360)%360;
+  const dn=(up+180)%360;
+  const stbd=(up+90)%360;
+  const at=(lat,lon,b,m)=>destinationPoint(lat,lon,b,m);
+  const o={lat:originLat,lon:originLon};
+  const WV=at(o.lat,o.lon,up,leg);
+  const LV=at(o.lat,o.lon,dn,leg);
+  const Out={}; const put=(k,p)=>{Out[k]={lat:p.lat,lon:p.lon}};
+  put("WS WV",WV);
+  put("WS LV",LV);
+  switch(String(wsKind||"L")){
+    case"LA":
+    case"WA": put("WS Off",at(WV.lat,WV.lon,stbd,off)); break;
+    case"TL":
+    case"TW": put("WS Wing",at(o.lat,o.lon,(up+118)%360,trap)); break;
+    case"L":
+    case"W":
+    default:break;
+  }
+  return Out;
+}
+/** Start line A/B straddling `origin` (lat/lon °), perpendicular to beat `upTwd`; half-length metres `halfLenM`. */
+function committeeLineEndsPerpendicularToBeat(originLat,originLon,upTwd,halfLenM=30){
+  const along=(Number(upTwd)+90)%360;
+  const a=destinationPoint(originLat,originLon,along,halfLenM);
+  const b=destinationPoint(originLat,originLon,(along+180)%360,halfLenM);
+  return{endA:a,endB:b};
+}
 /** When there is no committee (S/F) mid, the first mark had no `prev` — use a point 500m “before” the first mark, away from the next mark, so in/out gates have valid chord geometry. */
 function virtualPrevForFirstMarkApproach(curr,nextW,distM=500){
   const bCN=bear(curr.lat,curr.lon,nextW.lat,nextW.lon);
@@ -1518,11 +1554,16 @@ const WSC_MARKS={
   "LAID MK B":{lat:50.83494,lon:-1.30201,fixed:false,desc:"Laid mark B"},
   "LAID MK C":{lat:50.84948,lon:-1.31796,fixed:false,desc:"Laid mark C"},
   "LAID MK D":{lat:50.82394,lon:-1.29986,fixed:false,desc:"Laid mark D"},
+  "WS WV":{lat:50.834,lon:-1.303,fixed:false,desc:"World Sailing windward mark (auto-layout)"},
+  "WS LV":{lat:50.830,lon:-1.303,fixed:false,desc:"World Sailing leeward mark (auto-layout)"},
+  "WS Off":{lat:50.833,lon:-1.300,fixed:false,desc:"World Sailing windward offset/spreader (auto-layout)"},
+  "WS Wing":{lat:50.832,lon:-1.307,fixed:false,desc:"World Sailing trapezoid wing mark (auto-layout)"},
 };
 
 /* ═══════════════════════════════════════════════════════════════════
    WSC COURSE DATABASE — 2026/27 (WSC Course Selector)
    marks / marksPreamble: [markName, "P"|"S"] = port / starboard rounding
+   type "ws" courses: positions from `worldSailingLayoutPositions` (wind dial + committee mid / track start)
    ═══════════════════════════════════════════════════════════════════ */
 const WSC_COURSES={
   "A":{name:"A — SC",marks:[["BUOY 11","S"],["PILE 6","S"],["PILE 10","S"]],type:"SC"},
@@ -1548,6 +1589,12 @@ const WSC_COURSES={
   "W":{name:"W — LC",marks:[["WILLIAM","S"],["CHIEFTAIN TR","S"],["FUMESY","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
   "X":{name:"X — LC",marks:[["FUMESY","P"],["CHIEFTAIN TR","P"],["WILLIAM","P"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
   "Y":{name:"Y — LC",marks:[["WILLIAM","S"],["CORONATION","P"],["CHIEFTAIN TR","S"],["FUMESY","S"],["BALD HEAD","S"]],marksPreamble:[["HAMBLE PT","P"]],type:"LC"},
+  "WS_L":{name:"WorldSailing L — W/L & LWd Fin",type:"ws",wsKind:"L",marks:[["WS WV","P"],["WS LV","P"]]},
+  "WS_W":{name:"WorldSailing W — W/L & WWnd Fin",type:"ws",wsKind:"W",marks:[["WS WV","P"],["WS LV","P"]]},
+  "WS_LA":{name:"WorldSailing LA — W/L + offset & LWd Fin",type:"ws",wsKind:"LA",marks:[["WS WV","P"],["WS Off","P"],["WS LV","P"]]},
+  "WS_WA":{name:"WorldSailing WA — W/L + offset & WWnd Fin",type:"ws",wsKind:"WA",marks:[["WS WV","P"],["WS Off","P"],["WS LV","P"]]},
+  "WS_TL":{name:"WorldSailing TL — Trap & LWd Fin",type:"ws",wsKind:"TL",marks:[["WS WV","P"],["WS Wing","P"],["WS LV","P"]]},
+  "WS_TW":{name:"WorldSailing TW — Trap & WWnd Fin",type:"ws",wsKind:"TW",marks:[["WS WV","P"],["WS Wing","P"],["WS LV","P"]]},
   "CUSTOM":{name:"Custom (no marks)",marks:[],type:"custom"},
 };
 
@@ -4807,15 +4854,48 @@ function App(){
     setProcessing(false);
   },[]);
 
+  /** When a World Sailing appendix course is selected, anchor committee ends at track start, ↔ beat axis. Reset when leaving WS. */
+  const wsCourseSfAppliedRef=useRef("");
+  useEffect(()=>{
+    const C=WSC_COURSES[courseLetter||""];
+    if(!courseLetter||!C||C.type!=="ws"){
+      wsCourseSfAppliedRef.current="";
+      return;
+    }
+    if(!workPoints?.length)return;
+    if(wsCourseSfAppliedRef.current===courseLetter)return;
+    wsCourseSfAppliedRef.current=courseLetter;
+    const wf=(windOvr!=null&&Number.isFinite(windOvr))?windOvr:(analysis!=null&&Number.isFinite(analysis.windDir)?analysis.windDir:315);
+    const upTwd=((wf+180)%360+360)%360;
+    const o=workPoints[0];
+    const ends=committeeLineEndsPerpendicularToBeat(o.lat,o.lon,upTwd,32);
+    const fmt=p=>`${p.lat}, ${p.lon}`;
+    setSfLineEndAText(fmt(ends.endA));
+    setSfLineEndBText(fmt(ends.endB));
+  },[courseLetter,workPoints,windOvr,analysis?.windDir]);
+
   // Get effective mark positions for selected course; roundTack = single P/S in expanded order, or null if mixed
   const effectiveMarks=useMemo(()=>{
     if(!courseLetter||!WSC_COURSES[courseLetter])return{};
     const course=WSC_COURSES[courseLetter];
+    const wfForLayout=(windOvr!=null&&Number.isFinite(windOvr))?windOvr:(analysis!=null&&Number.isFinite(analysis.windDir)?analysis.windDir:315);
+    let wsLay=null;
+    if(course.type==="ws"&&course.wsKind){
+      let oLat=null,oLon=null;
+      if(workPoints&&workPoints[0]){oLat=workPoints[0].lat;oLon=workPoints[0].lon;}
+      else{
+        const ae=parseLatLonPair(sfLineEndAText),be=parseLatLonPair(sfLineEndBText);
+        if(ae&&be){oLat=(ae.lat+be.lat)/2;oLon=(ae.lon+be.lon)/2;}
+      }
+      if(oLat!=null&&oLon!=null)wsLay=worldSailingLayoutPositions(course.wsKind,oLat,oLon,wfForLayout);
+    }
     const posForName=name=>{
       const base=WSC_MARKS[name];
       if(!base)return null;
       const ovr=markOverrides[name];
-      return{lat:ovr?ovr.lat:base.lat,lon:ovr?ovr.lon:base.lon};
+      let lat=base.lat,lon=base.lon;
+      if(wsLay&&wsLay[name]&&Number.isFinite(wsLay[name].lat)){lat=wsLay[name].lat;lon=wsLay[name].lon;}
+      return{lat:ovr?ovr.lat:lat,lon:ovr?ovr.lon:lon};
     };
     const preRows=(course.marksPreamble||[]).map(parseMarkSpec).filter(r=>r.name);
     const mainRows=(course.marks||[]).map(parseMarkSpec).filter(r=>r.name);
@@ -4834,12 +4914,14 @@ function App(){
       const base=WSC_MARKS[name];
       if(!base)return;
       const ovr=markOverrides[name];
+      let lat=base.lat,lon=base.lon;
+      if(wsLay&&wsLay[name]&&Number.isFinite(wsLay[name].lat)){lat=wsLay[name].lat;lon=wsLay[name].lon;}
       const ts=tackSetByName[name];
       let roundTack=null;
       if(ts&&ts.size===1)roundTack=[...ts][0];
       marks[name]={
-        lat:ovr?ovr.lat:base.lat,
-        lon:ovr?ovr.lon:base.lon,
+        lat:ovr?ovr.lat:lat,
+        lon:ovr?ovr.lon:lon,
         fixed:false,
         desc:base.desc||"",
         name,
@@ -4847,7 +4929,7 @@ function App(){
       };
     });
     return marks;
-  },[courseLetter,markOverrides,laps]);
+  },[courseLetter,markOverrides,laps,windOvr,analysis?.windDir,workPoints]);
 
   const windTuning=useMemo(()=>{
     const n=windwardMarkName&&String(windwardMarkName).trim();
@@ -6045,6 +6127,9 @@ function App(){
               <option value="">— Select course —</option>
               {Object.entries(WSC_COURSES).map(([k,v])=><option key={k} value={k}>{v.name}</option>)}
             </select>
+            {courseLetter&&WSC_COURSES[courseLetter]?.type==="ws"&&<div style={{fontSize:11,color:C.txM,marginTop:7,lineHeight:1.45}}>
+              Appendix-style layout from your <strong style={{color:C.txt}}>first track fix</strong> and <strong style={{color:C.txt}}>wind FROM</strong>: marks reposition when the dial changes. On first picking a World Sailing course, the committee line is centred on track start square to the beat (drag ends after that keeps your edits).
+            </div>}
           </div>
           <div style={{flex:1,minWidth:80}}>
             <label style={{fontSize:11,color:C.txM,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Laps</label>
