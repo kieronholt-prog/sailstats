@@ -1468,8 +1468,7 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     sfLineEndBText: courseSetup.sfLineEndBText,
     windwardMark: courseSetup.windwardMark,
   });
-  const isFile=String(activityId).startsWith("file-");
-  const snap=isFile?serializableAnalysisSnapshot(results):null;
+  const snap=serializableAnalysisSnapshot(results);
   const baseRow={
     strava_id: stravaId,
     activity_id: String(activityId),
@@ -4147,6 +4146,8 @@ function App(){
   const [timelineScroll,setTimelineScroll]=useState(0);
   const fileRef=useRef(null);
   const fileRefSavedSummary=useRef(null);
+  /** After loading Strava streams for a saved row without snapshot, run `doAnalysis` once when crop is ready. */
+  const pendingAutoAnalysisAfterStravaLoadRef=useRef(false);
 
   useEffect(()=>{
     try{localStorage.setItem(LS_GPS_TO_BOW_M_KEY,String(gpsToBowM));}catch(_){}
@@ -4386,8 +4387,9 @@ function App(){
     setRenameBusy(false);
   },[session,sAth,renameDraft]);
 
-  const loadStravaActivity=useCallback(async(act, nextView = "course-setup")=>{
+  const loadStravaActivity=useCallback(async(act, nextView = "course-setup", opts = {})=>{
     if(!session?.strava?.linked)return;
+    if(!opts.autoAnalyze)pendingAutoAnalysisAfterStravaLoadRef.current=false;
     setProcessing(true);setSetupSaveMsg(null);
     const preSaved=savedByActId[String(act.id)];
     setActName((preSaved?.activity_name&&String(preSaved.activity_name).trim())||act.name);
@@ -4426,6 +4428,7 @@ function App(){
           }
         }
         setView(nextView);
+        if(opts.autoAnalyze&&nextView==="course-setup")pendingAutoAnalysisAfterStravaLoadRef.current=true;
       }else{alert("No GPS stream for this activity.");}
     }catch(e){console.error(e);alert("Failed to load activity")}
     setProcessing(false);
@@ -4754,6 +4757,15 @@ function App(){
   const doAnalysisRef=useRef(doAnalysis);
   doAnalysisRef.current=doAnalysis;
 
+  useEffect(()=>{
+    if(!pendingAutoAnalysisAfterStravaLoadRef.current)return;
+    if(processing)return;
+    if(!croppedPoints||croppedPoints.length<20)return;
+    pendingAutoAnalysisAfterStravaLoadRef.current=false;
+    const tm=window.setTimeout(()=>{void doAnalysis();},400);
+    return()=>window.clearTimeout(tm);
+  },[processing,croppedPoints,doAnalysis]);
+
   const saveCourseSetupOnly = useCallback(async () => {
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
     if (sid == null) {
@@ -4832,34 +4844,41 @@ function App(){
         }
       }catch(e){ console.warn("loadAnalysisRow for full analysis:",e); }
     }
-    if(!snap){
-      alert("Full analysis is not stored for this activity yet. Run Supabase migration (analysis_snapshot column) if needed, then open the GPX/FIT from Upload and run analysis once more to save charts and map.");
-      return false;
+    if(snap&&Array.isArray(snap.points)&&snap.points.length>=2){
+      const pts=snap.points;
+      setActId(String(row.activity_id));
+      setActName(row.activity_name&&String(row.activity_name).trim()||(String(row.activity_id).startsWith("file-")?"Uploaded track":"Activity"));
+      setActDate(row.activity_date||row.updated_at||"");
+      setCourseLetter(row.course_letter?String(row.course_letter):"");
+      setLaps(row.laps!=null?Math.max(1,parseInt(row.laps,10)||1):1);
+      setMarkOverrides(row.mark_overrides&&typeof row.mark_overrides==="object"?row.mark_overrides:{});
+      if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
+      else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
+      applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
+      applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
+      if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
+      setRawPoints(pts);
+      applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
+      setAnalysis(snap);
+      setTab("overview");
+      setView("analysis");
+      setSavedSummaryId(null);
+      return true;
     }
-    const pts=snap.points;
-    if(!Array.isArray(pts)||pts.length<2){
-      alert("Saved analysis is missing track points. Upload the file again and run analysis.");
-      return false;
+    const aidStr=String(row.activity_id);
+    if(/^\d+$/.test(aidStr)&&session?.strava?.linked&&sid!=null){
+      const start=row.activity_date||row.updated_at;
+      await loadStravaActivity({
+        id:Number(aidStr),
+        name:(row.activity_name&&String(row.activity_name).trim())||`#${aidStr}`,
+        start_date:start,
+        start_date_local:start,
+      },"course-setup",{autoAnalyze:true});
+      return true;
     }
-    setActId(String(row.activity_id));
-    setActName(row.activity_name&&String(row.activity_name).trim()||"Uploaded track");
-    setActDate(row.activity_date||row.updated_at||"");
-    setCourseLetter(row.course_letter?String(row.course_letter):"");
-    setLaps(row.laps!=null?Math.max(1,parseInt(row.laps,10)||1):1);
-    setMarkOverrides(row.mark_overrides&&typeof row.mark_overrides==="object"?row.mark_overrides:{});
-    if(row.wind_direction!=null&&Number.isFinite(Number(row.wind_direction)))setWindOvr(Number(row.wind_direction));
-    else setWindOvr(snap.windDir!=null?Number(snap.windDir):null);
-    applySfLineEndsFromRow(row.course_setup||{},setSfLineEndAText,setSfLineEndBText);
-    applyWindwardMarkFromRow(row.course_setup||{},setWindwardMarkName);
-    if(snap.detSettings&&typeof snap.detSettings==="object")setDetSettings({...DETECTION_DEFAULTS,...snap.detSettings});
-    setRawPoints(pts);
-    applyCourseSetupCropFromRow(row.course_setup||{},setCropStartText,setCropDurationText);
-    setAnalysis(snap);
-    setTab("overview");
-    setView("analysis");
-    setSavedSummaryId(null);
-    return true;
-  },[session,sAth]);
+    alert("Full analysis is not available on this device yet. For Strava activities: link Strava and sign in here, then open this activity again — we will load GPS from Strava and re-run analysis. For GPX/FIT uploads: sign in with the same email on this device, upload the file again, run Analyse, and wait until save succeeds. Add the analysis_snapshot column if your database is older (see SETUP.md).");
+    return false;
+  },[session,sAth,loadStravaActivity]);
 
   /** Map + detection: hydrated from snapshot if present, else Strava streams for numeric activity id. */
   const openCourseSetupFromSavedRow=useCallback(async (rowIn)=>{
@@ -4945,6 +4964,7 @@ function App(){
       setView("saved-summary");
       return;
     }
+    if(saved&&await openAnalysisFromSavedRow(saved))return;
     await loadStravaActivity(act,"course-setup");
   },[openAnalysisFromSavedRow,loadStravaActivity]);
 
@@ -5211,7 +5231,7 @@ function App(){
           <input ref={fileRef} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
         {compareMode&&<div style={{fontSize:14,color:C.txD,marginBottom:12,lineHeight:1.5}}>Select two activities, then <strong style={{color:C.txt}}>Compare selected</strong>. Uses the last saved analysis (course + stats) from Supabase for each.</div>}
-        {session?.strava?.linked&&<div style={{fontSize:14,color:C.txD,marginBottom:10,lineHeight:1.5}}>From Strava we import <strong style={{color:C.txt}}>Sail</strong> and <strong style={{color:C.txt}}>Windsurf</strong> activities only.</div>}
+        {session?.strava?.linked&&<div style={{fontSize:14,color:C.txD,marginBottom:10,lineHeight:1.5}}>From Strava we import <strong style={{color:C.txt}}>Sail</strong> and <strong style={{color:C.txt}}>Windsurf</strong> activities only. Use <strong style={{color:C.txt}}>the same email sign-in</strong> on your phone so cloud saves match your desktop.</div>}
         {loadingActs&&<div style={{color:C.txM,padding:30,textAlign:"center",fontSize:16}}>Loading...</div>}
         {processing&&<div style={{color:C.acc,padding:30,textAlign:"center",fontSize:16}}>Processing...</div>}
         {activitiesListMerged.some(a=>a.__fromSupabaseOnly)&&<div style={{fontSize:14,color:C.txD,marginBottom:10,lineHeight:1.5}}><strong style={{color:C.txt}}>Uploads</strong> (GPX/FIT) appear here after you run analysis — GPS stays on your device; use the buttons below or <strong>Compare</strong>.</div>}
@@ -5358,7 +5378,7 @@ function App(){
           <button type="button" onClick={()=>fileRefSavedSummary.current?.click()} style={{...btn("transparent",C.acc,C.acc),padding:"10px 18px",fontSize:12,border:`1px solid ${C.acc}`}}>Upload GPX/FIT again</button>
           <input ref={fileRefSavedSummary} type="file" accept=".gpx,.fit" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0])}}/>
         </div>
-        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Re-opening charts and map needs a stored analysis snapshot (saved automatically for file uploads after you run analysis). To change course setup from scratch, upload the same file from the home screen.</div>
+        <div style={{fontSize:11,color:C.txD,marginBottom:16,lineHeight:1.55}}>Re-opening charts and map uses a stored snapshot (saved when you run analysis while signed in — Strava rides and uploads). Same email/password on each device so saves reach Supabase. To change setup from scratch, re-open from Activities or upload again.</div>
         {!r&&<div style={{color:C.txM,padding:20}}>Loading…</div>}
         {r&&<div style={{overflowX:"auto",border:`1px solid ${C.bdr}`,borderRadius:12,background:C.card}}>
           <table style={{width:"100%",borderCollapse:"collapse"}}>
