@@ -275,6 +275,69 @@ const TRACK_LEG_SEGMENT_PALETTE=["#3b82f6","#f59e0b","#10b981","#a855f7","#ef444
 const TRACK_LEG_SKIP_COLOR="#64748b";
 const MAP_RND_BISECTOR_LINE="#a855f7";
 
+/** Strava API brand orange (developers.strava.com/guidelines). */
+const STRAVA_BRAND_ORANGE="#FC5200";
+/**
+ * Strava “slash” mark (simplified path, same geometry family as common Strava wordmarks; list UI only).
+ * Not a substitute for official “Powered by Strava” assets where those are required.
+ */
+function StravaActivityRowIcon({box=38}){
+  const w=Math.max(14,Math.min(22,box-12)),h=w*512/384;
+  return(
+    <div
+      style={{
+        width:box,
+        height:box,
+        borderRadius:8,
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        background:`${STRAVA_BRAND_ORANGE}18`,
+        flexShrink:0,
+      }}
+      title="Strava"
+      aria-hidden
+    >
+      <svg width={w} height={h} viewBox="0 0 384 512" xmlns="http://www.w3.org/2000/svg" style={{display:"block"}}>
+        <path fill={STRAVA_BRAND_ORANGE} d="M158.4 0L7 487.8 89.5 512l147.9-478.9L385 511.9l82.9-23.9L226.9 1.9 158.4 0z"/>
+      </svg>
+    </div>
+  );
+}
+/** GPX vs FIT label from saved/upload display name (expects `.gpx` / `.fit` in name when known). */
+function inferUploadFormatLabel(name){
+  const s=String(name||"").toLowerCase().trim();
+  if(/\.(\s*)?fit\b/i.test(s)||s.endsWith(".fit"))return"FIT";
+  if(/\.(\s*)?gpx\b/i.test(s)||s.endsWith(".gpx"))return"GPX";
+  return"GPX";
+}
+function ManualUploadBadge({fmt,box=38}){
+  const lab=fmt==="FIT"?"FIT":"GPX";
+  return(
+    <div
+      style={{
+        width:box,
+        height:box,
+        borderRadius:6,
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        background:C.acc,
+        flexShrink:0,
+        fontFamily:"'JetBrains Mono',monospace",
+        fontWeight:800,
+        fontSize:lab==="FIT"?11:10,
+        color:C.bg,
+        letterSpacing:lab==="FIT"?0.2:0,
+        lineHeight:1,
+      }}
+      title={`${lab} upload`}
+    >
+      {lab}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    GEO / MATH
    ═══════════════════════════════════════════════════════════════════ */
@@ -4482,7 +4545,7 @@ function App(){
 
   // Handle file upload
   const handleFile=useCallback(async(file)=>{
-    setProcessing(true);setActName(file.name.replace(/\.(gpx|fit)$/i,""));
+    setProcessing(true);setActName(file.name);
     try{
       let pts;
       if(file.name.toLowerCase().endsWith(".fit")){pts=parseFIT(await file.arrayBuffer())}
@@ -5288,6 +5351,8 @@ function App(){
           const picked=comparePick.includes(sidStr);
           const rowKey=act.__fromSupabaseOnly?`sb-${sidStr}`:sidStr;
           const isUpload=!!act.__fromSupabaseOnly;
+          const isFileUpload=String(act.id).startsWith("file-")||(saved&&saved.activity_id!=null&&String(saved.activity_id).startsWith("file-"));
+          const uploadFmt=inferUploadFormatLabel(displayName||act.name||(saved?.activity_name));
           const onRowStripClick=()=>{ if(compareMode)toggleComparePick(act.id); };
           return(
             <div key={rowKey} style={{display:"flex",alignItems:"stretch",gap:8,marginBottom:6}}>
@@ -5310,9 +5375,7 @@ function App(){
                       tabIndex={compareMode?0:-1}
                       style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px 8px 14px",width:"100%",background:"transparent",border:"none",textAlign:"left",cursor:compareMode?"pointer":"default",minWidth:0}}
                     >
-                      <div style={{width:38,height:38,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,background:`${C.blu}22`,flexShrink:0}}>
-                        {isUpload?"📁":(act.type?.includes("Sail")?"⛵":act.type?.includes("Wind")?"🏄":act.type?.includes("Ride")?"🚴":"📍")}
-                      </div>
+                      {isFileUpload?<ManualUploadBadge fmt={uploadFmt} box={38}/>:<StravaActivityRowIcon box={38}/>}
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:4,minWidth:0}}>
                           <div style={{fontSize:17,fontWeight:600,color:C.txt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,minWidth:0}}>{displayName}</div>
