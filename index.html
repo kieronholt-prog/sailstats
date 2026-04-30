@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.7";
+const SAILSTATS_APP_VERSION="1.6.8";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -574,6 +574,7 @@ function computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack=null){
 }
 /**
  * Map overlay: one-sided gate line per rounded mark (`buildOneSidedGateFC`); legacy name kept for callers.
+ * @param {number} [halfLenM] metres — use a **short** value for drawing (see `MARK_GATE_MAP_DRAW_ARM_M`); keep `MARK_GATE_LINE_ARM_M` for geometric distance code only.
  */
 function buildMarkGateDebugFC(preamble,lapMarks,laps,sfEnds,halfLenM=180){
   const markPositions=lapMarks||[];
@@ -1205,7 +1206,10 @@ function lineSideValue(lat,lon,aLat,aLon,bLat,bLon){
  * Long segment from the mark along the map gate (°T), like committee A–B: same **infinite** line for side tests as `lineSideValue` / Start line. 5nm default.
  * @see `firstCommitteeLineSegmentCrossing`
  */
+/** Long segment from mark along gate bearing — matches infinite-line side tests (Start, map leg gates). */
 const MARK_GATE_LINE_ARM_M=5*1852;
+/** Map overlay only: short ray so magenta gates read as local rounding aids, not multi-nm lines through other marks. */
+const MARK_GATE_MAP_DRAW_ARM_M=220;
 function markGateSegmentEndsFromBearingTwd(markLat,markLon,bearingTwd,armM=MARK_GATE_LINE_ARM_M){
   const br=Number(bearingTwd);
   if(!Number.isFinite(br)||!Number.isFinite(markLat)||!Number.isFinite(markLon))return null;
@@ -5729,7 +5733,7 @@ function App(){
 
   const markGateMapFC=useMemo(()=>{
     if(!showMarkGates||!sfLineEnds||!courseMarkSeq.length)return{type:"FeatureCollection",features:[]};
-    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,MARK_GATE_LINE_ARM_M);
+    return buildMarkGateDebugFC(coursePreambleSeq,courseMarkSeq,laps,sfLineEnds,MARK_GATE_MAP_DRAW_ARM_M);
   },[showMarkGates,sfLineEnds,coursePreambleSeq,courseMarkSeq,laps,courseGeomSig]);
 
   /** Shared X domain for stacked speed/wind charts (zoom + scroll without mutating analysis). */
