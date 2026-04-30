@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.10";
+const SAILSTATS_APP_VERSION="1.6.11";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -423,14 +423,18 @@ function markGateLinesEqual(a,b){
  * bisector).
  *
  * @param {{lat:number, lon:number}} mark
- * @param {number|null} bearingInTwd  °T prev→this (approach); null = start mark
- * @param {number|null} bearingOutTwd °T this→next (exit); null = finish mark
+ * @param {number|null} bearingInTwd  True **course** bearing (° clockwise from N), prev→this; null = start mark. Not wind.
+ * @param {number|null} bearingOutTwd Same, this→next; null = finish mark.
  * @param {"P"|"S"} roundingTack
  * @param {number} [halfLenM=180]
- * @param {{lat:number,lon:number}|null} [nextGeo]  Outbound fix — when approach/exit are ~opposite, orient gate with P/S beam vs this leg (same idea as map bisector orientation).
+ * @param {{lat:number,lon:number}|null} [prevGeo] Prev fix — required with `nextGeo` for hairpin path (see below).
+ * @param {{lat:number,lon:number}|null} [nextGeo] Next fix — with `prevGeo`, selects mark-only hairpin bisector.
  * @returns {{ start:{lat:number,lon:number}, end:{lat:number,lon:number}, gateBearingTwd:number } | null}
+ *
+ * **Hairpin** (inbound/outbound bearings nearly opposite): vector-sum bisector is degenerate. Use the same
+ * **mark-only** outside bisector as rounding analysis (`computeRoundingOutsideBisectorBearingDeg`); no wind/TWA.
  */
-function computeOneSidedGateLine(mark,bearingInTwd,bearingOutTwd,roundingTack,halfLenM=180,nextGeo=null){
+function computeOneSidedGateLine(mark,bearingInTwd,bearingOutTwd,roundingTack,halfLenM=180,prevGeo=null,nextGeo=null){
   if(!mark||!Number.isFinite(mark.lat)||!Number.isFinite(mark.lon))return null;
   if(roundingTack!=="P"&&roundingTack!=="S")return null;
   const hasIn=bearingInTwd!=null&&Number.isFinite(Number(bearingInTwd));
@@ -448,11 +452,18 @@ function computeOneSidedGateLine(mark,bearingInTwd,bearingOutTwd,roundingTack,ha
     else vBisector={x:sx/len,y:sy/len};
   }else if(vIn)vBisector=vIn;
   else vBisector=vOut;
-  const bisectorTwd=(Math.atan2(vBisector.x,vBisector.y)/D+360)%360;
-  const rawGate=roundingTack==="S"?(bisectorTwd+90)%360:(bisectorTwd+270)%360;
-  let gateBearingTwd=(rawGate+180)%360;
-  if(hairpinLeg&&nextGeo&&Number.isFinite(nextGeo.lat)&&Number.isFinite(nextGeo.lon))
-    gateBearingTwd=orientOneSidedGateRayForPortStarboard(gateBearingTwd,mark.lat,mark.lon,nextGeo.lat,nextGeo.lon,roundingTack);
+  let gateBearingTwd=null;
+  if(hairpinLeg&&prevGeo&&nextGeo
+    &&Number.isFinite(prevGeo.lat)&&Number.isFinite(prevGeo.lon)
+    &&Number.isFinite(nextGeo.lat)&&Number.isFinite(nextGeo.lon)){
+    const brBio=computeRoundingOutsideBisectorBearingDeg(prevGeo,mark,nextGeo,roundingTack);
+    if(brBio!=null&&Number.isFinite(brBio))gateBearingTwd=brBio;
+  }
+  if(!Number.isFinite(gateBearingTwd)){
+    const bisectorTwd=(Math.atan2(vBisector.x,vBisector.y)/D+360)%360;
+    const rawGate=roundingTack==="S"?(bisectorTwd+90)%360:(bisectorTwd+270)%360;
+    gateBearingTwd=(rawGate+180)%360;
+  }
   const arm=Math.max(1,Number.isFinite(Number(halfLenM))?Number(halfLenM):180);
   const end=destinationPoint(mark.lat,mark.lon,gateBearingTwd,arm);
   return{start:{lat:mark.lat,lon:mark.lon},end,gateBearingTwd};
@@ -501,7 +512,7 @@ function buildOneSidedGateFC(orderedMarks,halfLenM=180,sfEnds=null){
     }else if(sfMid)nextWp=sfMid;
     const bearingIn=prevWp?bear(prevWp.lat,prevWp.lon,curr.lat,curr.lon):null;
     const bearingOut=nextWp?bear(curr.lat,curr.lon,nextWp.lat,nextWp.lon):null;
-    const res=computeOneSidedGateLine(curr,bearingIn,bearingOut,tack,arm,nextWp);
+    const res=computeOneSidedGateLine(curr,bearingIn,bearingOut,tack,arm,prevWp,nextWp);
     if(!res||!Number.isFinite(res.gateBearingTwd))continue;
     const seg=[[res.start.lon,res.start.lat],[res.end.lon,res.end.lat]];
     const key=gateLineCoordsKey(seg);
@@ -1274,20 +1285,6 @@ function orientRoundingRayForPortStarboard(br0,currLat,currLon,nextLat,nextLon,t
   const s=signedMetersToABLineLikeCommittee(ref.lat,ref.lon,g.aLat,g.aLon,g.bLat,g.bLon);
   if(!Number.isFinite(s)||Math.abs(s)<1e-4)return br0;
   return s>=0?((br0+180)%360):br0;
-}
-/** Same half-plane rule as `orientRoundingRayForPortStarboard`, for map one-sided **gate** rays when inbound/outbound bearings oppose (hairpin: same channel in & out). */
-function orientOneSidedGateRayForPortStarboard(gateBr0,currLat,currLon,nextLat,nextLon,tack){
-  if((tack!=="P"&&tack!=="S")||gateBr0==null||!Number.isFinite(gateBr0))return gateBr0;
-  if(nextLat==null||nextLon==null||!Number.isFinite(nextLat)||!Number.isFinite(nextLon))return gateBr0;
-  const out=bear(currLat,currLon,nextLat,nextLon);
-  if(!Number.isFinite(out))return gateBr0;
-  const beamBr=((tack==="P"?out-90:out+90)%360+360)%360;
-  const ref=destinationPoint(currLat,currLon,beamBr,ORIENT_ROUNDING_REF_M);
-  const g=markGateSegmentEndsFromBearingTwd(currLat,currLon,gateBr0,MARK_GATE_LINE_ARM_M);
-  if(!g)return gateBr0;
-  const s=signedMetersToABLineLikeCommittee(ref.lat,ref.lon,g.aLat,g.aLon,g.bLat,g.bLon);
-  if(!Number.isFinite(s)||Math.abs(s)<1e-4)return gateBr0;
-  return s>=0?((gateBr0+180)%360):gateBr0;
 }
 function roundingBisectorSideFn(prev,curr,next,tack){
   const br=computeRoundingOutsideBisectorBearingDeg(prev,curr,next,tack);
