@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.6";
+const SAILSTATS_APP_VERSION="1.6.7";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -1758,7 +1758,7 @@ function unknownAnalysisSnapshotColumn(err){
   return s.includes("analysis_snapshot")&&(s.includes("column")||s.includes("schema")||s.includes("could not find")||s.includes("does not exist"));
 }
 
-async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup) {
+async function saveAnalysis(stravaId, activityId, activityName, activityDate, results, courseSetup, distanceFromLineAtStartM=null) {
   if(!(await ensureSupabaseUserJwtFromSession())){
     return{ok:false,error:"Not signed in to SailStats (email/password) — Supabase RLS needs your user token to save. Use Sign in, then run Analyse or Save course setup again."};
   }
@@ -1784,7 +1784,10 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
     wind_direction: results.windDir,
     mark_overrides: courseSetup.markOverrides || {},
     course_setup,
-    stats: results.stats,
+    stats: {
+      ...(results.stats&&typeof results.stats==="object"?results.stats:{}),
+      distanceFromLineAtStartM:(distanceFromLineAtStartM!=null&&Number.isFinite(distanceFromLineAtStartM))?distanceFromLineAtStartM:null,
+    },
     tack_scores: results.tacks.map(t => ({ q: t.q, ch: t.ch, preS: t.preS, minS: t.minS, rt: t.rt, crossing: t.crossing, mark: t.markRounding?.mark ?? null, markSplit: t.markRounding?.splitRole ?? null, excluded: !!t.excludeFromStatsAndVMG, nearestMark: t.nearestMarkName ?? null })),
     gybe_scores: results.gybes.map(g => ({ q: g.q, ch: g.ch, preS: g.preS, minS: g.minS, rt: g.rt, crossing: g.crossing, mark: g.markRounding?.mark ?? null, markSplit: g.markRounding?.splitRole ?? null, excluded: !!g.excludeFromStatsAndVMG, nearestMark: g.nearestMarkName ?? null })),
     leg_summary: results.legs.map((l,idx) => ({
@@ -1855,12 +1858,21 @@ function meanNumeric(arr){
   return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
 }
 
-/** Signed committee-line distance on START legs from persisted `leg_summary`. */
+/** Signed committee-line distance on START legs from persisted `leg_summary` (legacy fallback only). */
 function startLineMetersFromSavedLegSummary(legSummary){
   if(!Array.isArray(legSummary)||!legSummary.length)return null;
   const leg=legSummary.find(l=>l&&String(l.from)==="START");
   const v=leg?.startLineDistanceM;
   return v!=null&&Number.isFinite(v)?v:null;
+}
+
+/** Signed distance in metres: prefers saved Overview “distance to line at start”; fallback legacy START leg row from `leg_summary`. */
+function distanceFromLineAtStartMForTrendsRow(row){
+  if(!row||typeof row!=="object")return null;
+  const s=row.stats&&typeof row.stats==="object"?row.stats:null;
+  const v=s?.distanceFromLineAtStartM;
+  if(v!=null&&Number.isFinite(v))return v;
+  return startLineMetersFromSavedLegSummary(row.leg_summary);
 }
 
 /** Weighted σ SOG / σ COG across port vs starboard upwind tack samples from saved `stats.tackStatsByLegType.upwind`. */
@@ -1908,7 +1920,7 @@ function buildSavedTrendChartRows(savedByActId){
       label,
       shortLabel:slug,
       dateMs:d&&Number.isFinite(d.getTime())?d.getTime():0,
-      startLineM:startLineMetersFromSavedLegSummary(r.leg_summary),
+      distFromLineAtStart:distanceFromLineAtStartMForTrendsRow(r),
       upwindSpeedStd:speedVar,
       upwindCourseStd:courseVar,
       tackQ:Number.isFinite(s.avgTackQuality)?s.avgTackQuality:null,
@@ -1920,7 +1932,7 @@ function buildSavedTrendChartRows(savedByActId){
 
 /** Y-domain for Trends start-line chart: pads signed metres and always brackets 0 so course-side negatives are visible with the y=0 line */
 function startLineTrendSignedDomM(rows){
-  const vals=(rows||[]).map(r=>r.startLineM).filter(v=>v!=null&&Number.isFinite(v));
+  const vals=(rows||[]).map(r=>r.distFromLineAtStart).filter(v=>v!=null&&Number.isFinite(v));
   if(!vals.length)return[-80,120];
   const lo=Math.min(...vals), hi=Math.max(...vals);
   const rng=Math.max(Math.abs(hi-lo),Math.abs(lo),Math.abs(hi));
@@ -5354,6 +5366,19 @@ function App(){
     setTab("overview");
     setView("analysis");
     const sid = session?.strava?.athlete?.id ?? sAth?.id;
+    let distanceFromLineAtStartM=null;
+    try{
+      const analysisForStartLine=(fullTrackAnalysis&&fullTrackAnalysis.points?.length>=20)?fullTrackAnalysis:result;
+      if(workPoints?.length&&sfLineEnds?.endA&&sfLineEnds?.endB){
+        const si=nearestPointIndexByClockTime(workPoints,raceStartSecParsed);
+        if(si>=0&&workPoints[si]&&Number.isFinite(workPoints[si].time)){
+          const tSig=workPoints[si].time;
+          const sl=computeStartLineDetails(result,analysisForStartLine,sfLineEnds,tSig,courseLetter,effectiveMarks,gpsToBowM,raceStartSecParsed,firstRoundingMarkRefName);
+          const dm=sl?.badges?.distM;
+          if(dm!=null&&Number.isFinite(dm))distanceFromLineAtStartM=dm;
+        }
+      }
+    }catch(e){ try{console.warn("distanceFromLineAtStart persist:",e);}catch(_){} }
     if (sid != null && result) {
       try {
         const saveRes = await saveAnalysis(sid, actId, actName, actDate, result, {
@@ -5367,7 +5392,7 @@ function App(){
           sfLineEndAText,
           sfLineEndBText,
           windwardMark: windwardMarkName,
-        });
+        }, distanceFromLineAtStartM);
         if (saveRes && saveRes.ok === false) {
           setLastSupabaseSaveError(
             `Analysis save: ${saveRes.error || "unknown error"}. Charts are on this device only until save succeeds.`
@@ -5410,6 +5435,10 @@ function App(){
     windwardMarkName,
     refreshSavedAnalyses,
     gpsToBowM,
+    fullTrackAnalysis,
+    effectiveMarks,
+    firstRoundingMarkRefName,
+    raceStartSecParsed,
   ]);
 
   const doAnalysisRef=useRef(doAnalysis);
@@ -6031,9 +6060,9 @@ function App(){
         ):(
           <div style={{display:"flex",flexDirection:"column",gap:22}}>
             <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:14,padding:"14px 16px"}}>
-              <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Start line · signed distance</div>
-              <div style={{fontSize:11,color:C.txD,marginBottom:10,lineHeight:1.45}}>Bow distance from committee line on the START leg (<strong style={{color:C.txt}}>leg_summary</strong>). Negative = course side per saved diagnostics.</div>
-              <div style={{width:"100%",height:268}}><ResponsiveContainer><BarChart data={tr} margin={{top:16,right:8,left:4,bottom:4}}><CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/><XAxis type="category" dataKey="label" stroke={C.txM} {...axisProps}/><YAxis stroke={C.txM} tick={{fill:C.txD,fontSize:10}} domain={startYm} tickFormatter={(v)=>Math.round(Number(v)).toString()} label={{value:"m (signed)",angle:-90,position:"insideLeft",fill:C.txD,fontSize:10}}/><Tooltip {...tooltipStyle} formatter={(v)=>[`${typeof v==="number"?Math.round(v*10)/10:v} m`,"distance"]}/><ReferenceLine y={0} stroke={C.acc} strokeOpacity={0.6}/><Bar dataKey="startLineM" name="distance" fill={C.acc} radius={[4,4,0,0]}>{tr.map((d,i)=>{const ok=d.startLineM!=null&&Number.isFinite(d.startLineM);const col=ok?(d.startLineM<0?C.wrn:C.acc):"#445577";return<Cell key={d.id||i} fill={col} fillOpacity={ok?1:0.25}/>;})}</Bar></BarChart></ResponsiveContainer></div>
+              <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Distance from line at start time</div>
+              <div style={{fontSize:11,color:C.txD,marginBottom:10,lineHeight:1.45}}>Same as Overview <strong style={{color:C.txt}}>Distance to line at start</strong> (bow at gun, signed to first-mark reference). Stored in <strong style={{color:C.txt}}>stats.distanceFromLineAtStartM</strong> when you run Analyse while signed in. Negative = course side. Older saves without that field use START leg distance from the saved legs table.</div>
+              <div style={{width:"100%",height:268}}><ResponsiveContainer><BarChart data={tr} margin={{top:16,right:8,left:4,bottom:4}}><CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/><XAxis type="category" dataKey="label" stroke={C.txM} {...axisProps}/><YAxis stroke={C.txM} tick={{fill:C.txD,fontSize:10}} domain={startYm} tickFormatter={(v)=>Math.round(Number(v)).toString()} label={{value:"m (signed)",angle:-90,position:"insideLeft",fill:C.txD,fontSize:10}}/><Tooltip {...tooltipStyle} formatter={(v)=>[`${typeof v==="number"?Math.round(v*10)/10:v} m`,"distance"]}/><ReferenceLine y={0} stroke={C.acc} strokeOpacity={0.6}/><Bar dataKey="distFromLineAtStart" name="distance" fill={C.acc} radius={[4,4,0,0]}>{tr.map((d,i)=>{const ok=d.distFromLineAtStart!=null&&Number.isFinite(d.distFromLineAtStart);const col=ok?(d.distFromLineAtStart<0?C.wrn:C.acc):"#445577";return<Cell key={d.id||i} fill={col} fillOpacity={ok?1:0.25}/>;})}</Bar></BarChart></ResponsiveContainer></div>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.bdr}`,borderRadius:14,padding:"14px 16px"}}>
               <div style={{fontSize:13,fontWeight:700,color:C.txt,marginBottom:4}}>Upwind · speed & COG variability</div>
