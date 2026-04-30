@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.12";
+const SAILSTATS_APP_VERSION="1.6.13";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -1834,8 +1834,9 @@ async function saveAnalysis(stravaId, activityId, activityName, activityDate, re
       to: l.to,
       type: l.type,
       avgSpeed: l.avgSpeed,
-      avgVmc: l.avgVmc != null && Number.isFinite(l.avgVmc) ? l.avgVmc : l.avgVMG,
-      avgVMG: l.avgVmc != null && Number.isFinite(l.avgVmc) ? l.avgVmc : l.avgVMG,
+      avgVmc: l.avgVmc != null && Number.isFinite(l.avgVmc) ? l.avgVmc : null,
+      avgVMG: l.avgVmgToWind != null && Number.isFinite(l.avgVmgToWind) ? l.avgVmgToWind : (l.avgVMG != null && Number.isFinite(l.avgVMG) ? l.avgVMG : null),
+      avgVmgToWind: l.avgVmgToWind != null && Number.isFinite(l.avgVmgToWind) ? l.avgVmgToWind : null,
       chordProgressKts: l.chordProgressKts != null && Number.isFinite(l.chordProgressKts) ? l.chordProgressKts : null,
       markChordM: l.markChordM != null && Number.isFinite(l.markChordM) ? l.markChordM : null,
       markChordBearingDeg: l.markChordBearingDeg != null && Number.isFinite(l.markChordBearingDeg) ? l.markChordBearingDeg : null,
@@ -2054,7 +2055,12 @@ function buildComparePrintHtml(ctx){
   const m2nmP=(m)=>m!=null&&Number.isFinite(m)?(m/1852).toFixed(2):"—";
   const fPD=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
   const tackVmgKts=(p)=>p!=null&&typeof p==="object"?(p.avgVmgToWind!=null&&Number.isFinite(p.avgVmgToWind)?p.avgVmgToWind:(p.avgVMG!=null&&Number.isFinite(p.avgVMG)?p.avgVMG:null)):null;
-  const legVmcKts=(l)=>l!=null&&typeof l==="object"?(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null)):null;
+  const legVmcKts=(l)=>{
+    if(l==null||typeof l!=="object")return null;
+    if(l.avgVmc!=null&&Number.isFinite(l.avgVmc))return l.avgVmc;
+    if((l.avgVmgToWind==null||!Number.isFinite(l.avgVmgToWind))&&l.avgVMG!=null&&Number.isFinite(l.avgVMG))return l.avgVMG;
+    return null;
+  };
   const legChordKts=(l)=>l&&l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts:null;
   const rowSpd=(t,pfx)=>{
     if(!t||!t[pfx]||!t[pfx].n)return"—";
@@ -4246,11 +4252,29 @@ function runAnalysis(rawPts,userWind=null,markPositions=null,laps=1,preamble=nul
     let vmcs=sampleLegVmcs(true);
     if(!vmcs.length)vmcs=sampleLegVmcs(false);
     const avgVmc=vmcs.length?vmcs.reduce((a,b)=>a+b,0)/vmcs.length:null;
+    const sampleLegVmgToWind=(skipRounding)=>{
+      const vmgs=[],wts=[];
+      for(let i=l.startIdx;i<=l.endIdx&&i<en.length;i++){
+        if(skipRounding&&roundingPointMask[i])continue;
+        const p=en[i];
+        const s=ms2k(p.ss||0);
+        if(s<0.3)continue;
+        const v=vmgToWindKts(s,p.cog,wd);
+        if(v==null||!Number.isFinite(v))continue;
+        vmgs.push(v);
+        wts.push(pointTimeWeightSec(en,i));
+      }
+      if(!vmgs.length)return null;
+      const wSum=wts.reduce((a,b)=>a+b,0);
+      return wSum>0?vmgs.reduce((s,v,j)=>s+v*wts[j],0)/wSum:vmgs.reduce((a,b)=>a+b,0)/vmgs.length;
+    };
+    let avgVmgToWind=sampleLegVmgToWind(true);
+    if(avgVmgToWind==null||!Number.isFinite(avgVmgToWind))avgVmgToWind=sampleLegVmgToWind(false);
     const durSec=l.duration>0?l.duration:(l.endIdx!=null&&l.startIdx!=null&&en[l.endIdx]&&en[l.startIdx])
       ?en[l.endIdx].time-en[l.startIdx].time:0;
     let chordProgressKts=null;
     if(Number.isFinite(l.markChordM)&&l.markChordM>0&&durSec>0)chordProgressKts=(m2nm(l.markChordM)*3600)/durSec;
-    return{...l,avgVmc,avgVMG:avgVmc,chordProgressKts,vmcChordBearingDeg:Number.isFinite(courseBrg)?Math.round(courseBrg):null};
+    return{...l,avgVmc,avgVmgToWind,avgVMG:avgVmgToWind,chordProgressKts,vmcChordBearingDeg:Number.isFinite(courseBrg)?Math.round(courseBrg):null};
   });
 
   const streaks={};
@@ -6161,7 +6185,7 @@ function App(){
     const title=(r?.activity_name&&String(r.activity_name).trim())||(savedSummaryId&&savedSummaryId.startsWith("file-")?"Uploaded track":`#${savedSummaryId}`);
     const s=r?.stats;
     const leg=r?.leg_summary;
-    const mv=meanNumeric((leg||[]).map(l=>(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:l.avgVMG)));
+    const mv=meanNumeric((leg||[]).map(l=>(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:null)));
     const tack=r?.tack_scores,gyb=r?.gybe_scores;
     const avgTk=(arr)=>{const q=(arr||[]).filter(t=>!t.excluded&&Number.isFinite(t.q));return q.length?Math.round(q.reduce((a,t)=>a+t.q,0)/q.length):null;};
     const avgGy=(arr)=>{const q=(arr||[]).filter(g=>!g.excluded&&Number.isFinite(g.q));return q.length?Math.round(q.reduce((a,g)=>a+g.q,0)/q.length):null;};
@@ -6229,7 +6253,12 @@ function App(){
     const fmtPDeg=(v)=>v==null||!Number.isFinite(v)?"—":`${Number(v).toFixed(1)}°`;
     const wind0=r0?.wind_direction!=null&&Number.isFinite(Number(r0.wind_direction))?Math.round(Number(r0.wind_direction)):"—";
     const w1fix=r1?.wind_direction!=null&&Number.isFinite(Number(r1.wind_direction))?Math.round(Number(r1.wind_direction)):"—";
-    const legVmcKts=(l)=>l&&(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null));
+    const legVmcKts=(l)=>{
+      if(!l||typeof l!=="object")return null;
+      if(l.avgVmc!=null&&Number.isFinite(l.avgVmc))return l.avgVmc;
+      if((l.avgVmgToWind==null||!Number.isFinite(l.avgVmgToWind))&&l.avgVMG!=null&&Number.isFinite(l.avgVMG))return l.avgVMG;
+      return null;
+    };
     const legChordKts=(l)=>l&&l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts:null;
     const rowSpd=(t,pfx)=>{
       if(!t||!t[pfx]||!t[pfx].n)return"—";
@@ -7076,27 +7105,29 @@ function App(){
         {/* LEGS */}
         {tab==="legs"&&<>
           {a.legs.length>0?<>
-            <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:6,padding:"6px 8px",marginBottom:4}}>
-              <div style={{width:56}}>From→To</div>
-              <div style={{width:50}}>Type</div>
-              <div style={{flex:1,minWidth:80}}>Dist</div>
-              <div style={{width:44}}>Time</div>
-              <div style={{width:40}}>Spd</div>
-              <div style={{width:36}}>VMC</div>
-              <div style={{width:40}}>Chord</div>
-              <div style={{width:32}}>Eff</div>
+            <div style={{fontSize:10,color:C.txD,textTransform:"uppercase",letterSpacing:1,display:"flex",gap:8,padding:"6px 8px",marginBottom:4,alignItems:"baseline"}}>
+              <div style={{width:"14ch",flexShrink:0}}>From→To</div>
+              <div style={{width:"5.5ch",flexShrink:0}}>Type</div>
+              <div style={{width:"6ch",flexShrink:0,textAlign:"right"}}>Chord</div>
+              <div style={{width:"8ch",flexShrink:0,textAlign:"right"}}>Trk dist</div>
+              <div style={{width:"5ch",flexShrink:0,textAlign:"right"}}>Speed</div>
+              <div style={{width:"5ch",flexShrink:0,textAlign:"right"}}>VMG</div>
+              <div style={{width:"5ch",flexShrink:0,textAlign:"right"}}>VMC</div>
+              <div style={{width:"7ch",flexShrink:0,textAlign:"right"}}>Leg eff%</div>
             </div>
             {a.legs.map((l,i)=>{
               const tc=l.type==="upwind"?C.up:l.type==="downwind"?C.dn:C.txM;
+              const showVmg=l.type==="upwind"||l.type==="downwind";
+              const vmgVal=l.avgVmgToWind!=null&&Number.isFinite(l.avgVmgToWind)?l.avgVmgToWind:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null);
               return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:C.card,borderRadius:8,marginBottom:3,border:`1px solid ${C.bdr}`,fontSize:11}}>
-                <div style={{width:60,color:C.txt,fontWeight:600,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.from}→{l.to}</div>
-                <div style={{width:55,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
-                <div style={{flex:1,color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{l.startLineDistanceM!=null&&Number.isFinite(l.startLineDistanceM)?(<>Distance from line <span style={{color:Math.round(l.startLineDistanceM)<0?C.wrn:C.acc,fontWeight:600}}>{Math.round(l.startLineDistanceM)}m</span> · </>):null}Trk {m2nm(l.distance).toFixed(2)}nm</div>
-                <div style={{width:44,color:C.txM}}>{fT(l.duration)}</div>
-                <div style={{width:40,color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
-                <div style={{width:36,color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc.toFixed(1):(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG.toFixed(1):"—")}</div>
-                <div style={{width:40,color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts.toFixed(1):"—"}</div>
-                <div style={{width:32,color:C.txM}}>{l.efficiency.toFixed(0)}%</div>
+                <div style={{width:"14ch",flexShrink:0,color:C.txt,fontWeight:600,fontSize:10,fontFamily:"ui-monospace,Menlo,monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={`${l.from} → ${l.to}`}>{l.from}→{l.to}</div>
+                <div style={{width:"5.5ch",flexShrink:0,color:tc,fontWeight:600,textTransform:"uppercase",fontSize:10}}>{l.type}</div>
+                <div style={{width:"6ch",flexShrink:0,textAlign:"right",color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts)?l.chordProgressKts.toFixed(1):"—"}</div>
+                <div style={{width:"8ch",flexShrink:0,textAlign:"right",color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>{m2nm(l.distance).toFixed(2)}</div>
+                <div style={{width:"5ch",flexShrink:0,textAlign:"right",color:C.acc,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgSpeed.toFixed(1)}</div>
+                <div style={{width:"5ch",flexShrink:0,textAlign:"right",color:C.up,fontFamily:"'JetBrains Mono',monospace"}}>{showVmg&&vmgVal!=null&&Number.isFinite(vmgVal)?vmgVal.toFixed(1):"—"}</div>
+                <div style={{width:"5ch",flexShrink:0,textAlign:"right",color:C.gld,fontFamily:"'JetBrains Mono',monospace"}}>{l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc.toFixed(1):"—"}</div>
+                <div style={{width:"6ch",flexShrink:0,textAlign:"right",color:C.txM,fontFamily:"'JetBrains Mono',monospace"}}>{l.efficiency!=null&&Number.isFinite(l.efficiency)?`${Math.round(l.efficiency)}%`:"—"}</div>
               </div>);
             })}
 
@@ -7104,8 +7135,12 @@ function App(){
               {["upwind","downwind","reach"].map(type=>{
                 const tl=a.legs.filter(l=>l.type===type);if(!tl.length)return null;
                 const as2=tl.reduce((s,l)=>s+l.avgSpeed,0)/tl.length;
-                const vmcVals=tl.map(l=>(l.avgVmc!=null&&Number.isFinite(l.avgVmc)?l.avgVmc:l.avgVMG)).filter(x=>x!=null&&Number.isFinite(x));
+                const vmcVals=tl.map(l=>l.avgVmc).filter(x=>x!=null&&Number.isFinite(x));
                 const av=vmcVals.length?vmcVals.reduce((s,x)=>s+x,0)/vmcVals.length:0;
+                const vmgVals=(type==="upwind"||type==="downwind")
+                  ?tl.map(l=>(l.avgVmgToWind!=null&&Number.isFinite(l.avgVmgToWind)?l.avgVmgToWind:(l.avgVMG!=null&&Number.isFinite(l.avgVMG)?l.avgVMG:null))).filter(x=>x!=null&&Number.isFinite(x))
+                  :[];
+                const avVmg=vmgVals.length?vmgVals.reduce((s,x)=>s+x,0)/vmgVals.length:null;
                 const ac=tl.filter(l=>l.chordProgressKts!=null&&Number.isFinite(l.chordProgressKts));
                 const avChord=ac.length?ac.reduce((s,l)=>s+l.chordProgressKts,0)/ac.length:0;
                 const ae=tl.reduce((s,l)=>s+l.efficiency,0)/tl.length;
@@ -7114,7 +7149,8 @@ function App(){
                   <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",color:tc2,marginBottom:8}}>{type} ({tl.length})</div>
                   <div style={{fontSize:10,color:C.txM,lineHeight:2}}>
                     Avg spd: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{as2.toFixed(1)}kts</span><br/>
-                    Avg VMC: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{av.toFixed(1)}kts</span><br/>
+                    {avVmg!=null&&Number.isFinite(avVmg)?<>Avg VMG: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{avVmg.toFixed(1)}kts</span><br/></>:null}
+                    Avg VMC: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{vmcVals.length?av.toFixed(1):"—"}kts</span><br/>
                     {ac.length>0?<>Mean chord: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{avChord.toFixed(1)}nm/h</span><br/></>:null}
                     Eff: <span style={{color:C.txt,fontFamily:"'JetBrains Mono',monospace"}}>{ae.toFixed(0)}%</span>
                   </div>
