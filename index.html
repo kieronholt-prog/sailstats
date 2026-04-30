@@ -64,7 +64,7 @@ const DEFAULT_SF_LINE_ENDS={
   endB:{lat:50.851762,lon:-1.307463},
 };
 /** Display + release tag (shown on login / home pad). Bump when shipping UI or analysis fixes. */
-const SAILSTATS_APP_VERSION="1.6.8";
+const SAILSTATS_APP_VERSION="1.6.9";
 /** Default “Start Time” (HMS after first GPS point) on Course Setup. */
 const DEFAULT_RACE_START_TEXT="18:30:00";
 /** User setting: GPS antenna offset forward to bow (m), persisted in localStorage. */
@@ -496,11 +496,22 @@ function buildOneSidedGateFC(orderedMarks,halfLenM=180,sfEnds=null){
     seen.add(key);
     const gi=++gNum;
     const name=String(m.name||"?");
-    const ps=` \u00b7${tack}`;
-    const tag=`One-sided gate ${shortN(name)} ${Math.round(res.gateBearingTwd*10)/10}\u00b0T${ps} \u00b7L${Number(m.lap)|0}`;
+    let fromLab=null,toLab=null;
+    if(mi>0){
+      const pr=orderedMarks[mi-1];
+      const pn=String(pr.name||"");
+      fromLab=pn==="START"?"S/F":shortN(pn||"?");
+    }else if(sfMid)fromLab="S/F";
+    if(mi+1<orderedMarks.length){
+      const nx=orderedMarks[mi+1];
+      const nn=String(nx.name||"");
+      toLab=nn==="FINISH"?"S/F":shortN(nn||"?");
+    }else if(sfMid)toLab="S/F";
+    const sideLab=tack==="P"?"Port":"Stbd";
+    const tag=fromLab&&toLab?`${fromLab} → ${toLab} · ${sideLab}`:`${shortN(name)} · ${sideLab}`;
     feats.push({type:"Feature",properties:{kind:"oneSided",g:gi,name,mark:name,lap:Number(m.lap)||0,gateDeg:res.gateBearingTwd,tack,tag},geometry:{type:"LineString",coordinates:seg}});
     const midLon=(seg[0][0]+seg[1][0])/2,midLa=(seg[0][1]+seg[1][1])/2;
-    {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"oneSided"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
+    {const p=nudgeGLabelM(midLa,midLon,gi);feats.push({type:"Feature",properties:{kind:"gLbl",g:gi,tag,sub:"gate"},geometry:{type:"Point",coordinates:[p.lon,p.lat]}});}
   }
   return{type:"FeatureCollection",features:feats};
 }
